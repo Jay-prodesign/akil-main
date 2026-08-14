@@ -8,7 +8,7 @@
 - **Previous Engineer / Handoff From:** None — first task in repository.
 - **Branch:** `claude/AKI-GIT-001-repo-bootstrap`
 - **Base Commit:** `8a95c721024da4bfee99e082a01e34b86321637f` (main, "Create README.md")
-- **Latest Pushed Checkpoint SHA:** _(filled in Finish step, after commit — see Commit/PR/Evidence below)_
+- **Latest Pushed Checkpoint SHA:** `2d435f119ea8692a6b38184462374c2f6dd8593f` ("Update README.md" — last content commit before this record's own finalize-edit; see PR #1 commit list for the full 16-commit history)
 - **Working Tree State:** Clean at handoff — all changes committed to the task branch via GitHub, nothing staged/uncommitted outside Git.
 
 ## Scope
@@ -55,7 +55,7 @@ No CI, lint, or test infrastructure exists yet in this repository (by design —
 ## Checks Run + Results
 
 - Live repository inspection (pre-change): confirmed `Jay-prodesign/akil-main`, Private, default branch `main`, 1 branch, 0 tags, 1 commit (`8a95c72…`), no open PRs, no pre-existing governance files, no unexplained product source. Result: **no conflict found**, safe to proceed.
-- Post-change self-review against the Validation checklist in the task instructions (file-by-file, see QA Evidence Bundle). Result: **pass**.
+- Post-change self-review against the Validation checklist in the task instructions (file-by-file, via PR #1 "Files changed" view). Result: **pass** — 16 files changed, 508 additions, 0 deletions, all pure additions matching the authorized Scope list exactly; no `package.json`, `src/`, database/queue/CI/deploy config, secret values, or AI Commerce content present.
 
 ## QA Context Class
 
@@ -63,14 +63,15 @@ Documentation/governance bootstrap — no runtime, no UI, no data. Standard stru
 
 ## QA Evidence Bundle
 
-- Screenshot/read of live repo state prior to change (owner/name/visibility/branch/commit/PR count) captured via browser inspection on 2026-08-14.
-- File-by-file diff on the task branch, reviewed against Scope/Non-Scope lists above (see Commit/PR/Evidence for the PR link containing the actual diff).
-- Grep-equivalent manual check: no `package.json`, no `src/`, no `.env` with real values, no framework/database/queue references, no AI Commerce/Shopify content introduced.
+- Live repo state prior to change (owner/name/visibility/branch/commit/PR count) confirmed via browser inspection on 2026-08-14: `Jay-prodesign/akil-main`, Private, default branch `main`, base commit `8a95c721024da4bfee99e082a01e34b86321637f`, 1 branch, 0 open PRs.
+- Full diff reviewed via PR #1 (`https://github.com/Jay-prodesign/akil-main/pull/1`) "Files changed" tab: 16 files, +508/-0, file tree matches Scope list exactly.
+- Manual check: no `package.json`, no `src/`, no `.env` with real values, no framework/database/queue references, no AI Commerce/Shopify content introduced.
 
 ## Implementation Notes
 
 - Used Claude in Chrome (GitHub web UI) to create the branch and commit files directly, since no GitHub MCP connector or `gh`/git credential was available in the execution sandbox (direct `git clone` over the sandbox network was blocked; no GitHub connector exists in the connector registry). This was confirmed with the Owner before proceeding. Model tier: Tier B (normal engineering work) per `MODEL_POLICY.md` — this task is mechanical/structural, not deep-reasoning.
 - Root `README.md` content was extended (not replaced) to preserve the pre-existing description line.
+- 16 commits total on the branch (one per file, plus this record's own finalize-edit). All commits show as "Verified" in GitHub.
 
 ## Known Limitations / Issues
 
@@ -80,18 +81,18 @@ Documentation/governance bootstrap — no runtime, no UI, no data. Standard stru
 
 ## Blocked On
 
-Nothing — task is implemented and ready for ChatGPT verification.
+Nothing — task is implemented, draft PR is open, and it is ready for ChatGPT verification.
 
 ## Next Exact Action
 
-**Repository-native Codex continuity readback** (not product coding): the next engineer (Codex or Claude) picking this up should read, in order, `AGENTS.md` → `docs/engineering/CURRENT_STATE.md` → this execution record → `git log` on `claude/AKI-GIT-001-repo-bootstrap`, and confirm branch name, checkpoint SHA, and scope match what's recorded here. No further action is authorized on this task until ChatGPT/Owner verification moves it to `VERIFIED`/`COMPLETED`, or until ChatGPT/Owner assigns a new task (e.g. AKI-BE-001). Do not begin backend/product work.
+**Repository-native Codex continuity readback** (not product coding): the next engineer (Codex or Claude) picking this up should read, in order, `AGENTS.md` → `docs/engineering/CURRENT_STATE.md` → this execution record → `git log` on `claude/AKI-GIT-001-repo-bootstrap` (or PR #1's commit list), and confirm branch name, checkpoint SHA, and scope match what's recorded here. No further action is authorized on this task until ChatGPT/Owner verification moves it to `VERIFIED`/`COMPLETED`, or until ChatGPT/Owner assigns a new task (e.g. AKI-BE-001). Do not begin backend/product work. Do not merge PR #1.
 
 ## Commit / PR / Evidence
 
 - Branch: `claude/AKI-GIT-001-repo-bootstrap`
-- PR: _(filled in Finish step below, once opened)_
-- Checkpoint SHA: _(filled in Finish step below, once committed)_
-- Changed files: see Scope list above (full list committed on the task branch).
+- PR: `#1` — `https://github.com/Jay-prodesign/akil-main/pull/1` (Draft, "Not ready", not merged)
+- Checkpoint SHA: `2d435f119ea8692a6b38184462374c2f6dd8593f`
+- Changed files: 16 files, +508/-0 (see PR #1 "Files changed" for the full diff; see Scope list above for the file list).
 
 ## ChatGPT Verification
 
