@@ -11,7 +11,7 @@ Last updated: 2026-08-14, by Claude (Primary Engineer), task AKI-GIT-001.
 
 ## What exists
 
-- `README.md` (pre-existing, 1 commit, unmodified by this task).
+- `README.md` (pre-existing content preserved; navigation section added by AKI-GIT-001).
 - The repository-local engineering operating contract created by AKI-GIT-001: `AGENTS.md`, `CLAUDE.md`, and the `docs/engineering/`, `docs/architecture/ADR/`, `docs/specs/`, `docs/exec-plans/` structure.
 - No `src/`, no application/package manifest, no framework, no database/migrations, no CI, no deployment infrastructure. None of this has been created — see `docs/exec-plans/active/AKI-GIT-001.md` hard non-scope.
 
@@ -24,7 +24,7 @@ Last updated: 2026-08-14, by Claude (Primary Engineer), task AKI-GIT-001.
 
 ## Active tasks
 
-- `AKI-GIT-001` — Pre-build repository bootstrap. Status: see `docs/exec-plans/active/AKI-GIT-001.md`.
+- `AKI-GIT-001` — Pre-build repository bootstrap. Status: IMPLEMENTED, draft PR open. See `docs/exec-plans/active/AKI-GIT-001.md`. PR: `https://github.com/Jay-prodesign/akil-main/pull/1` (draft, not merged).
 
 ## Completed tasks
 
