@@ -3,7 +3,7 @@
 - **Task ID:** AKI-BE-001
 - **Project:** AKILTA (repository: `Jay-prodesign/akil-main`)
 - **Goal:** Create the minimum provider-neutral authoritative domain foundation needed for AKILTA to own customer/project/outcome/evidence state safely, supporting later stage-gated capabilities without rewriting the core. Not a full CRM, client portal, billing platform, AI agent stack, or AI Commerce implementation.
-- **Status:** `IN_PROGRESS` — moved from `READY` after a fresh re-read of the reconciled repository state confirmed internal consistency (AKI-GIT-001 record unchanged at `IMPLEMENTED — READY FOR CHATGPT VERIFICATION`, this document's own BUILD-001/DEC-131 reasoning matches). Scope of `IN_PROGRESS`: implementation-order step 2 (toolchain) plus the first slice of step 3 (`TenantScope` + T1) only — see "Implementation Order" below.
+- **Status:** `IN_PROGRESS` — same authorized scope as the prior checkpoint (implementation-order step 3, now further along: `TenantScope` + `Customer` + `Project` + tenant-scoped repository port). No new owner gate crossed. See "Implementation Checkpoint" entries below.
 - **Current Engineer:** Claude (Primary Engineer). Codex is Secondary/Backup/selective reviewer. ChatGPT is orchestrator/final verifier.
 - **Previous Engineer / Handoff From:** None — first implementation task, following `AKI-GIT-001` (repository bootstrap).
 - **Branch:** `claude/AKI-BE-001-task-packet`
@@ -115,7 +115,7 @@ RG-01 Tenant scope swap (A+B cross-reference fails closed). RG-02 Unscoped acces
 9. Self-review scope/dependency/secret/AI-Commerce isolation; update execution record.
 10. Push checkpoint, open draft PR if available, mark no higher than `IMPLEMENTED`, surface evidence to ChatGPT.
 
-**This session executes only step 1 (done, this reconciliation) and step 2 plus the first slice of step 3 (`TenantScope` construction + validation, proving T1) — a single bounded first implementation, not the full ten-step sequence.** Steps 3 (remainder)–10 are explicitly deferred to subsequent, separately-reported checkpoints. No merge, no deploy, no scope expansion beyond this.
+**Each session executes one bounded slice of this sequence at a time, committed and reported separately, not the full ten-step sequence in one pass.** Progress so far: step 1 (execution record/branch) and step 2 (toolchain) are done; step 3 (`TenantScope` + `Customer` + `Project` + tenant-scoped repository port) is now complete. Steps 4–10 remain deferred to subsequent, separately-reported checkpoints. No merge, no deploy, no scope expansion beyond the current checkpoint at any point.
 
 ## Definition of Done (full task — not this session's bounded slice)
 
@@ -135,10 +135,26 @@ This slice is secret-free/non-production but establishes tenant-isolation, permi
 - **Scope discipline:** only `TenantScope` was implemented. `Customer`, `Project`, `OutcomeJob` (+ lifecycle), `EvidenceReference`/`VerificationResult`, and `AuditEvent` are explicitly **not** implemented in this checkpoint — see "Next Exact Action."
 - **Status after this checkpoint:** `IN_PROGRESS` (not `IMPLEMENTED` — this is a partial slice of the full task, not task completion). Not merged, not deployed.
 
+## Implementation Checkpoint — Customer + Project + Tenant-Scoped Repository Port (2026-08-16)
+
+- **What was implemented:** completes implementation-order step 3.
+  - `src/domain/customer.ts` — `Customer` value type, `createCustomer` factory, `InvalidCustomerError`. Scoped to exactly one `TenantScope`.
+  - `src/domain/project.ts` — `Project` value type, `createProject` factory, `InvalidProjectError`. Belongs to exactly one `tenantId` + `customerId`; rejects at construction time if the given `Customer` does not belong to the given `TenantScope` (T2 / RG-01 tenant-scope-swap, enforced structurally, not just tested).
+  - `src/ports/customer-repository.ts` — `CustomerRepository` port; every lookup method requires a `TenantScope` argument — no bare `findById(id)`-style accessor exists on the interface (RG-02, enforced by the type signature itself).
+  - `src/application/in-memory-customer-repository.ts` — `InMemoryCustomerRepository`, the in-memory test adapter required by the Runtime/Persistence Boundary (production storage remains deferred).
+- **Dependencies added:** none (no new packages).
+- **Test evidence:** `tests/customer.test.ts` (4 cases), `tests/project.test.ts` (4 cases, including the RG-01 tenant-scope-swap rejection), `tests/in-memory-customer-repository.test.ts` (3 cases, including T2/RG-01 cross-tenant lookup returning `undefined`). Combined with the prior checkpoint's `tests/tenant-scope.test.ts` (7 cases): **18/18 pass** (`npm run test` → `node --test dist/tests/*.test.js`).
+- **Typecheck evidence:** `npx tsc -p tsconfig.json --noEmit` → **pass**, strict mode, no errors.
+- **RG-02 verification method:** structural/compile-time (the `CustomerRepository` interface has no method accepting a bare `customerId` without a `TenantScope`), not a runtime test — noted explicitly per this repo's evidence standard (a compile-time guarantee is real evidence, but a different kind than a passing test, and is named as such here rather than conflated with one).
+- **Non-scope/secret/AI-Commerce isolation check:** `grep` across all of `src/` and `tests/` for `akilta-commerce`/`shopify`/`ticimax`/`password`/`api key`/`secret`/private-key markers → no matches. No new dependencies, so no new supply-chain surface.
+- **Design note on `Project.state`:** modeled as a free-form required non-empty string, not a fixed enum — the source packet defines a canonical lifecycle only for `OutcomeJob` (`DRAFT -> ... -> CLOSED`), not for `Project`. Inventing a `Project`-state enum not present in the canonical scope would be exactly the kind of unsourced business-requirement fabrication this task's evidence standard prohibits; this is flagged here rather than silently guessed.
+- **Scope discipline:** `OutcomeJob` (+ lifecycle), `EvidenceReference`/`VerificationResult`, and `AuditEvent` remain **not implemented** — see "Next Exact Action."
+- **Status after this checkpoint:** `IN_PROGRESS` (still not `IMPLEMENTED` — partial slice, not task completion). Not merged, not deployed.
+
 ## Blocked On
 
-Nothing for this session's bounded slice (toolchain + `TenantScope` + T1 — complete, see checkpoint above). The remaining implementation order (steps 3(remainder)–10: `Customer`/`Project`, `OutcomeJob` lifecycle, evidence/verification, authority classification, `AuditEvent`, full T1–T12+RG suite, self-review, checkpoint/PR/evidence surfacing) is blocked only on continued, separately-authorized, bounded sessions — not on any open approval gate.
+Nothing for this session's bounded slice (step 3, now complete — see checkpoint above). The remaining implementation order (steps 4–10: `OutcomeJob` lifecycle, evidence/verification, authority classification, `AuditEvent`, full T1–T12+RG suite, self-review, checkpoint/PR/evidence surfacing) is blocked only on continued, separately-authorized, bounded sessions — not on any open approval gate.
 
 ## Next Exact Action
 
-After this reconciliation commit is pushed, re-read the repository fresh. If internally consistent (this document self-consistent with `AGENTS.md`, `CLAUDE.md`, `docs/engineering/ACCEPTANCE_CRITERIA.md`, and the AKI-GIT-001 record it depends on), move Status to `IN_PROGRESS` and execute exactly: minimal strict TypeScript/`node:test` toolchain, then `TenantScope` construction with validation proving T1. Commit and push that as a separate, clearly-labeled implementation checkpoint. Do not implement Customer/Project/OutcomeJob/Evidence/Audit in this same session — those are separate, subsequent bounded steps per the Implementation Order above. Do not merge to `main`. Do not deploy. Mark no higher than `IMPLEMENTED` at full-task completion, never `VERIFIED`/`COMPLETED` (Claude's authority ceiling, `AGENTS.md` §10).
+Continue with implementation-order step 4: `OutcomeJob` state + deterministic transition policy (`DRAFT -> QUALIFIED -> READY -> EXECUTING -> VERIFYING -> VERIFIED -> CLOSED`, plus exception states `BLOCKED / RECOVERING / ESCALATED / STOPPED`), covering T3/T4 (invalid transitions rejected; `EXECUTING` cannot jump directly to `CLOSED`) and RG-03 (lifecycle negative-transition matrix). Do not implement `EvidenceReference`/`VerificationResult`/`AuditEvent`/authority classification in the same session — those remain separate, subsequent bounded steps (T5/T6 in particular need `EvidenceReference`/`VerificationResult` to exist first, so the `VERIFIED` gate is implemented together with step 5, not step 4). Commit and push each bounded checkpoint separately, with test/typecheck evidence, as done here. Do not merge to `main`. Do not deploy. Mark no higher than `IMPLEMENTED` at full-task completion, never `VERIFIED`/`COMPLETED` (Claude's authority ceiling, `AGENTS.md` §10).
