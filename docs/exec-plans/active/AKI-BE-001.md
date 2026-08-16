@@ -3,7 +3,7 @@
 - **Task ID:** AKI-BE-001
 - **Project:** AKILTA (repository: `Jay-prodesign/akil-main`)
 - **Goal:** Create the minimum provider-neutral authoritative domain foundation needed for AKILTA to own customer/project/outcome/evidence state safely, supporting later stage-gated capabilities without rewriting the core. Not a full CRM, client portal, billing platform, AI agent stack, or AI Commerce implementation.
-- **Status:** `READY` (reconciled from canonical Drive source; see "Next Exact Action" for the IN_PROGRESS transition, performed after a fresh re-read of this reconciled state)
+- **Status:** `IN_PROGRESS` — moved from `READY` after a fresh re-read of the reconciled repository state confirmed internal consistency (AKI-GIT-001 record unchanged at `IMPLEMENTED — READY FOR CHATGPT VERIFICATION`, this document's own BUILD-001/DEC-131 reasoning matches). Scope of `IN_PROGRESS`: implementation-order step 2 (toolchain) plus the first slice of step 3 (`TenantScope` + T1) only — see "Implementation Order" below.
 - **Current Engineer:** Claude (Primary Engineer). Codex is Secondary/Backup/selective reviewer. ChatGPT is orchestrator/final verifier.
 - **Previous Engineer / Handoff From:** None — first implementation task, following `AKI-GIT-001` (repository bootstrap).
 - **Branch:** `claude/AKI-BE-001-task-packet`
@@ -125,9 +125,19 @@ Cannot be `VERIFIED` unless T1–T12 plus applicable RG-01..RG-07 pass; the QA b
 
 This slice is secret-free/non-production but establishes tenant-isolation, permission, lifecycle-verification, and audit/learning-safety invariants later modules will trust. ChatGPT verification must not rely on an isolated diff alone — a full QA Evidence Bundle (task ID, acceptance criteria, base/checkpoint SHA, diff reference, changed-file list, strict-TS/typecheck/build results, complete T1–T12 results, affected contracts/interfaces, dependency delta, secret/non-scope/AI-Commerce isolation result, known limitations, engineer status) is required at task completion — not at this session's bounded checkpoint.
 
+## Implementation Checkpoint — Bounded First Slice (2026-08-16)
+
+- **What was implemented:** minimal strict-TypeScript/`node:test` toolchain (`package.json`, `tsconfig.json`, `package-lock.json`), plus `src/domain/tenant-scope.ts` (`TenantScope` value type, `createTenantScope` factory, `InvalidTenantScopeError`).
+- **Dependencies added:** `typescript` (devDependency), `@types/node` (devDependency). No runtime dependencies. No web framework, ORM, DI container, validation framework, or cloud SDK.
+- **Test evidence:** `tests/tenant-scope.test.ts` — 7 cases covering T1 (valid construction; rejects `undefined`, `null`, empty string, whitespace-only string, non-string input, and leading/trailing-whitespace input). Result: **7/7 pass** (`npm run test` → `node --test dist/tests/*.test.js`).
+- **Typecheck evidence:** `npx tsc -p tsconfig.json --noEmit` → **pass**, strict mode, no errors.
+- **Non-scope/secret/AI-Commerce isolation check:** no `.env`, no credentials, no HTTP/DB/queue/cloud dependency, no `akilta-commerce` reference, no commerce-domain concept (SKU/order/catalog/etc.) in any added file. `package-lock.json` contains only public npm registry metadata (versions/URLs/integrity hashes) — no secret values.
+- **Scope discipline:** only `TenantScope` was implemented. `Customer`, `Project`, `OutcomeJob` (+ lifecycle), `EvidenceReference`/`VerificationResult`, and `AuditEvent` are explicitly **not** implemented in this checkpoint — see "Next Exact Action."
+- **Status after this checkpoint:** `IN_PROGRESS` (not `IMPLEMENTED` — this is a partial slice of the full task, not task completion). Not merged, not deployed.
+
 ## Blocked On
 
-Nothing for this session's bounded slice (toolchain + `TenantScope` + T1). The remaining implementation order (steps 3(remainder)–10) is blocked only on continued, separately-authorized, bounded sessions — not on any open approval gate.
+Nothing for this session's bounded slice (toolchain + `TenantScope` + T1 — complete, see checkpoint above). The remaining implementation order (steps 3(remainder)–10: `Customer`/`Project`, `OutcomeJob` lifecycle, evidence/verification, authority classification, `AuditEvent`, full T1–T12+RG suite, self-review, checkpoint/PR/evidence surfacing) is blocked only on continued, separately-authorized, bounded sessions — not on any open approval gate.
 
 ## Next Exact Action
 
