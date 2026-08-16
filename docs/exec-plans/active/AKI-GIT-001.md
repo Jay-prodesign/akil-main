@@ -3,13 +3,17 @@
 - **Task ID:** AKI-GIT-001
 - **Project:** AKILTA (repository: `Jay-prodesign/akil-main`)
 - **Goal:** Bootstrap the minimum repository-local engineering operating contract (AGENTS.md, CLAUDE.md, `docs/engineering/*`, `docs/architecture/ADR/`, `docs/specs/`, `docs/exec-plans/*`, `.gitignore`, README navigation) required for safe Claude/Codex/ChatGPT continuity. No product/backend code.
-- **Status:** IMPLEMENTED
+- **Status:** IMPLEMENTED — READY FOR CHATGPT VERIFICATION
 - **Current Engineer:** Claude (Primary Engineer)
 - **Previous Engineer / Handoff From:** None — first task in repository.
 - **Branch:** `claude/AKI-GIT-001-repo-bootstrap`
 - **Base Commit:** `8a95c721024da4bfee99e082a01e34b86321637f` (main, "Create README.md")
-- **Latest Pushed Checkpoint SHA:** `2d435f119ea8692a6b38184462374c2f6dd8593f` ("Update README.md" — last content commit before this record's own finalize-edit; see PR #1 commit list for the full 16-commit history)
+- **Latest Pushed Checkpoint SHA:** `315934a5c5c23b072f3945bf63d9b97c2f5b1498` ("Update CURRENT_STATE.md" — verified as live branch HEAD during the clean, read-only PROVISIONAL CONTINUITY READBACK run on 2026-08-16; see "Checkpoint SHA Semantics" and "Continuity Verification Record" below)
 - **Working Tree State:** Clean at handoff — all changes committed to the task branch via GitHub, nothing staged/uncommitted outside Git.
+
+## Checkpoint SHA Semantics
+
+The **Latest Pushed Checkpoint SHA** above records a specific, verified repository snapshot — the commit independently confirmed as live branch HEAD during a clean, repository-only continuity run. It is intentionally **not** a self-referential "always equal to current live HEAD" field: the commit that edits this record to update its own checkpoint value necessarily produces a new HEAD, so an execution-record edit and the live branch HEAD are not required to be bit-identical at every instant. Each session resolves the live branch HEAD independently via a fresh `git fetch`/`git log` (per `AGENTS.md` §2 session order) rather than assuming this recorded value is still current; treat this field as the last verified checkpoint, not a live pointer. A drift between this field and live HEAD consisting only of subsequent metadata-only execution-record commits is expected and is not, by itself, a defect.
 
 ## Scope
 
@@ -91,8 +95,19 @@ Nothing — task is implemented, draft PR is open, and it is ready for ChatGPT v
 
 - Branch: `claude/AKI-GIT-001-repo-bootstrap`
 - PR: `#1` — `https://github.com/Jay-prodesign/akil-main/pull/1` (Draft, "Not ready", not merged)
-- Checkpoint SHA: `2d435f119ea8692a6b38184462374c2f6dd8593f`
-- Changed files: 16 files, +508/-0 (see PR #1 "Files changed" for the full diff; see Scope list above for the file list).
+- Checkpoint SHA: `315934a5c5c23b072f3945bf63d9b97c2f5b1498` (verified live HEAD during the clean PROVISIONAL CONTINUITY READBACK run, 2026-08-16 — see Checkpoint SHA Semantics above)
+- Changed files (original bootstrap scope): 16 files, +508/-0 (see PR #1 "Files changed" for the full diff; see Scope list above for the file list).
+- Reconciliation commit (2026-08-16): metadata-only checkpoint-SHA correction and continuity-verification record on `docs/engineering/CURRENT_STATE.md` and `docs/exec-plans/active/AKI-GIT-001.md` — both already within the authorized Scope list above. No new files, no code, no scope change.
+
+## Continuity Verification Record
+
+### Clean Provisional Continuity Readback — 2026-08-16
+
+- Result: **PROVISIONAL CONTINUITY READBACK: PASS**
+- Scope of this pass: a read-only, repository-only reconstruction of task/status/branch/SHA/scope/next-action from live repository state (`AGENTS.md` → `CLAUDE.md` → `docs/engineering/CURRENT_STATE.md` → this execution record → branch/PR commit history), performed without reliance on prior chat history or prior reports. This is evidence of **repository / chat-history independence only**.
+- Verified checkpoint: branch HEAD `315934a5c5c23b072f3945bf63d9b97c2f5b1498` was independently confirmed live via a fresh `git fetch` and a live PR #1 API read during the clean run. No other mismatch was found between this record and live repository state.
+- **Not yet proven:** Claude↔Codex cross-model continuity / portability. This run only exercised Claude re-reading repository state from scratch; it did not exercise a second, independent model (Codex) reconstructing the same state from the same repository artifacts.
+- **Claude↔Codex cross-model continuity drill: DEFERRED — NOT WAIVED.** Codex is not currently accessible in this environment. The drill remains a required, outstanding verification step and must be run separately once Codex access is restored. It is not satisfied, superseded, or implied by this provisional pass.
 
 ## ChatGPT Verification
 
