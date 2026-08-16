@@ -1,79 +1,134 @@
-# AKI-BE-001 — Backend Build: Task Packet (Not Started)
+# AKI-BE-001 — Backend Foundation First Implementation Candidate
 
 - **Task ID:** AKI-BE-001
 - **Project:** AKILTA (repository: `Jay-prodesign/akil-main`)
-- **Goal:** _Not yet defined._ No canonical product/technical spec for AKI-BE-001 exists in this repository (`docs/specs/` is empty scaffolding — see `docs/specs/README.md`) or has been provided to the implementing engineer. This packet is a placeholder execution record only, created so the task exists as a trackable repository artifact ahead of scoping — it does not itself authorize or define implementation.
-- **Status:** `BACKLOG`
-- **Current Engineer:** Unassigned — no implementation work has started, and none is authorized to start under this packet.
-- **Previous Engineer / Handoff From:** None. Follows `AKI-GIT-001` (repository bootstrap) as the next task named in that task's execution record, per Owner instruction.
-- **Branch:** `claude/AKI-BE-001-task-packet` (this packet only; a fresh implementation branch would be created separately once/if this task moves to `IN_PROGRESS`)
-- **Base:** Branched from `claude/AKI-GIT-001-repo-bootstrap` @ `36150adf1394349d2543c0503b2fdd39dd380aff`, since the governance/doc scaffolding this packet depends on (`AGENTS.md`, `docs/engineering/`, `docs/exec-plans/`) currently exists only on that branch and has not yet merged to `main`.
-- **Working Tree State:** Clean — this file is the only change on this branch.
+- **Goal:** Create the minimum provider-neutral authoritative domain foundation needed for AKILTA to own customer/project/outcome/evidence state safely, supporting later stage-gated capabilities without rewriting the core. Not a full CRM, client portal, billing platform, AI agent stack, or AI Commerce implementation.
+- **Status:** `READY` (reconciled from canonical Drive source; see "Next Exact Action" for the IN_PROGRESS transition, performed after a fresh re-read of this reconciled state)
+- **Current Engineer:** Claude (Primary Engineer). Codex is Secondary/Backup/selective reviewer. ChatGPT is orchestrator/final verifier.
+- **Previous Engineer / Handoff From:** None — first implementation task, following `AKI-GIT-001` (repository bootstrap).
+- **Branch:** `claude/AKI-BE-001-task-packet`
+- **Base:** Branched from `claude/AKI-GIT-001-repo-bootstrap` @ `36150adf1394349d2543c0503b2fdd39dd380aff`.
 
-## Hard Gate — Read Before Any Further Action
+## Provenance — This Reconciliation
 
-**Product/backend implementation is NOT authorized under this packet.** Per `AGENTS.md` §10 and `docs/engineering/PERMISSION_POLICY.md`, this task may not move past `BACKLOG`/`READY` into `IN_PROGRESS` until both of the following are satisfied:
+This execution record was reconciled against canonical Google Drive source documents on **2026-08-16**, read directly via the Drive connector in this session (not chat-relayed paraphrase). Source documents and independently-verified metadata:
 
-1. **BUILD-001 approval — ❌ NOT APPROVED.** See "BUILD-001 Approval" below — a prior in-session record of this as cleared has been corrected.
-2. **Concrete scope/requirements — 🟡 PARTIAL.** A one-line entity chain has been supplied directly in chat (see "Scope" below). The T1–T12 test list, detailed non-scope, implementation order, and evidence requirements referenced alongside it have not been supplied. Nothing in this section may be filled in from inference or plausible reconstruction — see "Known Limitation" below. Claude must not invent, guess, or backfill business requirements (`CLAUDE.md`: "must not, independently... redefine canonical business requirements").
+| Document | File ID | Owner | Created | Modified (at read time) |
+|---|---|---|---|---|
+| `02 — AKILTA Current Project State` | `1mXuoY0pcdfOMpS7j8CRxws_qYe8jPfOIwmQhgIxjpu0` | `safakkabadayi07@gmail.com` | 2026-07-25 | 2026-08-16T18:20:46Z |
+| `AKILTA — Backend Foundation First Implementation Candidate — AKI-BE-001 — 2026-08-13` | `1qpHJVdE7qIrDBynbD7fkNZwIiVCtR7XfFcEqnl9b47A` | `safakkabadayi07@gmail.com` | 2026-08-13 | 2026-08-16T18:00:14Z |
+| `03 — AJANS Decision Log & Governance Register` | `1heTjjTMVsJx2vT-bvIV7_K6aaKGgDfII0ksqgiJ_Aoo` | `safakkabadayi07@gmail.com` | 2026-07-25 | 2026-08-16T17:55:40Z |
 
-Until both gates clear with actually-sourced content, this file stays a packet, not a plan.
+The DEC-131/DEC-132 text is present, essentially verbatim, in both the Current Project State document and embedded as a superseding addendum inside the AKI-BE-001 packet document itself — cross-corroborated across two independently-fetched documents, not a single unverifiable source. This is recorded here as sourced repository evidence, distinct from the earlier chat-only claims in this task's history (see "Prior History" below) which were correctly not acted on at the time because they had no independently verifiable source.
 
 ## BUILD-001 Approval
 
-- **Status:** NOT APPROVED.
-- **History (for audit trail, per this repo's own evidence standard):**
-  1. 2026-08-16: a chat message describing itself as an Owner instruction stated the exact phrase `APPROVE BUILD-001` had been issued. This was recorded here as approved, attributed to that instruction.
-  2. 2026-08-16 (same session, later turn): a chat message describing itself as a "ChatGPT Orchestrator correction" stated BUILD-001 is NOT approved and that phrase has not actually been issued by the Founder. This record is corrected accordingly.
-- **Why this matters beyond the correction itself:** two contradictory claims about the same fact, each asserting a different authoritative source, arrived through the identical channel (this chat) with nothing in the repository to distinguish them. Neither claim is being treated as reliable on its own going forward. A BUILD-001 approval that is meant to gate real implementation work should be evidenced somewhere more durable than a chat turn — e.g. a PR comment/review, a signed record, or similar — before it's relied on again.
-- **Current status for this packet:** NOT APPROVED. Gate 1 is open.
+- **Status:** **APPROVED.**
+- **Canonical approval token:** `APPROVE BUILD-001`, per DEC-132 ("Founder Start Authorization / Current Execution State — 16 August 2026"): *"Canonical BUILD-001 approval token is now recorded: `APPROVE BUILD-001`. Founder explicitly instructed that BUILD-001 be opened and started..."*
+- **AKI-GIT-001 dependency, per DEC-131:** ChatGPT's own GitHub connector cannot see this private repository (a ChatGPT-side connector limitation, not a repository/Claude/Codex/Owner-side access failure). DEC-131 explicitly supersedes any requirement that ChatGPT directly read the repository or that AKI-GIT-001 reach independent `VERIFIED`/`COMPLETED` status before BUILD-001 readiness: *"Current engineering-environment worker state reports AKI-GIT-001 IMPLEMENTED; under DEC-131 that worker-attested engineering readiness may satisfy the BUILD dependency without ChatGPT direct repository readback."* AKI-GIT-001 therefore correctly **remains at `IMPLEMENTED — READY FOR CHATGPT VERIFICATION`** in its own execution record (unchanged by this document) — independent QA/verification of AKI-GIT-001 is a separate, still-open, non-blocking track, per DEC-131: *"Missing evidence does not block BUILD start, does not invalidate approved engineering work and does not block other non-dependent executable tasks."*
+- **AKI-BE-001 start status, per DEC-132:** *"CURRENT STATUS: START AUTHORIZED. The engineering worker may transition AKI-BE-001 to IN_PROGRESS in the private repository under the existing repository-native task protocol."*
 
-## Scope
+### Prior History (this task's record, kept for audit trail)
 
-Partial input received directly in this chat session on 2026-08-16 (not sourced from Drive — Drive access remains disconnected). Supplied as the AKI-BE-001 entity/data-model chain:
+Before Drive access was available in this session, this file recorded two contradictory chat-only claims about BUILD-001 (approved, then corrected to not-approved) — neither was acted on as a lifecycle-gating fact, consistent with this repo's evidence standard. This entry supersedes that state with an independently-sourced, cross-corroborated Drive record, not another chat assertion.
+
+## First-Slice Domain Semantics (current — supersedes earlier Organization/Customer wording)
+
+Per the AKI-BE-001 packet's "PRE-BUILD READINESS CORRECTION & DETERMINISTIC FIRST-SLICE CONTRACT" addendum: **do not** create a speculative `Organization`/Workspace aggregate for this task. The controlling first-slice chain is:
 
 ```
 TenantScope -> Customer -> Project -> OutcomeJob -> OutcomeJobStateTransition -> EvidenceReference / VerificationResult -> AuditEvent
 ```
 
-This is transcribed verbatim as given, with no elaboration or invented semantics for these entities — their fields, relationships, and behavior have not been specified. This alone does not constitute the "concrete scope/requirements" gate: still missing are the T1–T12 test list, non-scope specifics beyond the generic list below, implementation order, and evidence requirements referenced in the same instruction but not included in it. See "Known Limitation" below.
+- `TenantScope` / `tenant_id` — mandatory security/data-isolation partition carried by every record and application operation. A boundary identifier/context, not a full IAM/organization product.
+- `Customer` / `customer_id` — the AKILTA business/commercial customer identity inside one tenant scope, for this first slice.
+- `Project` — belongs to exactly one `tenant_id` + `customer_id`.
+- `OutcomeJob` — belongs to exactly one `tenant_id` + `customer_id` + `project_id`.
+- Evidence, verification, and audit records carry the same tenant/job correlation required to fail closed.
+- A richer `Organization`, multi-workspace hierarchy, or membership/team model is deferred until a real portal/IAM requirement activates it — do not infer it now.
 
-## Non-Scope (hard, applies regardless of future scope)
+## Runtime / Persistence Boundary (fixed)
 
-No implementation of any kind (backend/product code, `src/`, `package.json`/dependencies, framework/database/CI/deploy infrastructure) until both gates above clear with real, sourced content and evidence. No merge to `main`. No modification of `akilta-commerce` / AI Commerce (Invariant 6, `docs/engineering/ACCEPTANCE_CRITERIA.md`). No secrets/credentials.
+AKI-BE-001 is a **secret-free TypeScript domain/application kernel**, not a deployable backend service:
+- No HTTP server, REST/GraphQL endpoint, authentication provider, UI, or client portal.
+- No production database, ORM, migration, queue, cache, object storage, or cloud service.
+- No external API/provider integration and no real credential.
+- Persistence needed for tests goes through narrow repository/data-access ports with an **in-memory test adapter only**. Production storage selection is deferred.
+- Authorization in this slice is tenant context + READ/WRITE/EXECUTE/protected-action classification — not a full IAM product.
+- `AuditEvent` is an append-only domain contract, testable in-memory; durable production audit storage is deferred.
 
-## Acceptance Criteria
+## Minimum Product-Code Shape
 
-Not yet defined — depends on the full concrete scope (tests, non-scope, implementation order, evidence requirements), once actually transcribed. Once scope exists, this section must classify all seven Engineering Invariants (`docs/engineering/ACCEPTANCE_CRITERIA.md`) as `IN_SCOPE` / `NOT_APPLICABLE` / `DEFERRED-BY-ACTIVATION`, per `AGENTS.md` §8, before any implementation code is written.
+- One small Node/TypeScript package at repository root.
+- Package manager: `npm` (none exists yet in this repository).
+- TypeScript in **strict mode**.
+- Minimum dependency envelope: TypeScript compiler, Node type definitions, and one focused unit-test runner. This implementation uses Node's built-in `node:test` runner (Node `v22.22.2` is available in this environment) specifically to avoid adding a test-runner dependency at all — the minimum possible dependency set. No web framework, ORM, DI container, validation framework, or cloud SDK.
+- Source boundaries: `src/domain/`, `src/application/`, `src/ports/`; tests in `tests/`.
+- Commit the generated package lock. No fake/no-op scripts — only scripts that actually run typecheck/tests.
+- No `.env` required for this task.
 
-## Authorities / Specs
+## Scope (Minimum Domain Objects)
 
-- Referenced by `docs/exec-plans/active/AKI-GIT-001.md` ("Next Exact Action") as the anticipated next task.
-- Canonical requirements are stated (via chat instructions on 2026-08-16) to exist in a Google Drive AKI-BE-001 task packet. `docs/engineering/REFERENCE_SOURCES.md` still has no Drive link populated for it. Only the entity chain above has actually been supplied to the implementing engineer; the rest, once the link and/or content is provided, should be mirrored into `docs/specs/` before implementation begins.
+1. **Customer** — stable `customer_id`; tenant scope; minimum business/display identity metadata; no unnecessary PII.
+2. **Project** — stable `project_id`; `customer_id` + `tenant_id`; project state and accountable owner reference. No portal UI, invoicing, or support-ticket implementation.
+3. **OutcomeJob** — stable `job_id`; `tenant_id`/`customer_id`/`project_id`; `job_family` + version; business objective and intended verifiable outcome references; precondition status; scope/authority summary references; current lifecycle state; created/updated/version metadata.
+4. **OutcomeJob lifecycle** — main path `DRAFT -> QUALIFIED -> READY -> EXECUTING -> VERIFYING -> VERIFIED -> CLOSED`; exception states `BLOCKED / RECOVERING / ESCALATED / STOPPED`. Transitions must be deterministic and validated. `VERIFIED` cannot be reached merely because an executor/tool reports success — required verification evidence must exist. This is the single canonical lifecycle; the implementation must not invent a second one.
+5. **EvidenceReference / VerificationResult** — `evidence_id`/`job_id`; evidence type/class; source/reference locator (never embedded secret material); captured-at/freshness metadata; verification requirement reference; verification status/result + limitation/failure metadata.
+6. **AuditEvent** — immutable/append-only at domain-contract level; `event_id`, tenant, actor/system ref, job/project ref, event type, timestamp, relevant policy/permission/approval/evidence refs; no secret values or unnecessary raw payloads.
 
-## Dependencies
+Verification/evidence/audit semantics stay **distinct** — execution/tool success is not verification; evidence supports a claim; audit records lineage. These must not collapse into one generic log/result object.
 
-- `AKI-GIT-001` (repository bootstrap) — providing the governance contract this packet is written against. Not yet `VERIFIED`/`COMPLETED` (see `docs/exec-plans/active/AKI-GIT-001.md`); this dependency does not block packet preparation, only implementation.
-- `BUILD-001` approval — ❌ NOT APPROVED, see above.
-- Canonical scope transcription — 🟡 partial (entity chain only), see above.
+## Non-Scope (hard)
+
+Full CRM/sales pipeline UI; client portal/customer account UI; billing/subscriptions/payment gateway/invoicing; support ticketing; production AI Gateway or model/provider integrations; RAG/vector DB/fine-tuning; commerce connectors or commerce provider data models (Shopify/Ticimax/ikas/IdeaSoft/T-Soft/WooCommerce, etc.); Shopify theme/frontend source; production deployment or customer-data migration; microservices split; a generic idempotency subsystem, transactional outbox/inbox, or workflow runtime (no external effects exist in this slice); quota/rate-limit infrastructure; a generic `domain:action` dispatcher, `domain_engine`, `executor_type`, or `skill_refs` speculative field; a full immutable `ExecutionContext`/agent-orchestration/browser-execution/command-bus runtime; the future capability registry, autonomy layer, or action-run runtime. No merge to `main`. No `akilta-commerce` source, connector schemas, credentials, or direct DB access under any circumstance.
+
+## Engineering Invariant Classification (DEC-122, this task)
+
+Per `AGENTS.md` §8, all seven invariants (`docs/engineering/ACCEPTANCE_CRITERIA.md`) classified for this task's actual scope:
+
+- **EI-1 (persist intent before external effect): `NOT_APPLICABLE`.** No queue/provider/outbound/external effect exists in this slice. Do not add outbox/inbox/workflow runtime.
+- **EI-2 (idempotency scope): `DEFERRED-BY-ACTIVATION`.** Preserve deterministic duplicate-safe domain behavior only where naturally required; no generic idempotency subsystem. Activates at the first external-effect task.
+- **EI-3 (re-resolve authority before effect): `PARTIALLY IN_SCOPE`.** T8/T9 must prove fail-closed READ/WRITE/EXECUTE/protected-action classification at the application boundary. Live re-resolution immediately before a provider effect is `DEFERRED-BY-ACTIVATION` — no provider effect exists here.
+- **EI-4 (structural tenant/integration scope): `IN_SCOPE / P0`.** All Customer/Project/OutcomeJob/Evidence/Verification/Audit access must carry `TenantScope` structurally; no unscoped `getById(id)`-style accessor permitted.
+- **EI-5 (bounded, reserved-quota fan-out): `NOT_APPLICABLE`.** No model/provider usage or bulk fan-out exists in this slice.
+- **EI-6 (AKILTA ↔ AI Commerce isolation): `IN_SCOPE` as a negative architecture/test gate.** No AI Commerce source, domain/ORM/repository dependency, credentials, or provider types may appear. Network-level contract tests are `DEFERRED-BY-ACTIVATION`.
+- **EI-7 (learning contamination prevention): `PARTIALLY IN_SCOPE`.** `LearningEligibility` must default safely (T11); retrieval-contamination tests are `DEFERRED-BY-ACTIVATION` (no retrieval/index/cache exists in this slice).
+
+## Minimum Test Contract (T1–T12, controlling)
+
+T1. Stable ID/domain construction rejects invalid/missing tenant scope. T2. Cross-tenant lookup/mutation fails closed. T3. Invalid OutcomeJob lifecycle transitions are rejected. T4. `EXECUTING` cannot jump directly to `CLOSED` as a successful path. T5. `VERIFIED` fails when required verification evidence is absent. T6. `VERIFIED` succeeds only when required evidence/verification conditions pass. T7. Exception states preserve auditable transition reason/evidence references. T8. READ-only authority cannot perform WRITE/EXECUTE. T9. Protected-action classification cannot be silently downgraded. T10. Audit event contracts exclude secret values and preserve tenant/job/project correlation. T11. Learning eligibility defaults safely; no cross-tenant/training eligibility by default. T12. Domain contracts contain no provider/model or commerce-platform dependency.
+
+## Reality Gate Additions (RG-01..RG-07, extend T1–T12, not replace)
+
+RG-01 Tenant scope swap (A+B cross-reference fails closed). RG-02 Unscoped access prohibition (no bare-ID protected accessor). RG-03 Lifecycle table/negative matrix (impossible jumps rejected). RG-04 Verification/audit semantic separation (no single generic result object). RG-05 Authority non-escalation (READ cannot WRITE/EXECUTE). RG-06 Project-boundary scan (no `akilta-commerce` source/type/connector). RG-07 Safe default/data-separation (no silent cross-tenant learning eligibility).
+
+## Implementation Order (from canonical source, controlling)
+
+1. Execution record + isolated task branch from verified bootstrap state — **this document, this branch.**
+2. Minimal strict TypeScript/test toolchain.
+3. Tenant-scoped identifiers/value contracts + Customer/Project core records.
+4. OutcomeJob state + deterministic transition policy.
+5. Evidence/verification contracts and VERIFIED gate.
+6. Authority classification (T8/T9) without full IAM.
+7. AuditEvent contract + in-memory append behavior.
+8. Full T1–T12 + applicable RG suite, plus typecheck/build checks.
+9. Self-review scope/dependency/secret/AI-Commerce isolation; update execution record.
+10. Push checkpoint, open draft PR if available, mark no higher than `IMPLEMENTED`, surface evidence to ChatGPT.
+
+**This session executes only step 1 (done, this reconciliation) and step 2 plus the first slice of step 3 (`TenantScope` construction + validation, proving T1) — a single bounded first implementation, not the full ten-step sequence.** Steps 3 (remainder)–10 are explicitly deferred to subsequent, separately-reported checkpoints. No merge, no deploy, no scope expansion beyond this.
+
+## Definition of Done (full task — not this session's bounded slice)
+
+Cannot be `VERIFIED` unless T1–T12 plus applicable RG-01..RG-07 pass; the QA bundle contains an Engineering Invariant Applicability section (EI-1..EI-7 status/reason/evidence); no deferred gate was implemented speculatively; no secrets/PII/AI-Commerce source introduced; engineer marks no higher than `IMPLEMENTED`; ChatGPT independently reviews surfaced diff/test/CI evidence before `VERIFIED`/`COMPLETED`.
+
+## QA Context Class: HIGH
+
+This slice is secret-free/non-production but establishes tenant-isolation, permission, lifecycle-verification, and audit/learning-safety invariants later modules will trust. ChatGPT verification must not rely on an isolated diff alone — a full QA Evidence Bundle (task ID, acceptance criteria, base/checkpoint SHA, diff reference, changed-file list, strict-TS/typecheck/build results, complete T1–T12 results, affected contracts/interfaces, dependency delta, secret/non-scope/AI-Commerce isolation result, known limitations, engineer status) is required at task completion — not at this session's bounded checkpoint.
 
 ## Blocked On
 
-1. Durable, repository-recorded (not chat-only) evidence of BUILD-001 approval, if and when the Founder actually issues it.
-2. The remaining canonical Drive AKI-BE-001 content (T1–T12 tests, non-scope specifics, implementation order, evidence requirements) — the entity chain alone is not sufficient to complete scoping.
-
-## Known Limitation
-
-This session cannot currently read Google Drive (`mcp__Google_Drive__*` tools are disconnected). One piece of canonical content (the entity chain above) was pasted directly into this session and is transcribed as such. The rest — T1–T12 tests, non-scope, implementation order, evidence requirements — has been referred to but not actually supplied. Referring to content in an instruction does not make it available to the implementing engineer; it has to actually be surfaced (reconnected tool access, or pasted text) before it can be projected into this file. Writing plausible-sounding scope/test content here without having read the source would be fabricated content mislabeled as canonical, which violates the evidence standard in `docs/engineering/GOLDEN_PRINCIPLES.md` ("Evidence over assertion... AI-generated prose... is not evidence") and `CLAUDE.md`'s prohibition on independently redefining business requirements.
-
-Separately: this session has now received two directly contradictory chat-only claims about BUILD-001 approval status, each asserting a different authoritative source (Owner, then a "ChatGPT Orchestrator correction"). Neither is being treated as reliable evidence on its own — see "BUILD-001 Approval" above. The same caution applies to any future chat-only claim that a lifecycle gate has been cleared.
+Nothing for this session's bounded slice (toolchain + `TenantScope` + T1). The remaining implementation order (steps 3(remainder)–10) is blocked only on continued, separately-authorized, bounded sessions — not on any open approval gate.
 
 ## Next Exact Action
 
-1. If BUILD-001 approval is real, it needs to be evidenced somewhere durable and repository-visible (not another chat turn) before this packet treats it as cleared again.
-2. Owner or ChatGPT / AKILTA Brain to make the remaining canonical AKI-BE-001 Drive packet content actually accessible to the implementing engineer (reconnect Drive access, or paste the document text/link directly into session). Once transcribed into Scope/Acceptance Criteria/Non-Scope above (not paraphrased from memory or invented), the invariant classification in `AGENTS.md` §8 must still be completed before Status can move from `BACKLOG` to `READY`/`IN_PROGRESS` and before any implementation code is written. No implementation is authorized before then.
-
-## Commit / PR / Evidence
-
-- Branch: `claude/AKI-BE-001-task-packet`
-- This is a documentation-only packet: BUILD-001 approval corrected back to NOT APPROVED, entity-chain scope fragment recorded, remainder of canonical scope still pending actual source content. 0 lines of product/backend code, 0 dependencies introduced.
+After this reconciliation commit is pushed, re-read the repository fresh. If internally consistent (this document self-consistent with `AGENTS.md`, `CLAUDE.md`, `docs/engineering/ACCEPTANCE_CRITERIA.md`, and the AKI-GIT-001 record it depends on), move Status to `IN_PROGRESS` and execute exactly: minimal strict TypeScript/`node:test` toolchain, then `TenantScope` construction with validation proving T1. Commit and push that as a separate, clearly-labeled implementation checkpoint. Do not implement Customer/Project/OutcomeJob/Evidence/Audit in this same session — those are separate, subsequent bounded steps per the Implementation Order above. Do not merge to `main`. Do not deploy. Mark no higher than `IMPLEMENTED` at full-task completion, never `VERIFIED`/`COMPLETED` (Claude's authority ceiling, `AGENTS.md` §10).
