@@ -94,6 +94,69 @@ test("T7: rejects entry with an empty-string reason", () => {
   );
 });
 
+test("Finding 2: rejects a forged to: \"VERIFIED\", which would otherwise bypass the evidence gate", () => {
+  const job = executingJob();
+  assert.throws(
+    () =>
+      enterExceptionState({
+        job,
+        to: "VERIFIED",
+        eventId: "evt-1",
+        actorRef: "engineer:claude",
+        timestamp: "2026-08-16T00:00:00.000Z",
+        reason: "attempted forged transition",
+      }),
+    InvalidExceptionStateEntryError,
+  );
+});
+
+test("Finding 2: rejects a forged to: \"CLOSED\"", () => {
+  const job = executingJob();
+  assert.throws(
+    () =>
+      enterExceptionState({
+        job,
+        to: "CLOSED",
+        eventId: "evt-1",
+        actorRef: "engineer:claude",
+        timestamp: "2026-08-16T00:00:00.000Z",
+        reason: "attempted forged transition",
+      }),
+    InvalidExceptionStateEntryError,
+  );
+});
+
+test("Finding 2: rejects an arbitrary invalid to value", () => {
+  const job = executingJob();
+  assert.throws(
+    () =>
+      enterExceptionState({
+        job,
+        to: "NOT_A_REAL_STATE",
+        eventId: "evt-1",
+        actorRef: "engineer:claude",
+        timestamp: "2026-08-16T00:00:00.000Z",
+        reason: "attempted forged transition",
+      }),
+    InvalidExceptionStateEntryError,
+  );
+});
+
+test("Finding 2: no job mutation occurs when to is invalid", () => {
+  const job = executingJob();
+  assert.throws(() =>
+    enterExceptionState({
+      job,
+      to: "VERIFIED",
+      eventId: "evt-1",
+      actorRef: "engineer:claude",
+      timestamp: "2026-08-16T00:00:00.000Z",
+      reason: "attempted forged transition",
+    }),
+  );
+  assert.equal(job.state, "EXECUTING");
+});
+
 test("a CLOSED job cannot enter an exception state", () => {
   let job = executingJob();
   job = transitionOutcomeJob(job, "VERIFYING");

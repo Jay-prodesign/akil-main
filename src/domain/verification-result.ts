@@ -21,6 +21,7 @@ export type VerificationStatus = "PASSED" | "FAILED";
  */
 export interface VerificationResult {
   readonly verificationId: VerificationId;
+  readonly tenantId: OutcomeJob["tenantId"];
   readonly jobId: OutcomeJob["jobId"];
   readonly evidenceId: EvidenceReference["evidenceId"];
   readonly verificationRequirementRef: string;
@@ -59,6 +60,11 @@ export function createVerificationResult(input: {
       "evidence does not correspond to the given OutcomeJob",
     );
   }
+  if (input.evidence.tenantId !== input.job.tenantId) {
+    throw new InvalidVerificationResultError(
+      "evidence does not belong to the given OutcomeJob's tenant",
+    );
+  }
   const verificationId = requireNonEmptyString(input.verificationId, "verificationId");
   const verificationRequirementRef = requireNonEmptyString(
     input.verificationRequirementRef,
@@ -78,6 +84,7 @@ export function createVerificationResult(input: {
   }
   return {
     verificationId: verificationId as VerificationId,
+    tenantId: input.job.tenantId,
     jobId: input.job.jobId,
     evidenceId: input.evidence.evidenceId,
     verificationRequirementRef,

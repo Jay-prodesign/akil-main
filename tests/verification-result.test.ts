@@ -79,6 +79,51 @@ test("rejects an invalid status value", () => {
   );
 });
 
+test("P0: rejects evidence belonging to a different tenant, even when jobId values collide across tenants", () => {
+  const otherTenantScope = createTenantScope("tenant-b");
+  const otherTenantCustomer = createCustomer({
+    tenantScope: otherTenantScope,
+    customerId: "cust-1",
+    displayName: "Other Tenant Co",
+  });
+  const otherTenantProject = createProject({
+    tenantScope: otherTenantScope,
+    customer: otherTenantCustomer,
+    projectId: "proj-1",
+    ownerRef: "owner-1",
+    state: "active",
+  });
+  // Deliberately reuses jobId "job-1" from a different tenant, to prove
+  // the tenant check is independent of (and not substitutable by) the
+  // jobId-equality check.
+  const otherTenantJob = createOutcomeJob({
+    tenantScope: otherTenantScope,
+    customer: otherTenantCustomer,
+    project: otherTenantProject,
+    jobId: "job-1",
+    jobFamily: "onboarding",
+    businessObjective: "A same-jobId job belonging to a different tenant",
+  });
+  const otherTenantEvidence = createEvidenceReference({
+    job: otherTenantJob,
+    evidenceId: "ev-1",
+    evidenceType: "test-run-log",
+    sourceLocator: "internal://tests",
+    capturedAt: "2026-08-16T00:00:00.000Z",
+  });
+  assert.throws(
+    () =>
+      createVerificationResult({
+        verificationId: "verif-5",
+        job, // tenant-a's job-1
+        evidence: otherTenantEvidence, // tenant-b's evidence for its own job-1
+        verificationRequirementRef: "T1-T12-suite",
+        status: "PASSED",
+      }),
+    InvalidVerificationResultError,
+  );
+});
+
 test("rejects evidence that does not correspond to the given job", () => {
   const otherJob = createOutcomeJob({
     tenantScope,

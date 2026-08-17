@@ -126,6 +126,55 @@ test("rejects a VerificationResult that belongs to a different job", () => {
   );
 });
 
+test("P0: refuses to verify when the VerificationResult belongs to a different tenant, even with matching jobId", () => {
+  const job = jobAtVerifying();
+  const otherTenantScope = createTenantScope("tenant-b");
+  const otherTenantCustomer = createCustomer({
+    tenantScope: otherTenantScope,
+    customerId: "cust-1",
+    displayName: "Other Tenant Co",
+  });
+  const otherTenantProject = createProject({
+    tenantScope: otherTenantScope,
+    customer: otherTenantCustomer,
+    projectId: "proj-1",
+    ownerRef: "owner-1",
+    state: "active",
+  });
+  // Deliberately reuses jobId "job-1" from a different tenant so this
+  // case is only caught by a tenantId check, not by jobId equality.
+  let otherTenantJob = createOutcomeJob({
+    tenantScope: otherTenantScope,
+    customer: otherTenantCustomer,
+    project: otherTenantProject,
+    jobId: "job-1",
+    jobFamily: "onboarding",
+    businessObjective: "A same-jobId job belonging to a different tenant",
+  });
+  otherTenantJob = transitionOutcomeJob(otherTenantJob, "QUALIFIED");
+  otherTenantJob = transitionOutcomeJob(otherTenantJob, "READY");
+  otherTenantJob = transitionOutcomeJob(otherTenantJob, "EXECUTING");
+  otherTenantJob = transitionOutcomeJob(otherTenantJob, "VERIFYING");
+  const otherTenantEvidence = createEvidenceReference({
+    job: otherTenantJob,
+    evidenceId: "ev-1",
+    evidenceType: "test-run-log",
+    sourceLocator: "internal://tests",
+    capturedAt: "2026-08-16T00:00:00.000Z",
+  });
+  const otherTenantResult = createVerificationResult({
+    verificationId: "verif-cross-tenant",
+    job: otherTenantJob,
+    evidence: otherTenantEvidence,
+    verificationRequirementRef: "T1-T12-suite",
+    status: "PASSED",
+  });
+  assert.throws(
+    () => verifyOutcomeJob(job, otherTenantResult),
+    InvalidOutcomeJobError,
+  );
+});
+
 test("refuses to verify a job that is not in VERIFYING", () => {
   const draft = createOutcomeJob({
     tenantScope,

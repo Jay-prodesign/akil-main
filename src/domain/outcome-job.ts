@@ -201,6 +201,11 @@ export function verifyOutcomeJob(
       "verificationResult does not correspond to this OutcomeJob",
     );
   }
+  if (verificationResult.tenantId !== job.tenantId) {
+    throw new InvalidOutcomeJobError(
+      "verificationResult does not belong to this OutcomeJob's tenant",
+    );
+  }
   if (verificationResult.status !== "PASSED") {
     throw new VerificationNotPassedError(job.jobId, verificationResult.status);
   }
@@ -247,7 +252,7 @@ const EXCEPTION_STATES: ReadonlySet<OutcomeJobState> = new Set<OutcomeJobState>(
  */
 export function enterExceptionState(input: {
   job: OutcomeJob;
-  to: ExceptionState;
+  to: unknown;
   eventId: unknown;
   actorRef: unknown;
   timestamp: unknown;
@@ -263,18 +268,27 @@ export function enterExceptionState(input: {
       `OutcomeJob is already in exception state ${input.job.state}`,
     );
   }
+  if (
+    typeof input.to !== "string" ||
+    !EXCEPTION_STATES.has(input.to as OutcomeJobState)
+  ) {
+    throw new InvalidExceptionStateEntryError(
+      "to must be one of BLOCKED, RECOVERING, ESCALATED, STOPPED",
+    );
+  }
+  const to: ExceptionState = input.to as ExceptionState;
   if (typeof input.reason !== "string" || input.reason.trim().length === 0) {
     throw new InvalidExceptionStateEntryError(
       "reason is required and must be a non-empty string (T7: transition reason must be preserved)",
     );
   }
 
-  const updatedJob: OutcomeJob = { ...input.job, state: input.to };
+  const updatedJob: OutcomeJob = { ...input.job, state: to };
   const auditEvent = createAuditEvent({
     job: input.job,
     eventId: input.eventId,
     actorRef: input.actorRef,
-    eventType: `EXCEPTION_STATE_ENTERED:${input.to}`,
+    eventType: `EXCEPTION_STATE_ENTERED:${to}`,
     timestamp: input.timestamp,
     reason: input.reason,
   });

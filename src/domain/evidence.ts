@@ -17,6 +17,7 @@ type EvidenceId = string & { readonly __brand: "EvidenceId" };
  */
 export interface EvidenceReference {
   readonly evidenceId: EvidenceId;
+  readonly tenantId: OutcomeJob["tenantId"];
   readonly jobId: OutcomeJob["jobId"];
   readonly evidenceType: string;
   readonly sourceLocator: string;
@@ -54,6 +55,7 @@ export function createEvidenceReference(input: {
   const capturedAt = requireNonEmptyString(input.capturedAt, "capturedAt");
   return {
     evidenceId: evidenceId as EvidenceId,
+    tenantId: input.job.tenantId,
     jobId: input.job.jobId,
     evidenceType,
     sourceLocator,
