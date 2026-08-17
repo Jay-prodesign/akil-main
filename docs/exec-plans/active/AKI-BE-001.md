@@ -3,7 +3,7 @@
 - **Task ID:** AKI-BE-001
 - **Project:** AKILTA (repository: `Jay-prodesign/akil-main`)
 - **Goal:** Create the minimum provider-neutral authoritative domain foundation needed for AKILTA to own customer/project/outcome/evidence state safely, supporting later stage-gated capabilities without rewriting the core. Not a full CRM, client portal, billing platform, AI agent stack, or AI Commerce implementation.
-- **Status:** `IN_PROGRESS` — steps 1–9 of the Implementation Order complete (full T1–T12/RG-01..RG-07 coverage audited, self-review complete, two real gaps found and fixed — see the step 8/9 checkpoint below). Step 10 (checkpoint/PR/evidence surfacing, mark `IMPLEMENTED`) is evidence-ready but not yet executed — this record reports readiness, per this checkpoint's own instruction, without performing step 10 itself. No new owner gate crossed.
+- **Status:** `IMPLEMENTED`. All 10 implementation-order steps are complete — draft PR open (`#2`), full T1–T12/RG-01..RG-07 coverage audited (two real gaps found and fixed), self-review complete, evidence surfaced below. Per `AGENTS.md` §10 this is Claude's authority ceiling: **not** `VERIFIED`/`COMPLETED` — that requires ChatGPT's independent review of the QA Evidence Bundle below.
 - **Current Engineer:** Claude (Primary Engineer). Codex is Secondary/Backup/selective reviewer. ChatGPT is orchestrator/final verifier.
 - **Previous Engineer / Handoff From:** None — first implementation task, following `AKI-GIT-001` (repository bootstrap).
 - **Branch:** `claude/AKI-BE-001-task-packet`
@@ -255,20 +255,70 @@ No other gaps found. Re-examined EI-1..EI-7 classifications from the reconciliat
 - **Non-scope/secret/AI-Commerce isolation check:** `grep` across all of `src/` and `tests/` → same guardrail-comment hits as prior checkpoints, plus the new scan test's own pattern-definition strings (expected, not violations) — no actual secret value or commerce-platform reference anywhere. No new runtime dependencies (still zero); devDependencies unchanged (`typescript`, `@types/node`).
 - **Scope discipline:** both fixes are corrections to already-built code in already-existing files (`authority.ts`, `authorized-outcome-job-operations.ts`, `customer.ts`) plus one new test-only file (`project-boundary-scan.test.ts`) — no new domain concepts, no scope expansion beyond closing gaps against requirements already recorded in this execution record. No merge to `main`, no deploy.
 
+## Implementation Checkpoint — Step 10: Checkpoint, Draft PR, IMPLEMENTED (2026-08-16)
+
+Implementation-order step 10 completed: final checkpoint pushed, draft PR opened, Status marked `IMPLEMENTED` (Claude's ceiling — not higher), evidence surfaced here for ChatGPT.
+
+- **Final implementation checkpoint SHA:** `fe98edf` (`claude/AKI-BE-001-task-packet`) — unchanged from the step 8/9 checkpoint; a fresh full test run and typecheck were re-confirmed at this exact SHA immediately before opening the PR (see Test/Typecheck evidence below), so no further commit was needed to reach a clean state.
+- **Draft PR:** `#2` — `https://github.com/Jay-prodesign/akil-main/pull/2`, **open, draft, not merged**. Base: `claude/AKI-GIT-001-repo-bootstrap` @ `36150adf1394349d2543c0503b2fdd39dd380aff` (not `main` — `main` doesn't yet contain the governance scaffolding this task depends on, which is tracked separately in PR #1).
+- **Branch:** `claude/AKI-BE-001-task-packet`
+
+### Changed files (full task, base commit `36150adf1394349d2543c0503b2fdd39dd380aff` → `fe98edf`)
+
+29 files, +2470 lines (excluding this execution record itself; +2744 including it), 0 deletions:
+
+```
+package.json, package-lock.json, tsconfig.json
+src/domain/tenant-scope.ts
+src/domain/customer.ts
+src/domain/project.ts
+src/domain/outcome-job.ts
+src/domain/evidence.ts
+src/domain/verification-result.ts
+src/domain/authority.ts
+src/domain/audit-event.ts
+src/ports/customer-repository.ts
+src/application/in-memory-customer-repository.ts
+src/application/authorized-outcome-job-operations.ts
+src/application/in-memory-audit-log.ts
+tests/tenant-scope.test.ts, tests/customer.test.ts, tests/project.test.ts,
+tests/in-memory-customer-repository.test.ts, tests/outcome-job.test.ts,
+tests/outcome-job-verify.test.ts, tests/outcome-job-exception-state.test.ts,
+tests/evidence.test.ts, tests/verification-result.test.ts,
+tests/authority.test.ts, tests/authorized-outcome-job-operations.test.ts,
+tests/audit-event.test.ts, tests/in-memory-audit-log.test.ts,
+tests/project-boundary-scan.test.ts
+```
+
+### T1–T12 + RG-01..RG-07 evidence (final)
+
+Full coverage map already recorded in the step 8/9 checkpoint above — unchanged and still accurate, re-verified at this SHA. Summary: 12/12 T-items and 7/7 RG-items each have a real passing test, except RG-02 which is a documented structural/compile-time verification (interface signatures require `TenantScope`; no bare accessor exists).
+
+### Test/typecheck evidence (re-confirmed at `fe98edf` immediately before this checkpoint)
+
+- `npm run test` → `node --test dist/tests/*.test.js`: **76/76 pass**, 0 fail, 0 skipped.
+- `npx tsc -p tsconfig.json --noEmit`: **pass**, strict mode, no errors.
+- `grep` across `src/` and `tests/` for `akilta-commerce`/`shopify`/`ticimax`/`ikas`/`ideasoft`/`t-soft`/`woocommerce`/`password`/`api key`/`secret`/private-key markers: only guardrail doc-comments and the scan test's own pattern-name strings — no actual secret or commerce-platform reference.
+- `package.json`: zero runtime `dependencies`; `devDependencies` exactly `{"@types/node", "typescript"}`.
+
+### QA Evidence Bundle (Definition of Done requirement, for ChatGPT review)
+
+- Task ID: `AKI-BE-001`. Acceptance criteria: this file's Scope/Non-Scope/T1–T12/RG-01..RG-07/EI-1..EI-7 sections above.
+- Base SHA: `36150adf1394349d2543c0503b2fdd39dd380aff`. Final checkpoint SHA: `fe98edf`.
+- PR: `#2`, full diff available there.
+- Changed-file list: above.
+- Strict TypeScript/typecheck/build results: pass (above).
+- Complete T1–T12 results: pass, mapped above.
+- Affected contracts/interfaces: `TenantScope`, `Customer` (+ `LearningEligibility`), `Project`, `OutcomeJob` (+ lifecycle/transition/verify/exception-entry), `EvidenceReference`, `VerificationResult`, `AuthorityContext` (+ tenant binding), `AuditEvent`, `CustomerRepository` port, `InMemoryCustomerRepository`, `InMemoryAuditLog`, `authorizedTransitionOutcomeJob`/`authorizedVerifyOutcomeJob`.
+- Dependency/package-lock delta: `typescript`, `@types/node` (devDependencies only); `package-lock.json` committed.
+- Secret/non-scope/AI-Commerce isolation result: clean (above), now enforced by an automated test.
+- Known limitations: exception-state exit/recovery transitions are not implemented (canonical source doesn't specify that graph); `Organization`/multi-workspace hierarchy deferred (per source); production storage/HTTP/auth/queue/cloud all deferred (by design, this is a domain kernel only).
+- Engineer status: `IMPLEMENTED`, not higher.
+
 ## Blocked On
 
-Nothing. Steps 1–9 of the Implementation Order are complete. Step 10 remains: push this checkpoint (below), open a draft PR if desired, mark Status no higher than `IMPLEMENTED`, and surface evidence to ChatGPT. None of that is executed by this checkpoint — see "Next Exact Action."
+Nothing on the engineering side. Blocked only on ChatGPT's independent review of PR #2 / this QA Evidence Bundle to move to `VERIFIED`/`COMPLETED` — that transition is not available to Claude (`AGENTS.md` §10).
 
-## Next Exact Action — Step 10 readiness report
+## Next Exact Action
 
-**Implementation-ready evidence status: READY.**
-
-- Full T1–T12 + RG-01..RG-07 coverage: confirmed, mapped above, all passing or structurally verified.
-- Test suite: 76/76 passing.
-- Typecheck: strict mode, clean.
-- Dependency surface: zero runtime dependencies; exactly the two documented devDependencies (`typescript`, `@types/node`).
-- Secret/AI-Commerce isolation: clean by grep, now also by an automated, permanent test (`project-boundary-scan.test.ts`).
-- Two real implementation gaps found during self-review were fixed within existing scope, retested, and are now covered by tests — not just noted and left open.
-- Non-scope boundary held throughout: no HTTP server, database, queue, cloud dependency, `akilta-commerce` reference, or production credential was introduced at any point across all 9 steps.
-
-**Step 10 itself (checkpoint push — already done below; opening a draft PR; moving Status to `IMPLEMENTED`; surfacing the QA Evidence Bundle to ChatGPT) is not performed by this checkpoint.** This record reports readiness only, per this checkpoint's own instruction to report status rather than execute step 10. Moving Status to `IMPLEMENTED` and/or opening a PR remains a separate, explicit next action. Even once `IMPLEMENTED` is marked, per `AGENTS.md` §10 the engineer's authority still ends there — `VERIFIED`/`COMPLETED` requires ChatGPT's independent review of the QA Evidence Bundle above. No merge to `main`. No deploy.
+ChatGPT / AKILTA Brain to review PR #2 and this execution record's QA Evidence Bundle and issue a repository-recorded verification (a PR #2 comment/review, consistent with how this repository has required verification evidence throughout this task). No further engineering work is authorized on AKI-BE-001 until that review lands or a new bounded task is explicitly assigned. Do not merge PR #2. Do not deploy. Do not begin a subsequent module/task under this record.
