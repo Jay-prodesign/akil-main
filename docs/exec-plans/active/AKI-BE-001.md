@@ -315,10 +315,45 @@ Full coverage map already recorded in the step 8/9 checkpoint above — unchange
 - Known limitations: exception-state exit/recovery transitions are not implemented (canonical source doesn't specify that graph); `Organization`/multi-workspace hierarchy deferred (per source); production storage/HTTP/auth/queue/cloud all deferred (by design, this is a domain kernel only).
 - Engineer status: `IMPLEMENTED`, not higher.
 
+## Correction Checkpoint — ChangesRequired Remediation (2026-08-17)
+
+### Provenance
+
+A genuine `CHANGES_REQUIRED` verification result against final checkpoint SHA `d7ba2c3e22ee7638494fe2391a246efe98ca743c` was independently cross-referenced across three real, recently-modified Google Drive documents before any code was touched:
+
+- Canonical AKI-BE-001 task packet (`1qpHJVdE7qIrDBynbD7fkNZwIiVCtR7XfFcEqnl9b47A`) — prepended "AKI-BE-001 CORRECTION ASSIGNMENT — 17 AUGUST 2026 — CURRENT / SUPERSEDING" section, modified `2026-08-17T10:09:11.126Z`.
+- Current Project State (`1mXuoY0pcdfOMpS7j8CRxws_qYe8jPfOIwmQhgIxjpu0`) — "AKI-BE-001 CORRECTION AUTHORIZATION RECONCILIATION" and "AKI-BE-001 CHATGPT VERIFICATION" sections, modified `2026-08-17T10:09:23.509Z`.
+- ChatGPT Verification Result — CHANGES_REQUIRED — d7ba2c3 (`10xsB9LtJZdIvWj9zk68q1FW7iFqvDeDUPSVc6JjCvPY`), created `2026-08-17T09:06:21.274Z`, in the same Drive folder this task's own QA evidence bundle was uploaded to.
+
+Both findings were independently re-derived against the actual source code at `d7ba2c3` before being trusted, per this task's standing discipline of not acting on unverified claims.
+
+### Findings and bounded fixes
+
+1. **P0 — tenant/evidence correlation gap.** `EvidenceReference` and `VerificationResult` carried no `tenantId`; `createVerificationResult` and `verifyOutcomeJob` checked only `jobId` equality. Two tenants reusing the same `jobId` string could cross-contaminate verification evidence — a real EI-4 violation. **Fix (bounded to `evidence.ts`, `verification-result.ts`, `outcome-job.ts`):** both types now carry `tenantId` derived structurally from their `OutcomeJob`; `createVerificationResult` rejects `evidence.tenantId !== job.tenantId`; `verifyOutcomeJob` rejects `verificationResult.tenantId !== job.tenantId`. 2 new adversarial tests use colliding `jobId` values across two distinct tenants to prove the check is independent of (not substitutable by) `jobId` equality.
+2. **`enterExceptionState` had no runtime validation of `to`.** It was type-only (`ExceptionState` union), so a forged/untyped `to: "VERIFIED"` would silently set `job.state = "VERIFIED"`, bypassing the `verifyOutcomeJob` evidence gate (T5/T6/RG-04) entirely. **Fix (bounded to `outcome-job.ts`):** `to` is now `unknown` at the function boundary, runtime-validated against exactly `BLOCKED`/`RECOVERING`/`ESCALATED`/`STOPPED` before any mutation, throwing `InvalidExceptionStateEntryError` otherwise. 4 new negative tests: forged `to: "VERIFIED"`, forged `to: "CLOSED"`, an arbitrary invalid string, and an explicit assertion that the job's state is unchanged after a rejected attempt.
+
+No other gaps found or fixed. No files touched beyond `evidence.ts`, `verification-result.ts`, `outcome-job.ts`, and their three corresponding test files.
+
+### Correction checkpoint SHA
+
+**`8eebfebd4cf78a352886970822bd0be6008fd703`** (`claude/AKI-BE-001-task-packet`, pushed on top of `d7ba2c3` — existing PR #2, no new branch/PR).
+
+### Test/typecheck evidence (re-confirmed at `8eebfeb`)
+
+- `npm run test` → `node --test dist/tests/*.test.js`: **82/82 pass** (76 prior + 6 new), 0 fail, 0 skipped.
+- `npx tsc -p tsconfig.json --noEmit`: **pass**, strict mode, no errors.
+- `grep` across `src/` and `tests/` for `akilta-commerce`/`shopify`/`ticimax`/`ikas`/`ideasoft`/`t-soft`/`woocommerce`/`password`/`api key`/`secret`/private-key markers: only guardrail doc-comments — no actual secret or commerce-platform reference.
+- `package.json`: zero runtime `dependencies`; `devDependencies` unchanged (`@types/node`, `typescript`).
+- `git status`: clean after commit; no other files modified.
+
+### Status
+
+`IMPLEMENTED` (unchanged — this is a correction to an already-`IMPLEMENTED` checkpoint, not a status advance; `VERIFIED`/`COMPLETED` remain outside Claude's authority per `AGENTS.md` §10).
+
 ## Blocked On
 
-Nothing on the engineering side. Blocked only on ChatGPT's independent review of PR #2 / this QA Evidence Bundle to move to `VERIFIED`/`COMPLETED` — that transition is not available to Claude (`AGENTS.md` §10).
+Nothing on the engineering side. Blocked only on ChatGPT's independent review of the correction checkpoint (`8eebfeb`) / refreshed QA evidence to move to `VERIFIED`/`COMPLETED` — that transition is not available to Claude (`AGENTS.md` §10).
 
 ## Next Exact Action
 
-ChatGPT / AKILTA Brain to review PR #2 and this execution record's QA Evidence Bundle and issue a repository-recorded verification (a PR #2 comment/review, consistent with how this repository has required verification evidence throughout this task). No further engineering work is authorized on AKI-BE-001 until that review lands or a new bounded task is explicitly assigned. Do not merge PR #2. Do not deploy. Do not begin a subsequent module/task under this record.
+ChatGPT / AKILTA Brain to review the correction checkpoint at `8eebfeb` on PR #2 and issue a repository-recorded re-verification (a PR #2 comment/review). No further engineering work is authorized on AKI-BE-001 until that review lands or a new bounded task is explicitly assigned. Do not merge PR #2. Do not deploy. Do not begin a subsequent module/task under this record.
