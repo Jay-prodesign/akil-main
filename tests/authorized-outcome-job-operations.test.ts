@@ -10,13 +10,17 @@ import {
   createAuthorityContext,
   InsufficientAuthorityError,
   ProtectedActionNotAuthorizedError,
+  CrossTenantAuthorityError,
+  type AuthorityContext,
 } from "../src/domain/authority.js";
 import {
   authorizedTransitionOutcomeJob,
   authorizedVerifyOutcomeJob,
 } from "../src/application/authorized-outcome-job-operations.js";
+import type { TenantScope } from "../src/domain/tenant-scope.js";
 
 const tenantScope = createTenantScope("tenant-a");
+const otherTenantScope = createTenantScope("tenant-b");
 const customer = createCustomer({
   tenantScope,
   customerId: "cust-1",
@@ -50,29 +54,35 @@ function jobAtVerifying(businessObjective?: string): OutcomeJob {
   return job;
 }
 
-function readOnlyAuthority() {
+function readOnlyAuthority(scope: TenantScope = tenantScope): AuthorityContext {
   return createAuthorityContext({
+    tenantScope: scope,
     permissions: ["READ"],
     canPerformProtectedActions: false,
   });
 }
 
-function fullWriteAuthority() {
+function fullWriteAuthority(scope: TenantScope = tenantScope): AuthorityContext {
   return createAuthorityContext({
+    tenantScope: scope,
     permissions: ["READ", "WRITE"],
     canPerformProtectedActions: false,
   });
 }
 
-function executeWithoutProtectedAuthority() {
+function executeWithoutProtectedAuthority(
+  scope: TenantScope = tenantScope,
+): AuthorityContext {
   return createAuthorityContext({
+    tenantScope: scope,
     permissions: ["READ", "WRITE", "EXECUTE"],
     canPerformProtectedActions: false,
   });
 }
 
-function fullProtectedAuthority() {
+function fullProtectedAuthority(scope: TenantScope = tenantScope): AuthorityContext {
   return createAuthorityContext({
+    tenantScope: scope,
     permissions: ["READ", "WRITE", "EXECUTE"],
     canPerformProtectedActions: true,
   });
@@ -156,5 +166,28 @@ test("RG-05: manipulative job content does not grant higher authority", () => {
         passingVerificationResultFor(job),
       ),
     ProtectedActionNotAuthorizedError,
+  );
+});
+
+test("T2 / EI-4: full-permission authority for a different tenant cannot transition this job", () => {
+  const job = draftJob();
+  const crossTenantAuthority = fullWriteAuthority(otherTenantScope);
+  assert.throws(
+    () => authorizedTransitionOutcomeJob(crossTenantAuthority, job, "QUALIFIED"),
+    CrossTenantAuthorityError,
+  );
+});
+
+test("T2 / EI-4: full-permission authority for a different tenant cannot verify this job", () => {
+  const job = jobAtVerifying();
+  const crossTenantAuthority = fullProtectedAuthority(otherTenantScope);
+  assert.throws(
+    () =>
+      authorizedVerifyOutcomeJob(
+        crossTenantAuthority,
+        job,
+        passingVerificationResultFor(job),
+      ),
+    CrossTenantAuthorityError,
   );
 });

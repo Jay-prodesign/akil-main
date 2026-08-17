@@ -1,3 +1,5 @@
+import type { TenantScope } from "./tenant-scope.js";
+
 export type Permission = "READ" | "WRITE" | "EXECUTE";
 
 export class InvalidAuthorityContextError extends Error {
@@ -25,6 +27,22 @@ export class ProtectedActionNotAuthorizedError extends Error {
   }
 }
 
+/**
+ * T2 / EI-4 (structural tenant scope, P0): an AuthorityContext for
+ * tenant A must never authorize an operation on a tenant B record, no
+ * matter what permissions it holds. Found missing during the step 8/9
+ * coverage audit - the application-boundary wrappers previously checked
+ * only permissions, never tenant correlation.
+ */
+export class CrossTenantAuthorityError extends Error {
+  constructor() {
+    super(
+      "AuthorityContext's tenant does not match the target record's tenant",
+    );
+    this.name = "CrossTenantAuthorityError";
+  }
+}
+
 const VALID_PERMISSIONS: ReadonlySet<string> = new Set([
   "READ",
   "WRITE",
@@ -43,11 +61,13 @@ const VALID_PERMISSIONS: ReadonlySet<string> = new Set([
  * already present on the context it is given.
  */
 export interface AuthorityContext {
+  readonly tenantId: TenantScope["tenantId"];
   readonly permissions: ReadonlySet<Permission>;
   readonly canPerformProtectedActions: boolean;
 }
 
 export function createAuthorityContext(input: {
+  tenantScope: TenantScope;
   permissions: Iterable<unknown>;
   canPerformProtectedActions: unknown;
 }): AuthorityContext {
@@ -65,7 +85,26 @@ export function createAuthorityContext(input: {
       "canPerformProtectedActions must be a boolean",
     );
   }
-  return { permissions, canPerformProtectedActions: input.canPerformProtectedActions };
+  return {
+    tenantId: input.tenantScope.tenantId,
+    permissions,
+    canPerformProtectedActions: input.canPerformProtectedActions,
+  };
+}
+
+/**
+ * T2 / EI-4: an AuthorityContext may only be used against records in
+ * its own tenant. Structural, checked before any permission check -
+ * a mismatched tenant fails closed regardless of what permissions the
+ * context holds.
+ */
+export function requireSameTenant(
+  authority: AuthorityContext,
+  tenantId: TenantScope["tenantId"],
+): void {
+  if (authority.tenantId !== tenantId) {
+    throw new CrossTenantAuthorityError();
+  }
 }
 
 /**

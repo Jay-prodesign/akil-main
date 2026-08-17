@@ -16,6 +16,28 @@ test("creates a Customer scoped to the given tenant", () => {
   assert.equal(customer.displayName, "Acme Corp");
 });
 
+test("T11: defaults to LearningEligibility NONE", () => {
+  const customer = createCustomer({
+    tenantScope,
+    customerId: "cust-1",
+    displayName: "Acme Corp",
+  });
+  assert.equal(customer.learningEligibility, "NONE");
+});
+
+test("RG-07: extra input fields cannot silently promote learning eligibility", () => {
+  // createCustomer's input type has no learningEligibility parameter at
+  // all; `as any` simulates a caller (or a loosely-typed integration)
+  // trying to smuggle one in anyway. It must have zero effect.
+  const customer = createCustomer({
+    tenantScope,
+    customerId: "cust-1",
+    displayName: "Acme Corp",
+    learningEligibility: "ACTIVE",
+  } as unknown as Parameters<typeof createCustomer>[0]);
+  assert.equal(customer.learningEligibility, "NONE");
+});
+
 test("rejects a missing customerId", () => {
   assert.throws(
     () =>

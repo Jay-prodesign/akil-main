@@ -10,6 +10,23 @@ export class InvalidCustomerError extends Error {
 type CustomerId = string & { readonly __brand: "CustomerId" };
 
 /**
+ * T11/EI-7: "Customer/business operational records default to
+ * LearningEligibility=NONE ... broader learning/training eligibility is
+ * never inferred" (AKI-BE-001 execution record, "Minimum Security /
+ * Authority Contract"). The full vocabulary (CANDIDATE/ACTIVE/
+ * SUPERSEDED/REVOKED) is declared per DEC-122 for forward compatibility,
+ * but only NONE is reachable in this task's slice - there is no
+ * retrieval/promotion system yet to move a record to any other value,
+ * and `createCustomer` below does not accept this as an input at all.
+ */
+export type LearningEligibility =
+  | "NONE"
+  | "CANDIDATE"
+  | "ACTIVE"
+  | "SUPERSEDED"
+  | "REVOKED";
+
+/**
  * Customer belongs to exactly one TenantScope (AKI-BE-001 execution
  * record, "First-Slice Domain Semantics"). No unnecessary PII fields.
  */
@@ -17,6 +34,7 @@ export interface Customer {
   readonly tenantId: TenantScope["tenantId"];
   readonly customerId: CustomerId;
   readonly displayName: string;
+  readonly learningEligibility: LearningEligibility;
 }
 
 function requireNonEmptyString(value: unknown, field: string): string {
@@ -48,5 +66,8 @@ export function createCustomer(input: {
     tenantId: input.tenantScope.tenantId,
     customerId: customerId as CustomerId,
     displayName,
+    // T11: not accepted as a constructor input - there is no way to
+    // create a Customer with any LearningEligibility other than NONE.
+    learningEligibility: "NONE",
   };
 }

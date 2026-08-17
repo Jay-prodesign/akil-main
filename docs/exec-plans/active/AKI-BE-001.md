@@ -3,7 +3,7 @@
 - **Task ID:** AKI-BE-001
 - **Project:** AKILTA (repository: `Jay-prodesign/akil-main`)
 - **Goal:** Create the minimum provider-neutral authoritative domain foundation needed for AKILTA to own customer/project/outcome/evidence state safely, supporting later stage-gated capabilities without rewriting the core. Not a full CRM, client portal, billing platform, AI agent stack, or AI Commerce implementation.
-- **Status:** `IN_PROGRESS` — same authorized scope as prior checkpoints, now through implementation-order step 7: `TenantScope` + `Customer` + `Project` + tenant-scoped repository port + `OutcomeJob` lifecycle (T3/T4/RG-03) + `EvidenceReference`/`VerificationResult` + the evidence-gated `VERIFIED` transition (T5/T6) + authority classification (T8/T9/RG-05) + `AuditEvent` (T10) + minimal exception-state entry (T7). No new owner gate crossed. See "Implementation Checkpoint" entries below.
+- **Status:** `IN_PROGRESS` — steps 1–9 of the Implementation Order complete (full T1–T12/RG-01..RG-07 coverage audited, self-review complete, two real gaps found and fixed — see the step 8/9 checkpoint below). Step 10 (checkpoint/PR/evidence surfacing, mark `IMPLEMENTED`) is evidence-ready but not yet executed — this record reports readiness, per this checkpoint's own instruction, without performing step 10 itself. No new owner gate crossed.
 - **Current Engineer:** Claude (Primary Engineer). Codex is Secondary/Backup/selective reviewer. ChatGPT is orchestrator/final verifier.
 - **Previous Engineer / Handoff From:** None — first implementation task, following `AKI-GIT-001` (repository bootstrap).
 - **Branch:** `claude/AKI-BE-001-task-packet`
@@ -214,10 +214,61 @@ This slice is secret-free/non-production but establishes tenant-isolation, permi
 - **Explicitly not implemented, matching this checkpoint's own instruction:** exception-state exit/recovery transitions (`BLOCKED`/`RECOVERING`/`ESCALATED`/`STOPPED` → anywhere) — the canonical source doesn't specify this graph, so it isn't guessed. If a future task needs it, that's a new, explicitly-scoped requirement, not an extension of this checkpoint.
 - **Status after this checkpoint:** `IN_PROGRESS` (still not `IMPLEMENTED` — partial slice, not task completion). Not merged, not deployed.
 
+## Implementation Checkpoint — Step 8 (T1–T12/RG Coverage Audit) + Step 9 (Self-Review) (2026-08-16)
+
+### T1–T12 / RG-01..RG-07 coverage map
+
+| ID | Requirement | Covering test(s) |
+|---|---|---|
+| T1 | Construction rejects invalid/missing tenant scope | `tests/tenant-scope.test.ts` (7 cases) |
+| T2 | Cross-tenant lookup/mutation fails closed at the authorization boundary | `tests/in-memory-customer-repository.test.ts`, `tests/project.test.ts`, `tests/outcome-job.test.ts`, **`tests/authorized-outcome-job-operations.test.ts`** (2 new cross-tenant cases — gap found and fixed this checkpoint, see below) |
+| T3 | Invalid `OutcomeJob` transitions rejected | `tests/outcome-job.test.ts` (negative matrix) |
+| T4 | `EXECUTING` cannot jump directly to `CLOSED` | `tests/outcome-job.test.ts` |
+| T5 | `VERIFIED` fails without required evidence | `tests/outcome-job-verify.test.ts` |
+| T6 | `VERIFIED` succeeds only with passing evidence | `tests/outcome-job-verify.test.ts` |
+| T7 | Exception states preserve auditable reason | `tests/outcome-job-exception-state.test.ts` (all 4 states, table-driven) |
+| T8 | READ-only cannot perform WRITE/EXECUTE | `tests/authority.test.ts`, `tests/authorized-outcome-job-operations.test.ts` |
+| T9 | Protected action ≠ ordinary write | `tests/authority.test.ts`, `tests/authorized-outcome-job-operations.test.ts` |
+| T10 | Audit events exclude secrets, preserve correlation | `tests/audit-event.test.ts`, `tests/in-memory-audit-log.test.ts` |
+| T11 | Learning eligibility defaults safely | **`tests/customer.test.ts`** (2 new cases — gap found and fixed this checkpoint, see below) |
+| T12 | No provider/model/commerce-platform dependency | **`tests/project-boundary-scan.test.ts`** (new, automated — previously only ad-hoc manual `grep`, see below) |
+| RG-01 | Tenant scope swap fails closed | `tests/project.test.ts`, `tests/in-memory-customer-repository.test.ts`, `tests/authority.test.ts`, `tests/authorized-outcome-job-operations.test.ts` |
+| RG-02 | No unscoped `getById`-style accessor | Structural/compile-time: `CustomerRepository` and `InMemoryAuditLog.findByTenant` interfaces require `TenantScope`; no bare accessor exists on either. Verified by type signature, not a runtime test (same verification-method note as the step-3 checkpoint). |
+| RG-03 | Lifecycle negative matrix | `tests/outcome-job.test.ts` |
+| RG-04 | Verification/audit semantic separation | `tests/outcome-job-verify.test.ts` |
+| RG-05 | Authority non-escalation, adversarial fixtures | `tests/authorized-outcome-job-operations.test.ts` |
+| RG-06 | Project-boundary scan (no `akilta-commerce`) | **`tests/project-boundary-scan.test.ts`** (new, automated) |
+| RG-07 | Safe default / data separation | **`tests/customer.test.ts`** (new adversarial case) + `audit-event.ts`/`evidence.ts` structural guardrails + the standard grep-based secret check |
+
+**Every T/RG item has a real, passing test or an explicitly-documented structural verification (RG-02) — none are unaddressed.**
+
+### Self-review findings (step 9) — two real gaps found and fixed, bounded
+
+1. **T2 / EI-4 gap: `AuthorityContext` had no tenant binding.** `authorized-outcome-job-operations.ts`'s wrappers checked only permissions, never that the caller's authority matched the target job's tenant — a real violation of the invariant already classified `IN_SCOPE / P0` two checkpoints ago. **Fix (bounded to existing files):** added `tenantId` to `AuthorityContext`, a required `tenantScope` input to `createAuthorityContext`, and `requireSameTenant` (checked first, before any permission check, so a tenant mismatch fails closed regardless of granted permissions). Wired into both `authorizedTransitionOutcomeJob` and `authorizedVerifyOutcomeJob`. New `CrossTenantAuthorityError`. 4 new tests (2 in `authority.test.ts`, 2 in `authorized-outcome-job-operations.test.ts` proving full-permission cross-tenant authority is still rejected on both operations).
+2. **T11/RG-07 gap: `LearningEligibility` was never implemented**, despite being classified `PARTIALLY IN_SCOPE` in the EI-7 table since the step-5/6 checkpoint. **Fix (bounded to `customer.ts`):** added a `LearningEligibility` type (`NONE`/`CANDIDATE`/`ACTIVE`/`SUPERSEDED`/`REVOKED` — full vocabulary per DEC-122, only `NONE` reachable in this slice) and a `learningEligibility` field on `Customer`, hardcoded to `"NONE"` in `createCustomer` and **not accepted as a constructor input at all**. 2 new tests, including an adversarial one proving a smuggled `learningEligibility: "ACTIVE"` input has zero effect.
+3. **T12/RG-06 were previously verified only by an ad-hoc manual `grep`** run once per checkpoint, not a repository-enforced check. **Fix:** added `tests/project-boundary-scan.test.ts` — an automated test that scans all `src/**/*.ts` for commerce-platform/AI-Commerce name patterns and asserts `package.json` declares zero runtime dependencies and only the two documented devDependencies. This is now a permanent regression test, not a one-off manual step.
+
+No other gaps found. Re-examined EI-1..EI-7 classifications from the reconciliation checkpoint against the code as it now stands: EI-1/EI-2/EI-3/EI-5 unchanged and still accurate; **EI-4 and EI-7 are now actually backed by implementation** (previously classified correctly but under-implemented — that mismatch is exactly gaps #1 and #2 above, now closed); EI-6 now has an automated test in addition to documentation.
+
+- **Test evidence:** **76/76 pass** (68 prior + 8 new: 2 `requireSameTenant` unit tests, 2 cross-tenant authorization-boundary tests, 2 `LearningEligibility` tests, 2 project-boundary-scan tests). `npm run test` → `node --test dist/tests/*.test.js`.
+- **Typecheck evidence:** `npx tsc -p tsconfig.json --noEmit` → **pass**, strict mode, no errors (including through the `AuthorityContext`/`Customer` interface changes — all call sites across `src/` and `tests/` updated consistently).
+- **Non-scope/secret/AI-Commerce isolation check:** `grep` across all of `src/` and `tests/` → same guardrail-comment hits as prior checkpoints, plus the new scan test's own pattern-definition strings (expected, not violations) — no actual secret value or commerce-platform reference anywhere. No new runtime dependencies (still zero); devDependencies unchanged (`typescript`, `@types/node`).
+- **Scope discipline:** both fixes are corrections to already-built code in already-existing files (`authority.ts`, `authorized-outcome-job-operations.ts`, `customer.ts`) plus one new test-only file (`project-boundary-scan.test.ts`) — no new domain concepts, no scope expansion beyond closing gaps against requirements already recorded in this execution record. No merge to `main`, no deploy.
+
 ## Blocked On
 
-Nothing for this session's bounded slice (step 7, now complete — see checkpoint above). The remaining implementation order (steps 8–10: full T1–T12+RG suite consolidation, self-review, checkpoint/PR/evidence surfacing) is blocked only on continued, separately-authorized, bounded sessions — not on any open approval gate.
+Nothing. Steps 1–9 of the Implementation Order are complete. Step 10 remains: push this checkpoint (below), open a draft PR if desired, mark Status no higher than `IMPLEMENTED`, and surface evidence to ChatGPT. None of that is executed by this checkpoint — see "Next Exact Action."
 
-## Next Exact Action
+## Next Exact Action — Step 10 readiness report
 
-Continue with implementation-order step 8: run and account for the **complete** T1–T12 + applicable RG-01..RG-07 suite as a single consolidated pass (most individual cases already exist across the checkpoint test files — this step is about verifying full coverage against the canonical list explicitly, closing any gap found, and recording a mapping from each T/RG identifier to its covering test(s) in the execution record, not necessarily writing much new code). Then step 9: self-review scope/dependency/secret/AI-Commerce isolation across the whole implementation to date (not just this checkpoint's diff) and update this execution record accordingly. Step 10 (push checkpoint, open draft PR, mark no higher than `IMPLEMENTED`, surface evidence to ChatGPT) is the natural task-completion point after that — do not jump to it before steps 8–9 are done. Commit and push each bounded checkpoint separately, with test/typecheck evidence, as done here. Do not merge to `main`. Do not deploy. Mark no higher than `IMPLEMENTED` at full-task completion, never `VERIFIED`/`COMPLETED` (Claude's authority ceiling, `AGENTS.md` §10).
+**Implementation-ready evidence status: READY.**
+
+- Full T1–T12 + RG-01..RG-07 coverage: confirmed, mapped above, all passing or structurally verified.
+- Test suite: 76/76 passing.
+- Typecheck: strict mode, clean.
+- Dependency surface: zero runtime dependencies; exactly the two documented devDependencies (`typescript`, `@types/node`).
+- Secret/AI-Commerce isolation: clean by grep, now also by an automated, permanent test (`project-boundary-scan.test.ts`).
+- Two real implementation gaps found during self-review were fixed within existing scope, retested, and are now covered by tests — not just noted and left open.
+- Non-scope boundary held throughout: no HTTP server, database, queue, cloud dependency, `akilta-commerce` reference, or production credential was introduced at any point across all 9 steps.
+
+**Step 10 itself (checkpoint push — already done below; opening a draft PR; moving Status to `IMPLEMENTED`; surfacing the QA Evidence Bundle to ChatGPT) is not performed by this checkpoint.** This record reports readiness only, per this checkpoint's own instruction to report status rather than execute step 10. Moving Status to `IMPLEMENTED` and/or opening a PR remains a separate, explicit next action. Even once `IMPLEMENTED` is marked, per `AGENTS.md` §10 the engineer's authority still ends there — `VERIFIED`/`COMPLETED` requires ChatGPT's independent review of the QA Evidence Bundle above. No merge to `main`. No deploy.
