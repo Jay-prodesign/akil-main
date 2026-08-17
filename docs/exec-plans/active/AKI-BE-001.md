@@ -3,7 +3,7 @@
 - **Task ID:** AKI-BE-001
 - **Project:** AKILTA (repository: `Jay-prodesign/akil-main`)
 - **Goal:** Create the minimum provider-neutral authoritative domain foundation needed for AKILTA to own customer/project/outcome/evidence state safely, supporting later stage-gated capabilities without rewriting the core. Not a full CRM, client portal, billing platform, AI agent stack, or AI Commerce implementation.
-- **Status:** `IN_PROGRESS` — same authorized scope as prior checkpoints, now through implementation-order step 4: `TenantScope` + `Customer` + `Project` + tenant-scoped repository port + `OutcomeJob` lifecycle (T3/T4/RG-03). No new owner gate crossed. See "Implementation Checkpoint" entries below.
+- **Status:** `IN_PROGRESS` — same authorized scope as prior checkpoints, now through implementation-order step 5: `TenantScope` + `Customer` + `Project` + tenant-scoped repository port + `OutcomeJob` lifecycle (T3/T4/RG-03) + `EvidenceReference`/`VerificationResult` + the evidence-gated `VERIFIED` transition (T5/T6). No new owner gate crossed. See "Implementation Checkpoint" entries below.
 - **Current Engineer:** Claude (Primary Engineer). Codex is Secondary/Backup/selective reviewer. ChatGPT is orchestrator/final verifier.
 - **Previous Engineer / Handoff From:** None — first implementation task, following `AKI-GIT-001` (repository bootstrap).
 - **Branch:** `claude/AKI-BE-001-task-packet`
@@ -166,10 +166,26 @@ This slice is secret-free/non-production but establishes tenant-isolation, permi
 - **Scope discipline:** `EvidenceReference`/`VerificationResult`, authority classification (T8/T9), and `AuditEvent` remain **not implemented** — see "Next Exact Action."
 - **Status after this checkpoint:** `IN_PROGRESS` (still not `IMPLEMENTED` — partial slice, not task completion). Not merged, not deployed.
 
+## Implementation Checkpoint — EvidenceReference + VerificationResult + VERIFIED Gate (T5/T6) (2026-08-16)
+
+- **What was implemented:** implementation-order step 5.
+  - `src/domain/evidence.ts` — `EvidenceReference` value type (`evidenceId`/`jobId`/`evidenceType`/`sourceLocator`/`capturedAt`) + `createEvidenceReference` factory + `InvalidEvidenceReferenceError`. `sourceLocator` is a reference, never embedded secret material.
+  - `src/domain/verification-result.ts` — `VerificationResult` value type (`verificationId`/`jobId`/`evidenceId`/`verificationRequirementRef`/`status: "PASSED" | "FAILED"`/optional `limitationOrFailureReason`) + `createVerificationResult` factory + `InvalidVerificationResultError`. Rejects evidence that doesn't correspond to the given job.
+  - `src/domain/outcome-job.ts` — added `verifyOutcomeJob(job, verificationResult)`, `MissingVerificationEvidenceError`, `VerificationNotPassedError`. This is now the *only* way to reach `VERIFIED`: it requires `job.state === "VERIFYING"`, a defined `VerificationResult` correlated to the same `jobId`, and `status === "PASSED"`. The generic `MAIN_PATH_TRANSITIONS` table still has no `VERIFYING -> VERIFIED` edge — permanently, not just until this checkpoint — so `transitionOutcomeJob` structurally cannot be used to fake `VERIFIED` (RG-04: execution/tool success is not verification, enforced by the function boundary, not caller discipline).
+- **Dependencies added:** none.
+- **Test evidence:**
+  - `tests/evidence.test.ts` (3 cases) and `tests/verification-result.test.ts` (4 cases, including evidence/job correlation and invalid-status rejection).
+  - `tests/outcome-job-verify.test.ts` (6 cases): T5 fails on absent evidence (`MissingVerificationEvidenceError`) and on `FAILED` status (`VerificationNotPassedError`); T6 succeeds only with a matching `PASSED` result; rejects a `VerificationResult` belonging to a different job; refuses to verify a job not in `VERIFYING`; and RG-04 — `transitionOutcomeJob(job, "VERIFIED")` is still rejected even for a job legitimately in `VERIFYING`.
+  - Combined with prior checkpoints: **37/37 pass** (`npm run test` → `node --test dist/tests/*.test.js`).
+- **Typecheck evidence:** `npx tsc -p tsconfig.json --noEmit` → **pass**, strict mode, no errors (including `exactOptionalPropertyTypes` handling for `limitationOrFailureReason`).
+- **Non-scope/secret/AI-Commerce isolation check:** `grep` across `src/` and `tests/` for `akilta-commerce`/`shopify`/`ticimax`/`password`/`api key`/`secret`/private-key markers → the only hit is the guardrail doc-comment in `evidence.ts` itself ("rather than embedded secret material") — no actual secret value anywhere. No new dependencies.
+- **Scope discipline:** authority classification (T8/T9) and `AuditEvent` remain **not implemented** — see "Next Exact Action."
+- **Status after this checkpoint:** `IN_PROGRESS` (still not `IMPLEMENTED` — partial slice, not task completion). Not merged, not deployed.
+
 ## Blocked On
 
-Nothing for this session's bounded slice (step 4, now complete — see checkpoint above). The remaining implementation order (steps 5–10: evidence/verification contracts + the `VERIFIED` gate, authority classification, `AuditEvent`, full T1–T12+RG suite, self-review, checkpoint/PR/evidence surfacing) is blocked only on continued, separately-authorized, bounded sessions — not on any open approval gate.
+Nothing for this session's bounded slice (step 5, now complete — see checkpoint above). The remaining implementation order (steps 6–10: authority classification (T8/T9), `AuditEvent`, full T1–T12+RG suite, self-review, checkpoint/PR/evidence surfacing) is blocked only on continued, separately-authorized, bounded sessions — not on any open approval gate.
 
 ## Next Exact Action
 
-Continue with implementation-order step 5: `EvidenceReference`/`VerificationResult` contracts, then wire the `VERIFYING -> VERIFIED` transition to require a passing `VerificationResult` (T5: fails without evidence; T6: succeeds with it) — this is the point where the currently-absent `VERIFYING -> VERIFIED` edge in `src/domain/outcome-job.ts`'s transition table gets added, gated on evidence rather than left open unconditionally. Do not implement authority classification (T8/T9) or `AuditEvent` in the same session — those remain separate, subsequent bounded steps per the Implementation Order. Commit and push each bounded checkpoint separately, with test/typecheck evidence, as done here. Do not merge to `main`. Do not deploy. Mark no higher than `IMPLEMENTED` at full-task completion, never `VERIFIED`/`COMPLETED` (Claude's authority ceiling, `AGENTS.md` §10).
+Continue with implementation-order step 6: authority classification (T8/T9) without a full IAM product — a `Permission`/`Authority` concept over `READ`/`WRITE`/`EXECUTE` plus a "protected action" classification, applied at the application boundary (e.g. gating `verifyOutcomeJob`/`transitionOutcomeJob`-style operations), proving T8 (READ-only cannot perform WRITE/EXECUTE) and T9 (a protected action cannot be silently downgraded to an ordinary write) and RG-05 (authority non-escalation, adversarial fixtures). Do not implement `AuditEvent` in the same session — that remains implementation-order step 7, paired with exception-state transitions (T7) which still need it. Commit and push each bounded checkpoint separately, with test/typecheck evidence, as done here. Do not merge to `main`. Do not deploy. Mark no higher than `IMPLEMENTED` at full-task completion, never `VERIFIED`/`COMPLETED` (Claude's authority ceiling, `AGENTS.md` §10).

@@ -1,6 +1,7 @@
 import type { TenantScope } from "./tenant-scope.js";
 import type { Customer } from "./customer.js";
 import type { Project } from "./project.js";
+import type { VerificationResult } from "./verification-result.js";
 
 export class InvalidOutcomeJobError extends Error {
   constructor(reason: string) {
@@ -110,22 +111,23 @@ export function createOutcomeJob(input: {
 /**
  * Deterministic, validated lifecycle transitions (T3/T4/RG-03).
  *
- * Two things are intentionally NOT modeled as allowed transitions yet,
- * each deferred to the checkpoint that builds its real precondition
- * rather than guessed here:
+ * VERIFYING -> VERIFIED is deliberately absent from this generic
+ * transition table, permanently, not just until step 5. It is
+ * implemented separately below as `verifyOutcomeJob`, which requires a
+ * passing `VerificationResult` (T5/T6). This keeps the generic
+ * `transitionOutcomeJob` function structurally unable to fake VERIFIED
+ * via a bare state assignment - execution/tool success is not
+ * verification (DEC-122 RG-04), and that separation is enforced by the
+ * type/function boundary itself, not left to caller discipline.
  *
- * - VERIFYING -> VERIFIED requires passing verification evidence (T5/T6:
- *   "VERIFIED cannot be reached merely because an executor/tool reports
- *   success"). EvidenceReference/VerificationResult don't exist yet
- *   (implementation-order step 5), so this edge is absent from the
- *   table below rather than allowed unconditionally.
- * - Exception-state entry/exit (BLOCKED/RECOVERING/ESCALATED/STOPPED):
- *   the canonical source names these states but does not specify their
- *   exact entry/exit graph, and T7 requires them to "preserve auditable
- *   transition reason/evidence references" - which needs AuditEvent
- *   (step 7). Inventing a specific graph now would be fabricating an
- *   unsourced business rule, so these states are declared in the type
- *   but have no transitions into or out of them in this checkpoint.
+ * Exception-state entry/exit (BLOCKED/RECOVERING/ESCALATED/STOPPED)
+ * remains unimplemented: the canonical source names these states but
+ * does not specify their exact entry/exit graph, and T7 requires them
+ * to "preserve auditable transition reason/evidence references" - which
+ * needs AuditEvent (step 7, not yet built). Inventing a specific graph
+ * now would be fabricating an unsourced business rule, so these states
+ * are declared in the type but have no transitions into or out of them
+ * in this checkpoint either.
  */
 const MAIN_PATH_TRANSITIONS: ReadonlyMap<
   OutcomeJobState,
@@ -153,4 +155,53 @@ export function transitionOutcomeJob(
     throw new InvalidOutcomeJobTransitionError(job.state, to);
   }
   return { ...job, state: to };
+}
+
+export class MissingVerificationEvidenceError extends Error {
+  constructor(jobId: OutcomeJob["jobId"]) {
+    super(
+      `OutcomeJob ${jobId} cannot become VERIFIED without a VerificationResult`,
+    );
+    this.name = "MissingVerificationEvidenceError";
+  }
+}
+
+export class VerificationNotPassedError extends Error {
+  constructor(jobId: OutcomeJob["jobId"], status: string) {
+    super(
+      `OutcomeJob ${jobId} cannot become VERIFIED: verification status is ${status}, not PASSED`,
+    );
+    this.name = "VerificationNotPassedError";
+  }
+}
+
+/**
+ * T5/T6: the only way to move an OutcomeJob from VERIFYING to VERIFIED.
+ *
+ * T5: fails when required verification evidence is absent - either no
+ * VerificationResult was supplied, or it exists but its status is not
+ * PASSED (a FAILED/limited result is present evidence of non-verification,
+ * not proof of verification).
+ * T6: succeeds only when a VerificationResult for this exact job has
+ * status PASSED.
+ */
+export function verifyOutcomeJob(
+  job: OutcomeJob,
+  verificationResult: VerificationResult | undefined,
+): OutcomeJob {
+  if (job.state !== "VERIFYING") {
+    throw new InvalidOutcomeJobTransitionError(job.state, "VERIFIED");
+  }
+  if (verificationResult === undefined) {
+    throw new MissingVerificationEvidenceError(job.jobId);
+  }
+  if (verificationResult.jobId !== job.jobId) {
+    throw new InvalidOutcomeJobError(
+      "verificationResult does not correspond to this OutcomeJob",
+    );
+  }
+  if (verificationResult.status !== "PASSED") {
+    throw new VerificationNotPassedError(job.jobId, verificationResult.status);
+  }
+  return { ...job, state: "VERIFIED" };
 }
