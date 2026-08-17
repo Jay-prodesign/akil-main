@@ -350,10 +350,19 @@ No other gaps found or fixed. No files touched beyond `evidence.ts`, `verificati
 
 `IMPLEMENTED` (unchanged — this is a correction to an already-`IMPLEMENTED` checkpoint, not a status advance; `VERIFIED`/`COMPLETED` remain outside Claude's authority per `AGENTS.md` §10).
 
+### Transferable correction evidence bundle (persisted to canonical Drive/QA evidence surface)
+
+Per the "AKI-BE-001 CORRECTION RE-VERIFICATION EVIDENCE ACTION — 17 AUGUST 2026 — CURRENT / SUPERSEDING" next-exact-action, a bounded transferable evidence bundle was generated directly from repository truth (no chat transcription) and persisted to the canonical Drive QA evidence folder (`1ty4_EPDMR9x91kRSeaCPkH7QbtuO2W0g`), alongside this task's prior QA evidence exports:
+
+- **`AKI-BE-001-correction-evidence-bundle.md`** — Drive file ID `1tel-_4PP0tAv7h4IDE9P-1aZUXN7uDtk` (https://drive.google.com/file/d/1tel-_4PP0tAv7h4IDE9P-1aZUXN7uDtk/view). Contains: identification (baseline `d7ba2c3`, code commit `8eebfeb`, execution-record HEAD `692a6ef`); both authorized corrections with rationale; the exact `git diff d7ba2c3..8eebfeb -- src/ tests/` (298-line diff, 6 files/183 insertions/3 deletions, embedded verbatim); a table of the 6 new adversarial tests; the exact `npm run test` command and summary result; strict typecheck result; secret scan and AI Commerce isolation scan results/commands; the 7-file changed-file list; and a SHA-256 manifest (post-correction content hash for each of the 8 changed files at HEAD `692a6ef`, plus the hash of the diff itself).
+- **`AKI-BE-001-correction-full-test-output.txt`** — Drive file ID `10kJm59dWz6HOToQc811JrRXByJYb_hhz` (https://drive.google.com/file/d/10kJm59dWz6HOToQc811JrRXByJYb_hhz/view). The complete unabridged 82-subtest TAP transcript from `npm run test` at HEAD `692a6ef`, referenced by the bundle above. **Downloaded back and re-hashed after upload: SHA-256 `119fa56f8e73162e4d30b20556924cfc0389081620b5abba3bb6f15849e7a654` matched exactly (byte-identical), confirming no upload/transcription corruption.**
+
+Both files were generated from `git show`/`npm run test`/`tsc`/`grep` output captured at HEAD `692a6ef` and uploaded as `text/plain` (`disableConversionToGoogleType: true`) to preserve exact byte content.
+
 ## Blocked On
 
-Nothing on the engineering side. Blocked only on ChatGPT's independent review of the correction checkpoint (`8eebfeb`) / refreshed QA evidence to move to `VERIFIED`/`COMPLETED` — that transition is not available to Claude (`AGENTS.md` §10).
+Nothing on the engineering side. Blocked only on ChatGPT's independent review of the correction checkpoint (`8eebfeb`) / the persisted transferable evidence bundle above to move to `VERIFIED`/`COMPLETED` — that transition is not available to Claude (`AGENTS.md` §10).
 
 ## Next Exact Action
 
-ChatGPT / AKILTA Brain to review the correction checkpoint at `8eebfeb` on PR #2 and issue a repository-recorded re-verification (a PR #2 comment/review). No further engineering work is authorized on AKI-BE-001 until that review lands or a new bounded task is explicitly assigned. Do not merge PR #2. Do not deploy. Do not begin a subsequent module/task under this record.
+ChatGPT / AKILTA Brain to review `AKI-BE-001-correction-evidence-bundle.md` (Drive ID `1tel-_4PP0tAv7h4IDE9P-1aZUXN7uDtk`) and the companion test transcript (Drive ID `10kJm59dWz6HOToQc811JrRXByJYb_hhz`), cross-referenced against the correction checkpoint at `8eebfeb` on PR #2, and issue a repository-recorded re-verification. No further engineering work is authorized on AKI-BE-001 until that review lands or a new bounded task is explicitly assigned. Do not merge PR #2. Do not deploy. Do not begin a subsequent module/task under this record.
