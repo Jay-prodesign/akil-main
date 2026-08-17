@@ -2,6 +2,7 @@ import type { TenantScope } from "./tenant-scope.js";
 import type { Customer } from "./customer.js";
 import type { Project } from "./project.js";
 import type { VerificationResult } from "./verification-result.js";
+import { createAuditEvent, type AuditEvent } from "./audit-event.js";
 
 export class InvalidOutcomeJobError extends Error {
   constructor(reason: string) {
@@ -204,4 +205,78 @@ export function verifyOutcomeJob(
     throw new VerificationNotPassedError(job.jobId, verificationResult.status);
   }
   return { ...job, state: "VERIFIED" };
+}
+
+export class InvalidExceptionStateEntryError extends Error {
+  constructor(reason: string) {
+    super(`Invalid exception-state entry: ${reason}`);
+    this.name = "InvalidExceptionStateEntryError";
+  }
+}
+
+type ExceptionState = "BLOCKED" | "RECOVERING" | "ESCALATED" | "STOPPED";
+
+const EXCEPTION_STATES: ReadonlySet<OutcomeJobState> = new Set<OutcomeJobState>([
+  "BLOCKED",
+  "RECOVERING",
+  "ESCALATED",
+  "STOPPED",
+]);
+
+/**
+ * T7: the one thing the canonical source actually specifies about
+ * exception states is that entering one preserves an auditable
+ * transition reason. This function implements exactly that - and
+ * nothing about exit/recovery: the source does not specify which
+ * states an exception state can return to, or whether BLOCKED /
+ * RECOVERING / ESCALATED / STOPPED differ from each other in that
+ * respect, so no such graph is implemented or guessed here (this
+ * checkpoint's explicit instruction: do not invent the unspecified
+ * recovery/exception transition graph).
+ *
+ * Only two preconditions are asserted, both directly implied by
+ * material already in this file rather than invented:
+ * - A `CLOSED` job cannot enter an exception state (`CLOSED` already
+ *   has no outbound edges in `MAIN_PATH_TRANSITIONS`).
+ * - A job already in an exception state cannot "enter" one again
+ *   (entry is a meaningful transition, not a no-op re-entry).
+ *
+ * `reason` is required (not optional) and preserved verbatim on the
+ * returned `AuditEvent` - that preservation is the entire, specified
+ * point of this function.
+ */
+export function enterExceptionState(input: {
+  job: OutcomeJob;
+  to: ExceptionState;
+  eventId: unknown;
+  actorRef: unknown;
+  timestamp: unknown;
+  reason: unknown;
+}): { job: OutcomeJob; auditEvent: AuditEvent } {
+  if (input.job.state === "CLOSED") {
+    throw new InvalidExceptionStateEntryError(
+      "a CLOSED OutcomeJob cannot enter an exception state",
+    );
+  }
+  if (EXCEPTION_STATES.has(input.job.state)) {
+    throw new InvalidExceptionStateEntryError(
+      `OutcomeJob is already in exception state ${input.job.state}`,
+    );
+  }
+  if (typeof input.reason !== "string" || input.reason.trim().length === 0) {
+    throw new InvalidExceptionStateEntryError(
+      "reason is required and must be a non-empty string (T7: transition reason must be preserved)",
+    );
+  }
+
+  const updatedJob: OutcomeJob = { ...input.job, state: input.to };
+  const auditEvent = createAuditEvent({
+    job: input.job,
+    eventId: input.eventId,
+    actorRef: input.actorRef,
+    eventType: `EXCEPTION_STATE_ENTERED:${input.to}`,
+    timestamp: input.timestamp,
+    reason: input.reason,
+  });
+  return { job: updatedJob, auditEvent };
 }
