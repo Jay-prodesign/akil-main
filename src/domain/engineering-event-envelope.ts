@@ -60,6 +60,12 @@ export interface EngineeringEventEnvelope {
   readonly checkpointSha?: string;
   readonly authorityRef?: string;
   readonly evidenceRef?: string;
+  /**
+   * E12: an optional reference to the task/branch a PASS/CHANGES_REQUIRED
+   * RESOLVE authorizes as the next worker/continuation. A plain string
+   * reference only - no workflow/dispatch surface is implemented here.
+   */
+  readonly authorizedNextTaskRef?: string;
   readonly responseTo?: EventId;
   readonly waitReason?: string;
   readonly idempotencyKey: string;
@@ -128,6 +134,7 @@ export function createEngineeringEventEnvelope(input: {
   checkpointSha?: unknown;
   authorityRef?: unknown;
   evidenceRef?: unknown;
+  authorizedNextTaskRef?: unknown;
   responseTo?: unknown;
   waitReason?: unknown;
   idempotencyKey: unknown;
@@ -160,6 +167,10 @@ export function createEngineeringEventEnvelope(input: {
   const checkpointSha = optionalNonEmptyString(input.checkpointSha, "checkpointSha");
   const authorityRef = optionalNonEmptyString(input.authorityRef, "authorityRef");
   const evidenceRef = optionalNonEmptyString(input.evidenceRef, "evidenceRef");
+  const authorizedNextTaskRef = optionalNonEmptyString(
+    input.authorizedNextTaskRef,
+    "authorizedNextTaskRef",
+  );
   const responseTo = optionalNonEmptyString(input.responseTo, "responseTo");
   const waitReason = optionalNonEmptyString(input.waitReason, "waitReason");
   const idempotencyKey = requireNonEmptyString(input.idempotencyKey, "idempotencyKey");
@@ -189,6 +200,7 @@ export function createEngineeringEventEnvelope(input: {
     ...(checkpointSha !== undefined ? { checkpointSha } : {}),
     ...(authorityRef !== undefined ? { authorityRef } : {}),
     ...(evidenceRef !== undefined ? { evidenceRef } : {}),
+    ...(authorizedNextTaskRef !== undefined ? { authorizedNextTaskRef } : {}),
     ...(responseTo !== undefined ? { responseTo: responseTo as EventId } : {}),
     ...(waitReason !== undefined ? { waitReason } : {}),
     idempotencyKey,

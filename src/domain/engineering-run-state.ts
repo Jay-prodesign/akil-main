@@ -48,6 +48,12 @@ export interface BrainResolution {
   readonly evidenceRef: string;
   readonly decidedAt: string;
   readonly resolutionEventId: EventId;
+  /**
+   * E12: reference to the task/branch this resolution authorizes as the
+   * next worker/continuation, when the RESOLVE event carried one. Absent
+   * when no next-worker continuation is authorized - never invented.
+   */
+  readonly authorizedNextTaskRef?: string;
 }
 
 interface PendingAnswer {
@@ -132,6 +138,29 @@ function isFresh(event: EngineeringEventEnvelope, state: EngineeringRunState | u
   return true;
 }
 
+/**
+ * E7 fencing-floor fix: a status-guard rejection (event type valid but
+ * wrong current status for it) is still an ACCEPTED, not-stale event -
+ * its fencing token must still raise the floor, independently of whether
+ * it produced a business-valid transition. Otherwise a worker holding an
+ * intermediate token that this run has already seen-but-rejected remains
+ * able to mutate state later, defeating the "newer fence revokes stale
+ * mutation authority" invariant (E7). Wrong-BINDING rejections (mismatched
+ * branch/baseSha/checkpointSha) are deliberately NOT routed through this
+ * helper - those represent a forged/misdirected event, not a legitimate
+ * out-of-order one, and must leave state (including the fencing floor)
+ * completely untouched (see the E1/E8 tests this preserves unchanged).
+ */
+function noOp(
+  state: EngineeringRunState | undefined,
+  nextFencingToken: number,
+): EngineeringRunState | undefined {
+  if (state === undefined || state.currentFencingToken === nextFencingToken) {
+    return state;
+  }
+  return { ...state, currentFencingToken: nextFencingToken };
+}
+
 function recordApplied(state: EngineeringRunState, event: EngineeringEventEnvelope): {
   appliedEventIds: EventId[];
   appliedIdempotencyKeys: string[];
@@ -178,13 +207,16 @@ function consumePendingAnswerIfAny(
  * checks are treated as errors versus safe no-ops).
  *
  * QUESTION and ANSWER_RECEIVED are declared in `EngineeringRunStatus` (the
- * packet requires the state machine be able to represent them) but are not
- * independently reachable resting states in this bounded slice: ASK_QUESTION
- * moves straight to the durable WAITING state, and a valid ANSWER moves
- * straight to RESUME_AUTHORIZED, both in one atomic transition. Inventing a
- * separately-persisted intermediate resting point for either is not
- * required by any of E1-E16 and is not attempted here (this repo's
- * standing discipline: do not invent unspecified business states).
+ * packet requires the state machine be able to represent them). This pure
+ * reducer deliberately keeps ASK_QUESTION moving straight to the durable
+ * WAITING state, and a valid ANSWER moving straight to RESUME_AUTHORIZED,
+ * both in one atomic transition - inventing a separately-persisted
+ * intermediate resting point here would risk weakening the exactly-once
+ * WAITING/RESUME_AUTHORIZED guarantees (E5/E6). Durable, observable
+ * representability of QUESTION and ANSWER_RECEIVED as their own lifecycle
+ * phases is instead provided by the separate, purely-derived
+ * `projectLifecyclePhases` event-sourced projection below, over this same
+ * reducer and the same durable log - see its doc comment.
  */
 export function applyEvent(
   state: EngineeringRunState | undefined,
@@ -225,7 +257,7 @@ export function applyEvent(
     case "CHECKPOINT": {
       const currentStatus = state?.status ?? "NONE";
       if (!CHECKPOINT_ACCEPTING_STATUSES.has(currentStatus)) {
-        return state;
+        return noOp(state, nextFencingToken);
       }
       if (event.branch === undefined || event.baseSha === undefined || event.checkpointSha === undefined) {
         throw new InvalidEngineeringRunStateError(
@@ -254,7 +286,7 @@ export function applyEvent(
 
     case "BEGIN_VERIFICATION": {
       if (state === undefined || state.status !== "CHECKPOINT_RECEIVED") {
-        return state;
+        return noOp(state, nextFencingToken);
       }
       if (event.checkpointSha !== undefined && event.checkpointSha !== state.checkpointSha) {
         return state; // E1/E8: mismatched SHA cannot enter VERIFYING.
@@ -264,14 +296,14 @@ export function applyEvent(
 
     case "FLAG_REVIEW": {
       if (state === undefined || state.status !== "VERIFYING") {
-        return state;
+        return noOp(state, nextFencingToken);
       }
       return advance(state, appliedTracking, nextFencingToken, { status: "REVIEW_REQUIRED" });
     }
 
     case "RESOLVE": {
       if (state === undefined || (state.status !== "VERIFYING" && state.status !== "REVIEW_REQUIRED")) {
-        return state;
+        return noOp(state, nextFencingToken);
       }
       if (event.status !== "PASS" && event.status !== "CHANGES_REQUIRED") {
         throw new InvalidEngineeringRunStateError('RESOLVE event.status must be "PASS" or "CHANGES_REQUIRED"');
@@ -293,13 +325,16 @@ export function applyEvent(
         evidenceRef: event.evidenceRef,
         decidedAt: event.timestamp,
         resolutionEventId: event.eventId,
+        ...(event.authorizedNextTaskRef !== undefined
+          ? { authorizedNextTaskRef: event.authorizedNextTaskRef }
+          : {}),
       };
       return advance(state, appliedTracking, nextFencingToken, { status: event.status, resolution });
     }
 
     case "ASK_QUESTION": {
       if (state === undefined || !QUESTION_ACCEPTING_STATUSES.has(state.status)) {
-        return state;
+        return noOp(state, nextFencingToken);
       }
       if (event.waitReason === undefined) {
         throw new InvalidEngineeringRunStateError("ASK_QUESTION event requires waitReason");
@@ -354,14 +389,14 @@ export function applyEvent(
 
     case "OWNER_GATE": {
       if (state === undefined || !OWNER_GATE_ACCEPTING_STATUSES.has(state.status)) {
-        return state;
+        return noOp(state, nextFencingToken);
       }
       return advance(state, appliedTracking, nextFencingToken, { status: "OWNER_GATE" });
     }
 
     case "OWNER_GATE_CLEARED": {
       if (state === undefined || state.status !== "OWNER_GATE") {
-        return state;
+        return noOp(state, nextFencingToken);
       }
       if (event.authorityRef === undefined) {
         throw new InvalidEngineeringRunStateError("OWNER_GATE_CLEARED event requires authorityRef");
@@ -371,7 +406,7 @@ export function applyEvent(
 
     case "TIMEOUT": {
       if (state === undefined || TERMINAL_STATUSES.has(state.status) || state.status === "BLOCKED") {
-        return state;
+        return noOp(state, nextFencingToken);
       }
       // E9: timeout/disappearance is always a safe explicit state, never
       // a self-authorized continuation.
@@ -380,7 +415,7 @@ export function applyEvent(
 
     case "RECONCILIATION_REQUIRED": {
       if (state === undefined || !RECONCILIATION_ACCEPTING_STATUSES.has(state.status)) {
-        return state;
+        return noOp(state, nextFencingToken);
       }
       if (event.waitReason === undefined) {
         throw new InvalidEngineeringRunStateError("RECONCILIATION_REQUIRED event requires waitReason");
@@ -393,7 +428,7 @@ export function applyEvent(
 
     case "RECONCILED": {
       if (state === undefined || state.status !== "RECONCILIATION_REQUIRED") {
-        return state;
+        return noOp(state, nextFencingToken);
       }
       if (event.evidenceRef === undefined) {
         throw new InvalidEngineeringRunStateError("RECONCILED event requires evidenceRef");
@@ -408,7 +443,7 @@ export function applyEvent(
 
     case "COMPLETE": {
       if (state === undefined || (state.status !== "PASS" && state.status !== "RESUME_AUTHORIZED")) {
-        return state;
+        return noOp(state, nextFencingToken);
       }
       return advance(state, appliedTracking, nextFencingToken, { status: "COMPLETED" });
     }
@@ -452,4 +487,98 @@ export function reconstructState(
     state = applyEvent(state, event);
   }
   return state;
+}
+
+/**
+ * One durably-projected lifecycle phase, tied to the exact event that
+ * caused it.
+ */
+export interface LifecyclePhaseEntry {
+  readonly phase: EngineeringRunStatus;
+  readonly eventId: EventId;
+  readonly timestamp: string;
+}
+
+/**
+ * QUESTION/ANSWER_RECEIVED representability fix: `applyEvent` deliberately
+ * keeps its exactly-once WAITING/RESUME_AUTHORIZED semantics untouched (no
+ * change to the pure reducer's state machine or its E5/E6 guarantees).
+ * Instead, this is a second, purely-derived event-sourced projection over
+ * the same durable log that makes QUESTION and ANSWER_RECEIVED durably and
+ * observably representable as their own phase entries - not merely
+ * declared enum values - without weakening or duplicating the underlying
+ * exactly-once authorization.
+ *
+ * - Every ASK_QUESTION that is accepted (not a status-guard no-op) emits a
+ *   QUESTION phase immediately followed by a WAITING phase for that same
+ *   eventId; if a pending answer was already buffered for it, a
+ *   RESUME_AUTHORIZED phase is emitted right after (mirrors the reducer's
+ *   immediate reconciliation).
+ * - Every ANSWER that is durably received emits an ANSWER_RECEIVED phase -
+ *   whether it reconciles immediately (followed by RESUME_AUTHORIZED) or is
+ *   buffered out-of-order (E6). A duplicate ANSWER to an
+ *   already-answered question (E5) emits no new phase at all, preserving
+ *   exactly-once observability at the projection layer too.
+ * - Every other accepted, status-changing event projects its resulting
+ *   status as a single phase entry.
+ */
+export function projectLifecyclePhases(
+  events: ReadonlyArray<EngineeringEventEnvelope>,
+): ReadonlyArray<LifecyclePhaseEntry> {
+  const phases: LifecyclePhaseEntry[] = [];
+  let state: EngineeringRunState | undefined;
+
+  for (const event of events) {
+    const before = state;
+    const after = applyEvent(before, event);
+    state = after;
+
+    if (after === undefined) {
+      continue;
+    }
+
+    const statusChanged = before === undefined || before.status !== after.status;
+
+    if (event.eventType === "ASK_QUESTION") {
+      if (!statusChanged) {
+        continue; // status-guard no-op: no question was actually posed.
+      }
+      phases.push({ phase: "QUESTION", eventId: event.eventId, timestamp: event.timestamp });
+      phases.push({ phase: "WAITING", eventId: event.eventId, timestamp: event.timestamp });
+      if (after.status === "RESUME_AUTHORIZED") {
+        phases.push({
+          phase: "RESUME_AUTHORIZED",
+          eventId: event.eventId,
+          timestamp: event.timestamp,
+        });
+      }
+      continue;
+    }
+
+    if (event.eventType === "ANSWER") {
+      const pendingCountBefore = before?.pendingAnswers.length ?? 0;
+      if (statusChanged && after.status === "RESUME_AUTHORIZED") {
+        phases.push({ phase: "ANSWER_RECEIVED", eventId: event.eventId, timestamp: event.timestamp });
+        phases.push({
+          phase: "RESUME_AUTHORIZED",
+          eventId: event.eventId,
+          timestamp: event.timestamp,
+        });
+        continue;
+      }
+      if (!statusChanged && after.pendingAnswers.length > pendingCountBefore) {
+        // Buffered out-of-order answer (E6): received, not yet reconciled.
+        phases.push({ phase: "ANSWER_RECEIVED", eventId: event.eventId, timestamp: event.timestamp });
+      }
+      // Otherwise: duplicate answer to an already-answered question (E5) -
+      // no new observable phase, matching exactly-once semantics.
+      continue;
+    }
+
+    if (statusChanged) {
+      phases.push({ phase: after.status, eventId: event.eventId, timestamp: event.timestamp });
+    }
+  }
+
+  return phases;
 }
