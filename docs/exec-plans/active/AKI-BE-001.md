@@ -359,10 +359,110 @@ Per the "AKI-BE-001 CORRECTION RE-VERIFICATION EVIDENCE ACTION — 17 AUGUST 202
 
 Both files were generated from `git show`/`npm run test`/`tsc`/`grep` output captured at HEAD `692a6ef` and uploaded as `text/plain` (`disableConversionToGoogleType: true`) to preserve exact byte content.
 
+## Run-to-Checkpoint Verification (2026-08-18)
+
+### Purpose
+
+A Run-to-Checkpoint pass on the existing correction checkpoint (`8eebfeb`) — continuity/regression re-verification only, no new finding was reported and none was assumed. No scope expansion. Fresh clone, fresh install, full suite re-run from a clean environment, not a reuse of cached prior results.
+
+### Live HEAD continuity
+
+- Branch `claude/AKI-BE-001-task-packet` fetched and checked out fresh (shallow clone + explicit branch fetch) into an isolated workspace, separate from the AI Commerce (`Akilta-commerce`) checkout used earlier in this session — no cross-project file access at any point.
+- Local `HEAD` after checkout: `c2e7e7dee579b2fab614485631fa3cd1f53c6070`.
+- Live PR #2 `head.sha` (fetched via GitHub API at verification time): `c2e7e7dee579b2fab614485631fa3cd1f53c6070`. **Exact match — no drift between local checkout and the PR's live head.**
+- `git diff --stat 8eebfeb..c2e7e7d -- src/ tests/ package.json tsconfig.json`: empty. The two commits since the `8eebfeb` correction checkpoint (`692a6ef`, `c2e7e7d`) are execution-record documentation only — no code changed. The 82/82 code state re-verified below is therefore the same code PR #2 currently exposes at its live head.
+
+### Commands run and complete results
+
+```
+npm ci
+  -> added 3 packages, audited 4 packages in 2s, found 0 vulnerabilities
+
+npm run test   # -> npm run build && node --test dist/tests/*.test.js
+  -> # tests 82
+     # suites 0
+     # pass 82
+     # fail 0
+     # cancelled 0
+     # skipped 0
+     # todo 0
+
+npx tsc -p tsconfig.json --noEmit
+  -> exit 0, no errors (strict mode)
+
+grep -rniE "akilta-commerce|shopify|ticimax|ikas|ideasoft|t-soft|woocommerce|password|api[_ -]?key|secret|private[_ -]?key|BEGIN (RSA|EC|OPENSSH|PGP) PRIVATE KEY" src/ tests/
+  -> only guardrail doc-comments (evidence.ts, audit-event.ts) and the
+     scan test's own pattern-definition strings (project-boundary-scan.test.ts)
+     -> no actual secret value or commerce-platform reference anywhere.
+
+find . -not -path "./.git/*" -not -path "./node_modules/*" \
+  \( -iname "*.env*" -o -iname "*credential*" \)
+  -> no matches (no stray secret/credential files in the tree)
+```
+
+### Two correction invariants — re-verified in source, not just tests
+
+1. **Tenant/evidence correlation (P0).** `src/domain/evidence.ts:58` — `EvidenceReference.tenantId` is derived structurally from `input.job.tenantId`, not caller-suppliable. `src/domain/verification-result.ts:63` — `createVerificationResult` throws `InvalidVerificationResultError` when `input.evidence.tenantId !== input.job.tenantId`. `src/domain/outcome-job.ts:204` — `verifyOutcomeJob` throws when `verificationResult.tenantId !== job.tenantId`. All three checks confirmed present in source at HEAD `c2e7e7d`, not only asserted by tests.
+2. **Exception-state forged-`to` bypass.** `src/domain/outcome-job.ts:255` — `enterExceptionState`'s `to` parameter is `unknown` (not the `ExceptionState` union), runtime-validated against exactly `BLOCKED`/`RECOVERING`/`ESCALATED`/`STOPPED` before any mutation (lines 262/267/275/281), throwing `InvalidExceptionStateEntryError` otherwise.
+
+### Six adversarial tests — individually confirmed passing at this HEAD
+
+| # | Test name | File | Result |
+|---|---|---|---|
+| 1 | `P0: rejects evidence belonging to a different tenant, even when jobId values collide across tenants` | `tests/evidence.test.ts` | `ok 81` |
+| 2 | `P0: refuses to verify when the VerificationResult belongs to a different tenant, even with matching jobId` | `tests/outcome-job-verify.test.ts` | `ok 56` |
+| 3 | `Finding 2: rejects a forged to: "VERIFIED", which would otherwise bypass the evidence gate` | `tests/outcome-job-exception-state.test.ts` | `ok 46` |
+| 4 | `Finding 2: rejects a forged to: "CLOSED"` | `tests/outcome-job-exception-state.test.ts` | `ok 47` |
+| 5 | `Finding 2: rejects an arbitrary invalid to value` | `tests/outcome-job-exception-state.test.ts` | pass (in full 82/82 run) |
+| 6 | `Finding 2: no job mutation occurs when to is invalid` | `tests/outcome-job-exception-state.test.ts` | pass (in full 82/82 run) |
+
+### Changed-file / diff scope (full task, base -> HEAD)
+
+Base `claude/AKI-GIT-001-repo-bootstrap` @ `623a325aed9ca7534d14314fd25714bf17d699d2` -> HEAD `c2e7e7d`: **31 files changed, 3019 insertions(+), 12 deletions(-)** (`git diff --stat`, computed fresh this checkpoint, not copied from a prior record): `docs/exec-plans/active/AKI-BE-001.md`, `docs/exec-plans/active/AKI-GIT-001.md`, `package.json`, `package-lock.json`, `tsconfig.json`, all 12 `src/**/*.ts` files, all 17 `tests/**/*.test.ts` files listed in the Step-10 checkpoint above. No file outside this set was touched by this Run-to-Checkpoint pass — this was a verification-only pass, zero commits to `src/`, `tests/`, `package.json`, or `tsconfig.json`.
+
+### Evidence manifest — SHA-256 of every `src/`/`tests/` file at HEAD `c2e7e7d`
+
+```
+88b21d9e4a486401307f146a92a886ab389fc199de49997f24a06012e33a08a1  src/application/authorized-outcome-job-operations.ts
+573c3291b2d51aa3ecf6420afb9998f4226548b23e30c385fcc324e842f1a689  src/application/in-memory-audit-log.ts
+b6c29c908d7f6a9ca243597ae827b61e2f791c76eaaaa614134422214b8cb4e1  src/application/in-memory-customer-repository.ts
+6b929960985d813d7a48a38d0049db9c168783d07eaac3ee43947a9f0264329d  src/domain/audit-event.ts
+983f4770277eca2524f2e917114dc89046fa5fafe93bb12dc850183f3d75a8ca  src/domain/authority.ts
+cea0dbaf6144ee14f3c07f0c51019c17774e2de7bbb4e61b0cc2dd81bdc8635e  src/domain/customer.ts
+5a9ebd36fcbd22f6cf604ec009aa83dfb0ed2fd59106979f43290d35bf841478  src/domain/evidence.ts
+2f4aa6a100d4d09923a4b065df03c785e55b81ae2eedd1b9bdf6d50fa2e31b42  src/domain/outcome-job.ts
+7024c255df7db07ec6c176516ad299ff9e06d8977b4c52c65f18f2599d69aa63  src/domain/project.ts
+c6e3e63e2cc95e4ad1bd53d7cd1b89d790de9dd440db2212204daf303f2bf056  src/domain/tenant-scope.ts
+d4713aab1c67cbf9b77f5ee4b90e0e30757bd8410f6775d8f1a4fcd558fd778f  src/domain/verification-result.ts
+a44b3316f8727940a4b780ae85c7944af9c80eaa48dd5e3c6ef929fc2de148b2  src/ports/customer-repository.ts
+a54678c6aef7d8476fff3d6fdd2735faa2405b09828029270535d1da8c93cf04  tests/audit-event.test.ts
+c4df282de604dc85cfd7c03581bb4d2811454c6d7ffa9956e808217775491a07  tests/authority.test.ts
+9ac451a9b8fee18776f98c1eebc2cff03314a866509b2a7f6878b4b3c414e6f0  tests/authorized-outcome-job-operations.test.ts
+faeba41c34a3f82f2b6df3381299fcbb3728bc9e9fd4880170dd11798cdec49e  tests/customer.test.ts
+e8b3ced3e4aefc6f9567448ad65eeb0250feb43a32a5344429e31e149f1c3736  tests/evidence.test.ts
+af12b5c60f60b97e5ad1c498d827e6ca9d571956fa4ed5232256f3e3e119d35a  tests/in-memory-audit-log.test.ts
+fea61398948b3880d191c4fdb272d7fd774d62e70edd9022eccd972b916e4f46  tests/in-memory-customer-repository.test.ts
+e72c2ef21c7484328dd67cde9739ca00431423ca250d7433851d934d69745ece  tests/outcome-job-exception-state.test.ts
+fc0220ed0b14b9a49e2b20ed3ff1771969546547d71dd53d7344fb8aaecfa1f5  tests/outcome-job-verify.test.ts
+3ad5dd81912c23be5dd041a8e64eb90bdc880d33df7f12d67fd90ff8d5878703  tests/outcome-job.test.ts
+1f86eb2223c13d6a7cfb2ebec506e6d8dc9c323e683fc1524575309f1783a6be  tests/project-boundary-scan.test.ts
+970309947ba6bec2ac897a3b67d51b1f6eaae33c4a305be29e71fd7d0b07e540  tests/project.test.ts
+245e48ed3636c755261c1dd04e349ad897fecc34ff86b6564ca2835769cdc1e6  tests/tenant-scope.test.ts
+6e24ea42ca531a15fde2cd914c643e193a36723ddf39d8110b1c3f7aa551c17b  tests/verification-result.test.ts
+```
+
+### In-scope reversible defects found
+
+None. No code, config, or dependency change was made or required by this Run-to-Checkpoint pass.
+
+### Status
+
+`IMPLEMENTED` (unchanged — this is a continuity/regression re-verification of the existing correction checkpoint, not a status advance; `VERIFIED`/`COMPLETED` remain outside Claude's authority per `AGENTS.md` §10). Not merged. Not deployed. No scope expansion.
+
 ## Blocked On
 
-Nothing on the engineering side. Blocked only on ChatGPT's independent review of the correction checkpoint (`8eebfeb`) / the persisted transferable evidence bundle above to move to `VERIFIED`/`COMPLETED` — that transition is not available to Claude (`AGENTS.md` §10).
+Nothing on the engineering side. Blocked only on ChatGPT's independent review of the correction checkpoint (`8eebfeb`, code-identical at live HEAD `c2e7e7d`) / the persisted transferable evidence bundle to move to `VERIFIED`/`COMPLETED` — that transition is not available to Claude (`AGENTS.md` §10).
 
 ## Next Exact Action
 
-ChatGPT / AKILTA Brain to review `AKI-BE-001-correction-evidence-bundle.md` (Drive ID `1tel-_4PP0tAv7h4IDE9P-1aZUXN7uDtk`) and the companion test transcript (Drive ID `10kJm59dWz6HOToQc811JrRXByJYb_hhz`), cross-referenced against the correction checkpoint at `8eebfeb` on PR #2, and issue a repository-recorded re-verification. No further engineering work is authorized on AKI-BE-001 until that review lands or a new bounded task is explicitly assigned. Do not merge PR #2. Do not deploy. Do not begin a subsequent module/task under this record.
+ChatGPT / AKILTA Brain to review `AKI-BE-001-correction-evidence-bundle.md` (Drive ID `1tel-_4PP0tAv7h4IDE9P-1aZUXN7uDtk`) and the companion test transcript (Drive ID `10kJm59dWz6HOToQc811JrRXByJYb_hhz`), cross-referenced against the correction checkpoint — code-identical at live head `c2e7e7d` on PR #2 — and issue a repository-recorded re-verification. No further engineering work is authorized on AKI-BE-001 until that review lands or a new bounded task is explicitly assigned. Do not merge PR #2. Do not deploy. Do not begin a subsequent module/task under this record.
