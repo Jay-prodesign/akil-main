@@ -13,6 +13,7 @@ import {
   WEBSITE_BUILD_V1_BLUEPRINT,
   buildWebsiteBuildV1Fixture,
 } from "../src/fixtures/website-build-v1.js";
+import { buildFullReadinessAssertions } from "./helpers/readiness-fixture.js";
 
 function fullyResolvedFixture() {
   return buildWebsiteBuildV1Fixture();
@@ -51,7 +52,12 @@ test("T1: a valid, fully-resolved plan with a matching approval admits ADMITTED 
     approverRef: "owner:founder",
   });
 
-  const planAdmission = admitPlan({ plan, blueprint, approval });
+  const planAdmission = admitPlan({
+    plan,
+    blueprint,
+    readinessAssertions: buildFullReadinessAssertions(tenantScope, project, plan),
+    approval,
+  });
   assert.equal(planAdmission.status, "ADMITTED");
   assert.equal(planAdmission.evaluatedApprovalId, "approval-t1");
 
@@ -137,15 +143,56 @@ test("T3: an unresolved CONDITIONAL scope decision yields WAITING with the exact
 });
 
 test("T3: a fully-resolved but unapproved plan yields WAITING awaiting plan-approval (DEC-135 admission/approval hardening)", () => {
-  const { plan, blueprint } = compileFromFixture(
+  const { plan, blueprint, tenantScope, project } = compileFromFixture(
     (() => {
       const fixture = fullyResolvedFixture();
       return fixture.soldScope;
     })(),
   );
-  const planAdmission = admitPlan({ plan, blueprint });
+  const planAdmission = admitPlan({
+    plan,
+    blueprint,
+    readinessAssertions: buildFullReadinessAssertions(tenantScope, project, plan),
+  });
   assert.equal(planAdmission.status, "WAITING");
   assert.equal(planAdmission.awaiting?.entity, "plan-approval");
+});
+
+test("F1/T2: a REQUIRED requirement with a missing readiness assertion is BLOCKED with an exact reason, even though the plan is otherwise structurally complete and approved", () => {
+  const fixture = fullyResolvedFixture();
+  const { tenantScope, project, blueprint, soldScope } = fixture;
+  const plan = compilePlan({
+    tenantScope,
+    project,
+    planId: "plan-f1-missing",
+    blueprint,
+    soldScope,
+    evidence: fixture.evidence,
+    now: "2026-08-19T00:00:00.000Z",
+  });
+  const approval = createApprovalReference({
+    plan,
+    approvalId: "approval-f1-missing",
+    approvedAt: "2026-08-19T00:00:00.000Z",
+    approverRef: "owner:founder",
+  });
+  const incompleteReadiness = buildFullReadinessAssertions(tenantScope, project, plan).filter(
+    (a) => a.evidence.relatedRequirementId !== "verification",
+  );
+
+  const planAdmission = admitPlan({
+    plan,
+    blueprint,
+    readinessAssertions: incompleteReadiness,
+    approval,
+  });
+  assert.equal(planAdmission.status, "BLOCKED");
+  assert.equal(planAdmission.blockedReasons.length, 1);
+  assert.match(planAdmission.blockedReasons[0]!, /verification/);
+
+  const specs = deriveOutcomeJobSpecs(plan);
+  const jobAdmissions = admitJobs(planAdmission, specs);
+  assert.ok(jobAdmissions.every((j) => j.status === "BLOCKED"));
 });
 
 test("T5: an OutcomeJobSpec from a different plan fails closed rather than being silently admitted", () => {
@@ -195,7 +242,15 @@ test("T6: a materially changed plan invalidates a stale approval - the newer ver
     approvedAt: "2026-08-19T00:00:00.000Z",
     approverRef: "owner:founder",
   });
-  assert.equal(admitPlan({ plan: planV1, blueprint, approval: approvalForV1 }).status, "ADMITTED");
+  assert.equal(
+    admitPlan({
+      plan: planV1,
+      blueprint,
+      readinessAssertions: buildFullReadinessAssertions(tenantScope, project, planV1),
+      approval: approvalForV1,
+    }).status,
+    "ADMITTED",
+  );
 
   // A materially different sold scope produces a new plan version with
   // different node content - the same approval object cannot admit it.
@@ -217,7 +272,12 @@ test("T6: a materially changed plan invalidates a stale approval - the newer ver
     now: "2026-08-19T01:00:00.000Z",
   });
 
-  const planAdmissionV2 = admitPlan({ plan: planV2, blueprint, approval: approvalForV1 });
+  const planAdmissionV2 = admitPlan({
+    plan: planV2,
+    blueprint,
+    readinessAssertions: buildFullReadinessAssertions(tenantScope, project, planV2),
+    approval: approvalForV1,
+  });
   assert.equal(planAdmissionV2.status, "WAITING");
   assert.equal(planAdmissionV2.awaiting?.entity, "plan-approval");
 });
@@ -239,10 +299,16 @@ test("T7/T8: admitPlan is a pure deterministic recomputation - two independent e
     approvedAt: "2026-08-19T00:00:00.000Z",
     approverRef: "owner:founder",
   });
+  const readinessAssertions = buildFullReadinessAssertions(
+    fixture.tenantScope,
+    fixture.project,
+    plan,
+  );
 
-  const first = admitPlan({ plan, blueprint: fixture.blueprint, approval });
-  const second = admitPlan({ plan, blueprint: fixture.blueprint, approval });
+  const first = admitPlan({ plan, blueprint: fixture.blueprint, readinessAssertions, approval });
+  const second = admitPlan({ plan, blueprint: fixture.blueprint, readinessAssertions, approval });
   assert.deepEqual(first, second);
+  assert.equal(first.status, "ADMITTED");
 
   const specs = deriveOutcomeJobSpecs(plan);
   const jobsFirst = admitJobs(first, specs);

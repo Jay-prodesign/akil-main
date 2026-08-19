@@ -10,6 +10,7 @@ import { createApprovalReference } from "../src/domain/approval-reference.js";
 import { admitPlan, admitJobs } from "../src/domain/plan-admission.js";
 import { wireAdmittedOutcomeJobs, InvalidOutcomeJobWiringError } from "../src/domain/outcome-job-wiring.js";
 import { buildWebsiteBuildV1Fixture } from "../src/fixtures/website-build-v1.js";
+import { buildFullReadinessAssertions } from "./helpers/readiness-fixture.js";
 
 test("T1: an ADMITTED plan wires exactly the REQUIRED-derived OutcomeJobSpecs into DRAFT OutcomeJobs with correct lineage", () => {
   const fixture = buildWebsiteBuildV1Fixture();
@@ -28,7 +29,13 @@ test("T1: an ADMITTED plan wires exactly the REQUIRED-derived OutcomeJobSpecs in
     approvedAt: "2026-08-19T00:00:00.000Z",
     approverRef: "owner:founder",
   });
-  const planAdmission = admitPlan({ plan, blueprint: fixture.blueprint, approval });
+  const planAdmission = admitPlan({
+    plan,
+    blueprint: fixture.blueprint,
+    readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, plan),
+    approval,
+  });
+  assert.equal(planAdmission.status, "ADMITTED");
   const specs = deriveOutcomeJobSpecs(plan);
   const jobAdmissions = admitJobs(planAdmission, specs);
 
@@ -135,7 +142,16 @@ test("T4: an unresolved scope decision (WAITING) that is later answered transiti
     approvedAt: "2026-08-19T00:05:00.000Z",
     approverRef: "owner:founder",
   });
-  const resolvedAdmission = admitPlan({ plan: resolvedPlan, blueprint: fixture.blueprint, approval });
+  const resolvedAdmission = admitPlan({
+    plan: resolvedPlan,
+    blueprint: fixture.blueprint,
+    readinessAssertions: buildFullReadinessAssertions(
+      fixture.tenantScope,
+      fixture.project,
+      resolvedPlan,
+    ),
+    approval,
+  });
   assert.equal(resolvedAdmission.status, "ADMITTED");
 
   const specs = deriveOutcomeJobSpecs(resolvedPlan);
@@ -176,7 +192,13 @@ test("T5: wiring for a different tenant/project than the plan admission fails cl
     approvedAt: "2026-08-19T00:00:00.000Z",
     approverRef: "owner:founder",
   });
-  const planAdmission = admitPlan({ plan, blueprint: fixture.blueprint, approval });
+  const planAdmission = admitPlan({
+    plan,
+    blueprint: fixture.blueprint,
+    readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, plan),
+    approval,
+  });
+  assert.equal(planAdmission.status, "ADMITTED");
   const specs = deriveOutcomeJobSpecs(plan);
   const jobAdmissions = admitJobs(planAdmission, specs);
 
@@ -227,7 +249,13 @@ test("T11: wired OutcomeJob identifiers remain traceable to their exact Project/
     approvedAt: "2026-08-19T00:00:00.000Z",
     approverRef: "owner:founder",
   });
-  const planAdmission = admitPlan({ plan, blueprint: fixture.blueprint, approval });
+  const planAdmission = admitPlan({
+    plan,
+    blueprint: fixture.blueprint,
+    readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, plan),
+    approval,
+  });
+  assert.equal(planAdmission.status, "ADMITTED");
   const specs = deriveOutcomeJobSpecs(plan);
   const jobAdmissions = admitJobs(planAdmission, specs);
   const jobs = wireAdmittedOutcomeJobs({
@@ -243,4 +271,73 @@ test("T11: wired OutcomeJob identifiers remain traceable to their exact Project/
     assert.ok(job.jobId.startsWith(`${plan.planId}:v${plan.version}:`));
     assert.ok(job.jobId.includes(job.jobFamily));
   }
+});
+
+test("F4: a JobAdmissionResult whose lineage does not match the planAdmission fails closed at the wiring boundary, independently of admitJobs", () => {
+  const fixture = buildWebsiteBuildV1Fixture();
+  const plan = compilePlan({
+    tenantScope: fixture.tenantScope,
+    project: fixture.project,
+    planId: "plan-wiring-f4",
+    blueprint: fixture.blueprint,
+    soldScope: fixture.soldScope,
+    evidence: fixture.evidence,
+    now: "2026-08-19T00:00:00.000Z",
+  });
+  const approval = createApprovalReference({
+    plan,
+    approvalId: "approval-wiring-f4",
+    approvedAt: "2026-08-19T00:00:00.000Z",
+    approverRef: "owner:founder",
+  });
+  const planAdmission = admitPlan({
+    plan,
+    blueprint: fixture.blueprint,
+    readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, plan),
+    approval,
+  });
+  assert.equal(planAdmission.status, "ADMITTED");
+  const specs = deriveOutcomeJobSpecs(plan);
+  const jobAdmissions = admitJobs(planAdmission, specs);
+
+  // Hand-built, mixed-lineage JobAdmissionResult: correct specId (so it
+  // matches a real spec) but a planVersion that does not agree with the
+  // planAdmission it is being wired against - exactly the "malformed/mixed
+  // JobAdmissionResult lineage" the wiring boundary must independently
+  // reject rather than trust from its caller.
+  const mismatchedJobAdmissions = [
+    { ...jobAdmissions[0]!, planVersion: planAdmission.planVersion + 1 },
+  ];
+  assert.throws(
+    () =>
+      wireAdmittedOutcomeJobs({
+        tenantScope: fixture.tenantScope,
+        customer: fixture.customer,
+        project: fixture.project,
+        planAdmission,
+        jobAdmissions: mismatchedJobAdmissions,
+        specs,
+      }),
+    InvalidOutcomeJobWiringError,
+  );
+
+  // A JobAdmissionResult whose requirementId disagrees with the spec it
+  // claims to match (specId correct, requirementId swapped for a different
+  // real requirement's) must also fail closed rather than silently wiring
+  // a job under the wrong requirement.
+  const mismatchedRequirement = [
+    { ...jobAdmissions[0]!, requirementId: jobAdmissions[1]!.requirementId },
+  ];
+  assert.throws(
+    () =>
+      wireAdmittedOutcomeJobs({
+        tenantScope: fixture.tenantScope,
+        customer: fixture.customer,
+        project: fixture.project,
+        planAdmission,
+        jobAdmissions: mismatchedRequirement,
+        specs,
+      }),
+    InvalidOutcomeJobWiringError,
+  );
 });

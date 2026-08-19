@@ -3,6 +3,7 @@ import type { OfferBlueprintVersion } from "./offer-blueprint.js";
 import type { OutcomeJobSpec } from "./outcome-job-spec.js";
 import { validatePlan } from "./project-plan-validation.js";
 import { isApprovalValidForPlan, type ApprovalReference } from "./approval-reference.js";
+import { evaluateReadiness, type EvidenceReadinessAssertion } from "./admission-readiness.js";
 
 export class InvalidPlanAdmissionError extends Error {
   constructor(reason: string) {
@@ -58,16 +59,29 @@ function planIdentity(
 /**
  * T1-T3/T6/T9: fails closed by construction - every branch either returns
  * BLOCKED/WAITING with an explicit reason or requires every prerequisite
- * (plan completeness AND a version/payload-matching approval) to be
- * simultaneously satisfied before returning ADMITTED. Pure and
- * deterministic: identical inputs always produce an identical result, so
- * "restart"/"replay" (T7/T8) is satisfied by construction rather than by
- * separate dedup bookkeeping - see `outcome-job-wiring.ts` for how this
- * carries through to idempotent job creation.
+ * (plan completeness, capability/access/evidence readiness, AND a
+ * version/payload-matching approval) to be simultaneously satisfied before
+ * returning ADMITTED. Pure and deterministic: identical inputs always
+ * produce an identical result, so pure-function "replay" is satisfied by
+ * construction; durable restart/resume authority (T4/T7/T8) is provided
+ * separately by `durable-plan-admission-store.ts`, which persists this
+ * function's result rather than relying on recomputation alone - see that
+ * module's doc comment for why recomputation alone is not sufficient
+ * (Brain CHANGES_REQUIRED F2, DEL-003 second slice round 1).
+ *
+ * F1 correction: `readinessAssertions` gates every REQUIRED requirement's
+ * capability/access/evidence readiness (`evaluateReadiness`). Per the
+ * packet's own minimum test contract (T2 vs T3), a readiness gap is a
+ * BLOCKED finding - distinct from an unresolved customer scope decision or
+ * missing approval, both of which remain WAITING. Readiness is evaluated
+ * only once the plan is structurally COMPLETE: an incomplete plan's own
+ * BLOCKED/WAITING disposition already takes precedence and is unaffected by
+ * readiness evidence.
  */
 export function admitPlan(input: {
   plan: ProjectPlanVersion;
   blueprint: OfferBlueprintVersion;
+  readinessAssertions?: ReadonlyArray<EvidenceReadinessAssertion>;
   approval?: ApprovalReference;
 }): PlanAdmissionResult {
   const validation = validatePlan(input.plan, input.blueprint);
@@ -102,6 +116,22 @@ export function admitPlan(input: {
       status: "WAITING",
       blockedReasons: [],
       awaiting: { entity: unknown.requirementId, reason: unknown.message },
+    };
+  }
+
+  const requiredRequirementIds = input.plan.nodes
+    .filter((node) => node.disposition === "REQUIRED")
+    .map((node) => node.requirementId);
+  const readiness = evaluateReadiness({
+    plan: input.plan,
+    requiredRequirementIds,
+    assertions: input.readinessAssertions ?? [],
+  });
+  if (readiness.status === "NOT_READY") {
+    return {
+      ...planIdentity(input.plan),
+      status: "BLOCKED",
+      blockedReasons: readiness.gaps.map((gap) => gap.reason),
     };
   }
 

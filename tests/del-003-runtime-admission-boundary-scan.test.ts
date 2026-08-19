@@ -10,6 +10,11 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const RUNTIME_ADMISSION_FILES = [
   "src/domain/plan-admission.ts",
   "src/domain/outcome-job-wiring.ts",
+  "src/domain/admission-readiness.ts",
+  "src/domain/plan-admission-event.ts",
+  "src/domain/plan-admission-run-state.ts",
+  "src/domain/durable-plan-admission-store.ts",
+  "src/domain/durable-outcome-job-store.ts",
 ];
 
 const SECRET_PATTERNS: ReadonlyArray<{ label: string; pattern: RegExp }> = [
