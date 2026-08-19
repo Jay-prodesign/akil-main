@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { applyEvent, type EngineeringRunState } from "../src/domain/engineering-run-state.js";
+import { applyEvent, reconstructState, type EngineeringRunState } from "../src/domain/engineering-run-state.js";
 import { makeEvent } from "./helpers/engineering-event-helpers.js";
 
 const branch = "claude/ENG-ORCH-001-task-packet";
@@ -280,6 +280,68 @@ test("E7 (adversarial): a higher fence observed via a business-invalid no-op eve
   )!;
   assert.equal(sameTokenReplay.currentFencingToken, 10);
   assert.equal(sameTokenReplay.status, "VERIFYING");
+});
+
+test("E7 (pre-state): a higher fence observed before any run exists still revokes a subsequent lower-fenced initial CHECKPOINT", () => {
+  // Nothing durable exists for this project/task/run yet, so a premature
+  // ASK_QUESTION is a status-guard no-op (applyEvent(undefined, ...)
+  // returns undefined, per its own semantics) - but its fencingToken must
+  // still be remembered by the replay boundary (reconstructState), not
+  // silently lost just because there was no EngineeringRunState to attach
+  // it to yet.
+  const prematureHighFence = makeEvent({
+    eventType: "ASK_QUESTION",
+    waitReason: "premature - no run yet",
+    fencingToken: 10,
+  });
+  const staleInitialCheckpoint = checkpointEvent(3);
+
+  const state = reconstructState([prematureHighFence, staleInitialCheckpoint]);
+  // The stale (lower-fenced) CHECKPOINT must fail closed - no run is
+  // created at all, proving a stale/dual lease holder cannot win even the
+  // very FIRST mutation once a newer fence has already been observed.
+  assert.equal(state, undefined);
+});
+
+test("E7 (pre-state): a fresh CHECKPOINT at or above the pre-observed floor still succeeds and carries the correct floor forward", () => {
+  const prematureHighFence = makeEvent({
+    eventType: "ASK_QUESTION",
+    waitReason: "premature - no run yet",
+    fencingToken: 10,
+  });
+  const validInitialCheckpoint = checkpointEvent(10);
+
+  const state = reconstructState([prematureHighFence, validInitialCheckpoint]);
+  assert.ok(state);
+  assert.equal(state!.status, "CHECKPOINT_RECEIVED");
+  assert.equal(state!.currentFencingToken, 10);
+});
+
+test("E7 (pre-state): once a run exists, the pre-state floor tracking is a no-op - normal in-run fencing behavior is unchanged", () => {
+  // A sanity check that the reconstructState pre-filter only changes
+  // behavior in the pre-state window: replaying a normal, fully in-order,
+  // monotonically-increasing-token event sequence through
+  // reconstructState must produce the exact same state as calling
+  // applyEvent directly in sequence.
+  const events = [
+    checkpointEvent(1),
+    makeEvent({ eventType: "BEGIN_VERIFICATION", checkpointSha, fencingToken: 2 }),
+    makeEvent({
+      eventType: "RESOLVE",
+      status: "PASS",
+      checkpointSha,
+      authorityRef: "Brain/ChatGPT",
+      evidenceRef: "internal://tests/e7-prestate-sanity",
+      fencingToken: 3,
+    }),
+  ];
+  const viaReconstruct = reconstructState(events);
+  let viaDirect: EngineeringRunState | undefined;
+  for (const event of events) {
+    viaDirect = applyEvent(viaDirect, event);
+  }
+  assert.deepEqual(viaReconstruct, viaDirect);
+  assert.equal(viaReconstruct?.status, "PASS");
 });
 
 test("E8: wrong project/task/runId event throws rather than silently mutating", () => {

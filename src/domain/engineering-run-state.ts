@@ -478,13 +478,41 @@ function advance(
  * module doc comment on why: replay must be able to buffer an
  * out-of-order ANSWER exactly as a live apply would, for E6 to hold
  * regardless of which order events actually became durable in).
+ *
+ * E7 pre-state fencing fix: `applyEvent`'s fencing floor lives on
+ * `EngineeringRunState.currentFencingToken`, which does not exist before
+ * the first successful CHECKPOINT. Without this, a higher fencing token
+ * observed via any event durably appended BEFORE that first CHECKPOINT
+ * (e.g. a premature ASK_QUESTION/TIMEOUT with no run yet to attach to)
+ * would be silently lost, letting a later, lower-fenced CHECKPOINT
+ * attempt still succeed and create the run - a stale/dual lease
+ * "winning" the very first mutation, despite a newer fence having already
+ * been observed. This replay loop tracks that pre-state floor explicitly
+ * (`observedFencingFloor`, independent of `state`) and skips any event
+ * whose token falls below it, so the first CHECKPOINT to actually create
+ * state is provably the freshest one seen so far - not merely the
+ * freshest one `applyEvent` happened to be handed a defined `state` for.
+ * Once state exists, this floor and `state.currentFencingToken` track
+ * identically (every accepted event advances both to the same value), so
+ * this pre-filter is a genuine no-op for every event that arrives after
+ * the run already exists - it only changes behavior in the pre-state
+ * window.
  */
 export function reconstructState(
   events: ReadonlyArray<EngineeringEventEnvelope>,
 ): EngineeringRunState | undefined {
   let state: EngineeringRunState | undefined;
+  let observedFencingFloor = 0;
   for (const event of events) {
+    if (event.fencingToken < observedFencingFloor) {
+      // Stale relative to an already-observed fence, even though no
+      // EngineeringRunState exists yet to reject it through the normal
+      // applyEvent path - skip it entirely rather than letting it reach
+      // (and possibly succeed against) an undefined state.
+      continue;
+    }
     state = applyEvent(state, event);
+    observedFencingFloor = Math.max(observedFencingFloor, event.fencingToken);
   }
   return state;
 }

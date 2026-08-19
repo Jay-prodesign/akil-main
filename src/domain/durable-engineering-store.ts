@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { EngineeringEventEnvelope, TaskId, RunId } from "./engineering-event-envelope.js";
-import { applyEvent, type EngineeringRunState } from "./engineering-run-state.js";
+import { reconstructState, type EngineeringRunState } from "./engineering-run-state.js";
 
 export class InvalidDurableEngineeringStoreError extends Error {
   constructor(reason: string) {
@@ -80,11 +80,6 @@ export class FileDurableEngineeringStore implements DurableEngineeringStore {
   }
 
   getState(projectRef: string, taskId: TaskId, runId: RunId): EngineeringRunState | undefined {
-    const events = this.getEvents(projectRef, taskId, runId);
-    let state: EngineeringRunState | undefined;
-    for (const event of events) {
-      state = applyEvent(state, event);
-    }
-    return state;
+    return reconstructState(this.getEvents(projectRef, taskId, runId));
   }
 }

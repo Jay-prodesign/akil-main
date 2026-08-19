@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileDurableEngineeringStore } from "../src/domain/durable-engineering-store.js";
 import type { TaskId, RunId } from "../src/domain/engineering-event-envelope.js";
+import { invokeSafely, type WorkerInvoker } from "../src/domain/worker-invoker.js";
 import { makeEvent } from "./helpers/engineering-event-helpers.js";
 
 const branch = "claude/ENG-ORCH-001-task-packet";
@@ -107,6 +108,73 @@ test("appendEvent durably records every event, including ones a replay will trea
     const state = store.getState("AKILTA", TASK_ID, RUN_1);
     assert.equal(state?.status, "VERIFYING");
     assert.equal(state?.checkpointSha, checkpointSha);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("E10: a temporary invoker/dependency failure (invokeSafely -> TIMEOUT) persists as durable BLOCKED state across a simulated restart, and retry after failure cannot duplicate continuation authorization", async () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableEngineeringStore(dir);
+    store.appendEvent(makeEvent({ eventType: "CHECKPOINT", branch, baseSha, checkpointSha, fencingToken: 1 }));
+    store.appendEvent(makeEvent({ eventType: "BEGIN_VERIFICATION", checkpointSha, fencingToken: 2 }));
+
+    // A temporary invoker/dependency failure, translated via invokeSafely()
+    // into an explicit TEMPORARY_FAILURE outcome (E10) and then durably
+    // recorded through the existing TIMEOUT -> BLOCKED reducer path (E9),
+    // not left as an ephemeral in-memory return value.
+    const failingInvoker: WorkerInvoker = {
+      role: "CLAUDE_PRIMARY_ENGINEER",
+      invoke: async () => {
+        throw new Error("dependency temporarily unavailable");
+      },
+    };
+    const outcome = await invokeSafely(failingInvoker, {
+      taskId: "ENG-ORCH-001",
+      branch,
+      checkpointSha,
+    });
+    assert.equal(outcome.status, "TEMPORARY_FAILURE");
+    store.appendEvent(makeEvent({ eventType: "TIMEOUT", fencingToken: 3 }));
+
+    const stateBeforeRestart = store.getState("AKILTA", TASK_ID, RUN_1);
+    assert.equal(stateBeforeRestart?.status, "BLOCKED");
+
+    // Simulate process restart: a brand-new store instance, no in-memory
+    // state carried over, reading the same durable directory - the
+    // retryable bounded failure state survives, it is not lost.
+    const storeAfterRestart = new FileDurableEngineeringStore(dir);
+    const stateAfterRestart = storeAfterRestart.getState("AKILTA", TASK_ID, RUN_1);
+    assert.equal(stateAfterRestart?.status, "BLOCKED");
+    assert.deepEqual(stateAfterRestart, stateBeforeRestart);
+
+    // A retry succeeds independently...
+    const retryOutcome = await invokeSafely(
+      { role: "CLAUDE_PRIMARY_ENGINEER", invoke: async () => ({ accepted: true }) },
+      { taskId: "ENG-ORCH-001", branch, checkpointSha },
+    );
+    assert.equal(retryOutcome.status, "ACCEPTED");
+
+    // ...but ACCEPTED alone never authorizes continuation on its own - only
+    // a durable RESOLVE/ANSWER applied through the reducer can. A stray
+    // RESOLVE arriving while still BLOCKED is correctly rejected as a
+    // business no-op, proving the retry cannot duplicate or self-authorize
+    // continuation.
+    storeAfterRestart.appendEvent(
+      makeEvent({
+        eventType: "RESOLVE",
+        status: "PASS",
+        checkpointSha,
+        authorityRef: "Brain/ChatGPT",
+        evidenceRef: "internal://tests/e10-retry-no-duplicate-authorization",
+        fencingToken: 4,
+      }),
+    );
+    const stateAfterStrayResolve = storeAfterRestart.getState("AKILTA", TASK_ID, RUN_1);
+    assert.notEqual(stateAfterStrayResolve?.status, "PASS");
+    assert.notEqual(stateAfterStrayResolve?.status, "RESUME_AUTHORIZED");
+    assert.equal(stateAfterStrayResolve?.status, "BLOCKED");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
