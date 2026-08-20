@@ -17,7 +17,7 @@ export type VerificationStatus = "PASSED" | "FAILED";
  * is the sole authority for whether a job's evidence satisfied its
  * verification requirement - kept structurally distinct from
  * EvidenceReference (supports the claim) and AuditEvent (records
- * lineage, not yet implemented).
+ * lineage).
  */
 export interface VerificationResult {
   readonly verificationId: VerificationId;

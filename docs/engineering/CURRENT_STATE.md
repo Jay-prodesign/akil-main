@@ -1,6 +1,6 @@
 # CURRENT_STATE.md
 
-Last updated: 2026-08-20, by Claude (Primary Engineer), during the DEC-144 V1 Fast Lane Stage B coherence pass (documentation-only correction; no code change).
+Last updated: 2026-08-20, by Claude (Primary Engineer), after the DEC-144 final Brain verification's F1 round-2 correction and the subsequent Stage E consolidation pass (documentation-only correction; no further code change beyond the F1 round-2 fix itself, recorded below).
 
 ## Repository identity
 
@@ -16,7 +16,7 @@ Last updated: 2026-08-20, by Claude (Primary Engineer), during the DEC-144 V1 Fa
   - `AKI-BE-001` — `TenantScope`, `Customer`, `Project`, `OutcomeJob` (+ lifecycle/transitions), `EvidenceReference`, `VerificationResult`, `AuthorityContext`, `AuditEvent`, plus in-memory ports/adapters.
   - `ENG-ORCH-001` — `EngineeringEventEnvelope`, `EngineeringRunState` (pure reducer, fencing/idempotency/replay), `FileDurableEngineeringStore`, `WorkerInvoker`/`invokeSafely`, DEC-138 provenance.
   - `DEL-003` — `OfferBlueprintVersion`, `SoldScope`, `CustomerEvidenceItem`, `ProjectPlanVersion`/`compilePlan`, `PlanValidationResult`/`validatePlan`, `OutcomeJobSpec`, `ProjectPlanDiff`, `ApprovalReference`; second slice adds `PlanAdmissionResult`/`admitPlan`/`admitJobs`, `EvidenceReadinessAssertion`/`evaluateReadiness`, `wireAdmittedOutcomeJobs`, and durable admission/job stores (`durable-plan-admission-store.ts`, `durable-outcome-job-store.ts`).
-- `tests/` — Node's built-in `node:test` runner exercises all of the above (208 tests at the current checkpoint; `npm run test`).
+- `tests/` — Node's built-in `node:test` runner exercises all of the above (212 tests at the current checkpoint; `npm run test`).
 - `package.json`/`package-lock.json`/`tsconfig.json` — strict-mode TypeScript, zero runtime dependencies, `devDependencies` limited to `typescript` + `@types/node`.
 
 ## What does not exist yet
@@ -30,7 +30,7 @@ Last updated: 2026-08-20, by Claude (Primary Engineer), during the DEC-144 V1 Fa
 
 ## Active tasks
 
-- `DEL-003` (second bounded slice: runtime admission + OutcomeJob wiring) — Status: **IMPLEMENTED / SELF-VALIDATED / PENDING V1 BRAIN AUDIT** at commit `3253439e13e40bcb4ec500624cb7c51831ab56ee`, branch `claude/DEL-003-runtime-admission-task-packet`. Round-1 correction closed Brain's F1–F4 CHANGES_REQUIRED findings (readiness admission gating, durable wait/resume/restart proof, persisted job idempotency, wiring-boundary lineage validation). See `docs/exec-plans/active/DEL-003.md`.
+- `DEL-003` (second bounded slice: runtime admission + OutcomeJob wiring) — Status: **IMPLEMENTED / SELF-VALIDATED / PENDING NEXT V1 BRAIN AUDIT** at commit `72e2d614e8a6347ca9f3a75f6f0558593caff637`, branch `claude/DEL-003-runtime-admission-task-packet`. Round-1 correction closed Brain's F1–F4 CHANGES_REQUIRED findings; the DEC-144 final Brain verification pass then accepted F2/F3/F4 and VQA-001's Contact correction but found one remaining F1 defect (readiness gate could treat any current-version FACT as positive readiness regardless of what it actually asserted), closed by the round-2 correction (structural `readinessOutcome` field). See `docs/exec-plans/active/DEL-003.md`.
 - `AKI-GIT-001` — Status: **IMPLEMENTED — READY FOR CHATGPT VERIFICATION**, draft PR `#1` open, not merged. See `docs/exec-plans/active/AKI-GIT-001.md`.
 
 ## Completed tasks
@@ -41,4 +41,4 @@ Last updated: 2026-08-20, by Claude (Primary Engineer), during the DEC-144 V1 Fa
 
 ## Known conflicts / blockers
 
-- None found. `git status` is clean at every checkpoint above; the full history is one linear chain from bootstrap through the current checkpoint (`AKI-GIT-001` → `AKI-BE-001` → `ENG-ORCH-001` first slice → `DEL-003` first slice → `ENG-ORCH-001` round-3 correction → `DEL-003` second slice + round-1 correction, current HEAD `3253439`), verifiable via `git log --oneline` on this branch.
+- None found. `git status` is clean at every checkpoint above; the full history is one linear chain from bootstrap through the current checkpoint (`AKI-GIT-001` → `AKI-BE-001` → `ENG-ORCH-001` first slice → `DEL-003` first slice → `ENG-ORCH-001` round-3 correction → `DEL-003` second slice round-1 correction (`3253439`) → V1 Fast Lane Stage B documentation pass (`ff832ce`) → `DEL-003` second slice round-2 correction (`72e2d61`), current HEAD `72e2d61`), verifiable via `git log --oneline` on this branch.
