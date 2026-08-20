@@ -26,7 +26,7 @@ function compiledPlan() {
   return { ...fixture, plan };
 }
 
-test("F1: a full set of current-version FACT assertions for every REQUIRED node is READY with zero gaps", () => {
+test("F1: a full set of current-version FACT assertions, each structurally SATISFIED, is READY with zero gaps", () => {
   const { tenantScope, project, plan } = compiledPlan();
   const requiredRequirementIds = plan.nodes
     .filter((n) => n.disposition === "REQUIRED")
@@ -38,6 +38,81 @@ test("F1: a full set of current-version FACT assertions for every REQUIRED node 
   });
   assert.equal(result.status, "READY");
   assert.deepEqual(result.gaps, []);
+});
+
+test("F1 round-2: a current FACT that structurally reports UNSATISFIED is a fail-closed UNSATISFIED gap, not READY", () => {
+  const { tenantScope, project, plan } = compiledPlan();
+  const requiredRequirementIds = plan.nodes
+    .filter((n) => n.disposition === "REQUIRED")
+    .map((n) => n.requirementId);
+  const assertions = buildFullReadinessAssertions(tenantScope, project, plan).map((a) =>
+    a.evidence.relatedRequirementId === "design-build"
+      ? {
+          ...a,
+          evidence: createCustomerEvidenceItem({
+            tenantScope,
+            project,
+            evidenceRef: "ev-design-build-unavailable",
+            kind: "FACT",
+            subject: "Required design-build access is confirmed unavailable",
+            sourceLocator: "internal://test-fixtures/readiness/design-build-unsatisfied",
+            relatedRequirementId: "design-build",
+          }),
+          readinessOutcome: "UNSATISFIED" as const,
+        }
+      : a,
+  );
+  const result = evaluateReadiness({ plan, requiredRequirementIds, assertions });
+  assert.equal(result.status, "NOT_READY");
+  const gap = result.gaps.find((g) => g.requirementId === "design-build");
+  assert.ok(gap !== undefined);
+  assert.equal(gap!.kind, "UNSATISFIED");
+  assert.match(gap!.reason, /unavailable\/unsatisfied/);
+});
+
+test("F1 round-2: a negative FACT cannot be outweighed by kind alone - UNSATISFIED still blocks even though kind is FACT", () => {
+  const { tenantScope, project, plan } = compiledPlan();
+  const requiredRequirementIds = plan.nodes
+    .filter((n) => n.disposition === "REQUIRED")
+    .map((n) => n.requirementId);
+  const assertions = buildFullReadinessAssertions(tenantScope, project, plan).map((a) =>
+    a.evidence.relatedRequirementId === "handover"
+      ? { ...a, readinessOutcome: "UNSATISFIED" as const }
+      : a,
+  );
+  const result = evaluateReadiness({ plan, requiredRequirementIds, assertions });
+  assert.equal(result.status, "NOT_READY");
+  const gap = result.gaps.find((g) => g.requirementId === "handover");
+  assert.ok(gap !== undefined);
+  assert.equal(gap!.kind, "UNSATISFIED");
+});
+
+test("F1 round-2: two current FACT assertions for the same requirement with conflicting readinessOutcome fail closed as AMBIGUOUS", () => {
+  const { tenantScope, project, plan } = compiledPlan();
+  const requiredRequirementIds = plan.nodes
+    .filter((n) => n.disposition === "REQUIRED")
+    .map((n) => n.requirementId);
+  const base = buildFullReadinessAssertions(tenantScope, project, plan);
+  const conflictingAdditional = {
+    evidence: createCustomerEvidenceItem({
+      tenantScope,
+      project,
+      evidenceRef: "ev-handover-conflicting-unsatisfied",
+      kind: "FACT" as const,
+      subject: "A second, disagreeing handover readiness assertion",
+      sourceLocator: "internal://test-fixtures/readiness/handover-conflicting",
+      relatedRequirementId: "handover",
+    }),
+    assertedForPlanVersion: plan.version,
+    readinessOutcome: "UNSATISFIED" as const,
+  };
+  const assertions = [...base, conflictingAdditional];
+  const result = evaluateReadiness({ plan, requiredRequirementIds, assertions });
+  assert.equal(result.status, "NOT_READY");
+  const gap = result.gaps.find((g) => g.requirementId === "handover");
+  assert.ok(gap !== undefined);
+  assert.equal(gap!.kind, "AMBIGUOUS");
+  assert.match(gap!.reason, /conflicting readiness outcomes/);
 });
 
 test("F1: a REQUIRED requirement with no readiness assertion at all is a MISSING gap with an exact reason", () => {
@@ -129,6 +204,7 @@ test("F1: a readiness assertion for a different tenant/project fails closed rath
       relatedRequirementId: "discovery-evidence-intake",
     }),
     assertedForPlanVersion: plan.version,
+    readinessOutcome: "SATISFIED" as const,
   };
   const requiredRequirementIds = plan.nodes
     .filter((n) => n.disposition === "REQUIRED")

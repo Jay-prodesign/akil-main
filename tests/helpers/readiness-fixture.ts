@@ -5,11 +5,12 @@ import type { ProjectPlanVersion } from "../../src/domain/project-plan.js";
 import type { EvidenceReadinessAssertion } from "../../src/domain/admission-readiness.js";
 
 /**
- * F1 test helper: builds one unambiguous FACT readiness assertion, for the
- * exact current plan version, for every REQUIRED node in `plan` - the
- * minimum a caller must supply for `admitPlan`'s readiness gate to clear.
- * Individual tests remove/mutate entries from this list to exercise
- * MISSING/STALE/AMBIGUOUS gaps.
+ * F1 test helper: builds one unambiguous FACT readiness assertion,
+ * structurally reporting `readinessOutcome: "SATISFIED"`, for the exact
+ * current plan version, for every REQUIRED node in `plan` - the minimum a
+ * caller must supply for `admitPlan`'s readiness gate to clear. Individual
+ * tests remove/mutate entries from this list to exercise
+ * MISSING/STALE/AMBIGUOUS/UNSATISFIED gaps.
  */
 export function buildFullReadinessAssertions(
   tenantScope: TenantScope,
@@ -29,5 +30,6 @@ export function buildFullReadinessAssertions(
         relatedRequirementId: node.requirementId,
       }),
       assertedForPlanVersion: plan.version,
+      readinessOutcome: "SATISFIED" as const,
     }));
 }

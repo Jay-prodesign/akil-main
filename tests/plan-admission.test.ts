@@ -195,6 +195,46 @@ test("F1/T2: a REQUIRED requirement with a missing readiness assertion is BLOCKE
   assert.ok(jobAdmissions.every((j) => j.status === "BLOCKED"));
 });
 
+test("F1 round-2: a negative (readinessOutcome UNSATISFIED) current FACT cannot clear admitPlan, even though the plan is otherwise structurally complete and approved", () => {
+  const fixture = fullyResolvedFixture();
+  const { tenantScope, project, blueprint, soldScope } = fixture;
+  const plan = compilePlan({
+    tenantScope,
+    project,
+    planId: "plan-f1-unsatisfied",
+    blueprint,
+    soldScope,
+    evidence: fixture.evidence,
+    now: "2026-08-19T00:00:00.000Z",
+  });
+  const approval = createApprovalReference({
+    plan,
+    approvalId: "approval-f1-unsatisfied",
+    approvedAt: "2026-08-19T00:00:00.000Z",
+    approverRef: "owner:founder",
+  });
+  const negativeReadiness = buildFullReadinessAssertions(tenantScope, project, plan).map((a) =>
+    a.evidence.relatedRequirementId === "verification"
+      ? { ...a, readinessOutcome: "UNSATISFIED" as const }
+      : a,
+  );
+
+  const planAdmission = admitPlan({
+    plan,
+    blueprint,
+    readinessAssertions: negativeReadiness,
+    approval,
+  });
+  assert.equal(planAdmission.status, "BLOCKED");
+  assert.equal(planAdmission.blockedReasons.length, 1);
+  assert.match(planAdmission.blockedReasons[0]!, /verification/);
+  assert.match(planAdmission.blockedReasons[0]!, /unavailable\/unsatisfied/);
+
+  const specs = deriveOutcomeJobSpecs(plan);
+  const jobAdmissions = admitJobs(planAdmission, specs);
+  assert.ok(jobAdmissions.every((j) => j.status === "BLOCKED"));
+});
+
 test("T5: an OutcomeJobSpec from a different plan fails closed rather than being silently admitted", () => {
   const fixtureA = fullyResolvedFixture();
   const planA = compilePlan({
