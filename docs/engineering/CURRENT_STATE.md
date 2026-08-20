@@ -1,35 +1,44 @@
 # CURRENT_STATE.md
 
-Last updated: 2026-08-16, by Claude (Primary Engineer), task AKI-GIT-001 (bounded checkpoint reconciliation).
+Last updated: 2026-08-20, by Claude (Primary Engineer), during the DEC-144 V1 Fast Lane Stage B coherence pass (documentation-only correction; no code change).
 
 ## Repository identity
 
 - Owner/name: `Jay-prodesign/akil-main`
 - Visibility: Private
-- Default branch: `main`
+- Default branch: `main` (all engineering work below lives on task-scoped branches; nothing has merged to `main`)
 - Base commit at bootstrap: `8a95c721024da4bfee99e082a01e34b86321637f` ("Create README.md")
 
 ## What exists
 
-- `README.md` (pre-existing content preserved; navigation section added by AKI-GIT-001).
-- The repository-local engineering operating contract created by AKI-GIT-001: `AGENTS.md`, `CLAUDE.md`, and the `docs/engineering/`, `docs/architecture/ADR/`, `docs/specs/`, `docs/exec-plans/` structure.
-- No `src/`, no application/package manifest, no framework, no database/migrations, no CI, no deployment infrastructure. None of this has been created — see `docs/exec-plans/active/AKI-GIT-001.md` hard non-scope.
+- `README.md`, the AKI-GIT-001 governance scaffolding (`AGENTS.md`, `CLAUDE.md`, `docs/engineering/`, `docs/architecture/ADR/`, `docs/specs/`, `docs/exec-plans/`).
+- A secret-free TypeScript domain/application kernel under `src/domain/`, `src/application/`, `src/ports/`, `src/fixtures/`, built across three tasks (see "Completed tasks" / "Active tasks" below):
+  - `AKI-BE-001` — `TenantScope`, `Customer`, `Project`, `OutcomeJob` (+ lifecycle/transitions), `EvidenceReference`, `VerificationResult`, `AuthorityContext`, `AuditEvent`, plus in-memory ports/adapters.
+  - `ENG-ORCH-001` — `EngineeringEventEnvelope`, `EngineeringRunState` (pure reducer, fencing/idempotency/replay), `FileDurableEngineeringStore`, `WorkerInvoker`/`invokeSafely`, DEC-138 provenance.
+  - `DEL-003` — `OfferBlueprintVersion`, `SoldScope`, `CustomerEvidenceItem`, `ProjectPlanVersion`/`compilePlan`, `PlanValidationResult`/`validatePlan`, `OutcomeJobSpec`, `ProjectPlanDiff`, `ApprovalReference`; second slice adds `PlanAdmissionResult`/`admitPlan`/`admitJobs`, `EvidenceReadinessAssertion`/`evaluateReadiness`, `wireAdmittedOutcomeJobs`, and durable admission/job stores (`durable-plan-admission-store.ts`, `durable-outcome-job-store.ts`).
+- `tests/` — Node's built-in `node:test` runner exercises all of the above (208 tests at the current checkpoint; `npm run test`).
+- `package.json`/`package-lock.json`/`tsconfig.json` — strict-mode TypeScript, zero runtime dependencies, `devDependencies` limited to `typescript` + `@types/node`.
 
 ## What does not exist yet
 
-- Product/backend source code (AKI-BE-001 and all subsequent build tasks are not started and not approved).
+- Any HTTP/API server, database, ORM, queue, cache, object storage, or cloud service — this remains a domain/application kernel, not a deployable backend.
 - Any CI, cloud, or deployment configuration.
-- Any real secret, credential, or vault integration (secret-free bootstrap by design; see `docs/engineering/PERMISSION_POLICY.md`).
-- Any ADRs or specs (index scaffolding only; see `docs/architecture/ADR/README.md` and `docs/specs/README.md`).
+- Any real secret, credential, or vault integration (secret-free by design; see `docs/engineering/PERMISSION_POLICY.md`).
+- Any ADRs or specs beyond index scaffolding (see `docs/architecture/ADR/README.md` and `docs/specs/README.md`).
+- Durable production runtime dispatch, cross-project (AI Commerce) request/result flows, AI/model routing, and FAS-001 S1/S2 adversarial activation — all explicitly stage/trigger/dependency-gated (INT-001, CONN-001, AI-004) per the canonical roadmap and the DEC-144 V1 Fast Lane contract's anti-scope-creep filter; not pulled forward.
+- A public-facing website, payment/legal/commercial surface — the live AKILTA commercial website (`akilta.com`) is a separate, already-live Shopify-hosted surface outside this repository's scope; this repository does not build or touch it.
 
 ## Active tasks
 
-- `AKI-GIT-001` — Pre-build repository bootstrap. Status: **IMPLEMENTED — READY FOR CHATGPT VERIFICATION**, draft PR open. Verified checkpoint (clean, repository-only PROVISIONAL CONTINUITY READBACK, 2026-08-16): branch HEAD `315934a5c5c23b072f3945bf63d9b97c2f5b1498`. See `docs/exec-plans/active/AKI-GIT-001.md` for checkpoint-SHA semantics and the full continuity verification record. Claude↔Codex cross-model continuity drill is **DEFERRED — NOT WAIVED** (Codex not currently accessible); this provisional pass proves repository/chat-history independence only, not cross-model portability. PR: `https://github.com/Jay-prodesign/akil-main/pull/1` (draft, not merged).
+- `DEL-003` (second bounded slice: runtime admission + OutcomeJob wiring) — Status: **IMPLEMENTED / SELF-VALIDATED / PENDING V1 BRAIN AUDIT** at commit `3253439e13e40bcb4ec500624cb7c51831ab56ee`, branch `claude/DEL-003-runtime-admission-task-packet`. Round-1 correction closed Brain's F1–F4 CHANGES_REQUIRED findings (readiness admission gating, durable wait/resume/restart proof, persisted job idempotency, wiring-boundary lineage validation). See `docs/exec-plans/active/DEL-003.md`.
+- `AKI-GIT-001` — Status: **IMPLEMENTED — READY FOR CHATGPT VERIFICATION**, draft PR `#1` open, not merged. See `docs/exec-plans/active/AKI-GIT-001.md`.
 
 ## Completed tasks
 
-- None yet. See `docs/exec-plans/completed/README.md`.
+- `AKI-BE-001` — Brain **VERIFIED / COMPLETED** at `c2e7e7dee579b2fab614485631fa3cd1f53c6070`. See `docs/exec-plans/completed/AKI-BE-001.md`.
+- `ENG-ORCH-001` — Brain **VERIFIED / COMPLETED** at `a804ebe73822883122f3dfabd869a4651f94dd38`. See `docs/exec-plans/completed/ENG-ORCH-001.md`.
+- `DEL-003` first bounded slice (project compiler) — Brain **VERIFIED / COMPLETED** at `abb5ea954e338d82cf1583d83359e469d6959599`. Recorded inside `docs/exec-plans/active/DEL-003.md` (the DEL-003 parent task itself remains active/stage-gated; only its first slice is closed).
 
 ## Known conflicts / blockers
 
-- None found at bootstrap. Live repository inspection prior to AKI-GIT-001 showed a single commit, single branch (`main`), no open PRs, no pre-existing governance files, and no unexplained product source.
+- None found. `git status` is clean at every checkpoint above; the full history is one linear chain from bootstrap through the current checkpoint (`AKI-GIT-001` → `AKI-BE-001` → `ENG-ORCH-001` first slice → `DEL-003` first slice → `ENG-ORCH-001` round-3 correction → `DEL-003` second slice + round-1 correction, current HEAD `3253439`), verifiable via `git log --oneline` on this branch.

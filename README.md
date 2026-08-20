@@ -4,7 +4,13 @@ AKILTA main engineering repository.
 
 ## Status
 
-Pre-build. This repository currently holds only the engineering operating contract (governance/docs) established by `AKI-GIT-001`. No product or backend source code exists yet. `AKI-BE-001` (or any backend work) is not approved and has not started.
+Active backend/domain engineering. Governance scaffolding from `AKI-GIT-001` is in place, and the repository now holds a secret-free TypeScript domain/application kernel built across three engineering tasks:
+
+- `AKI-BE-001` — backend foundation (tenant/customer/project/OutcomeJob lifecycle, evidence/verification, authority, audit). Brain **VERIFIED / COMPLETED**.
+- `ENG-ORCH-001` — durable event-driven engineering orchestration bridge (fencing, idempotent replay, WAITING/ANSWER/RESUME). Brain **VERIFIED / COMPLETED**.
+- `DEL-003` — project intelligence & delivery compilation (blueprint → sold scope → compiled plan → OutcomeJobSpecs). First bounded slice Brain **VERIFIED / COMPLETED**; second bounded slice (runtime admission + OutcomeJob wiring) **IMPLEMENTED**, pending Brain re-verification under the DEC-144 V1 Fast Lane.
+
+See `docs/engineering/CURRENT_STATE.md` for the live detail and `docs/exec-plans/` for full per-task execution records. No merge to `main`, no deploy, no production/customer-facing surface — this remains a domain kernel, not a deployed service.
 
 ## Engineering navigation
 
