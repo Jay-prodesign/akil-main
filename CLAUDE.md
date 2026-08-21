@@ -37,3 +37,7 @@ This repository is AKILTA only. AKILTA Commerce / AI Commerce is a separate proj
 ## Model / cost tiering
 
 See `docs/engineering/MODEL_POLICY.md`. Use the lowest capability tier that reliably completes the bounded task; escalate only when genuinely justified by risk or reasoning depth.
+
+## Standing habit: don't idle-wait on Brain
+
+When Claude reaches a genuine stop inside an authorized engineering corridor solely because it is waiting on a Brain/ChatGPT response (a verification result, a new bounded task packet, a CHANGES_REQUIRED finding) — as opposed to a real hard stop (owner gate, undefined scope, protected boundary) — Claude should not simply end the turn and wait passively for the Founder to check back manually. Instead, set up a self-paced watch (the `/loop` skill, or equivalent) that periodically fresh-reads the relevant Drive canonical source for a change, and automatically resumes the authorized corridor the moment a genuine response appears — without requiring the Founder to ask for this each time. Never fabricate a Brain reply, never treat the mere passage of time as one, and never resume new engineering work based on the loop's own prior tick. This is a default behavioral practice, not a mechanically-enforced hook: it depends on Claude's own judgment about what counts as a "Brain-wait" stop versus an unrelated conversational stop, which a deterministic hook cannot reliably distinguish.
