@@ -1,6 +1,6 @@
 # CURRENT_STATE.md
 
-Last updated: 2026-08-20, by Claude (Primary Engineer), after the DEC-144 final Brain verification's F1 round-2 correction and the subsequent Stage E consolidation pass (documentation-only correction; no further code change beyond the F1 round-2 fix itself, recorded below).
+Last updated: 2026-08-21, by Claude (Primary Engineer), after DEC-149/DEC-150 (V1→V2 Fast-Track + Continuous Engineering Train, both fresh-read and independently verified as real controlling Drive documents) authorized V2 Client & Delivery OS engineering, and the first bounded V2-CDO-001 slice (project/service status + unified delivery timeline read-model) landed on top of the unchanged V1 DEL-003/AKI-GIT-001 state recorded below.
 
 ## Repository identity
 
@@ -30,7 +30,8 @@ Last updated: 2026-08-20, by Claude (Primary Engineer), after the DEC-144 final 
 
 ## Active tasks
 
-- `DEL-003` (second bounded slice: runtime admission + OutcomeJob wiring) — Status: **IMPLEMENTED / SELF-VALIDATED / PENDING NEXT V1 BRAIN AUDIT** at commit `72e2d614e8a6347ca9f3a75f6f0558593caff637`, branch `claude/DEL-003-runtime-admission-task-packet`. Round-1 correction closed Brain's F1–F4 CHANGES_REQUIRED findings; the DEC-144 final Brain verification pass then accepted F2/F3/F4 and VQA-001's Contact correction but found one remaining F1 defect (readiness gate could treat any current-version FACT as positive readiness regardless of what it actually asserted), closed by the round-2 correction (structural `readinessOutcome` field). See `docs/exec-plans/active/DEL-003.md`.
+- `V2-CDO-001` (first bounded V2 Client & Delivery OS slice: project/service status + unified delivery timeline) — Status: **IMPLEMENTED / SELF-VALIDATED / PENDING BRAIN AUDIT**, branch `claude/V2-CDO-001-task-packet`, created from `9d21e14`. Authorized by DEC-149 + DEC-150 (21 August 2026), which reopened V2 engineering without waiting for V1 Commercial Ready/GA closure. Adds `src/domain/delivery-status.ts` + `src/domain/delivery-timeline.ts` as pure read-model projections over the existing VERIFIED AKI-BE-001 kernel; no HTTP/frontend/AI/external-provider surface. See `docs/exec-plans/active/V2-CDO-001.md`.
+- `DEL-003` (second bounded slice: runtime admission + OutcomeJob wiring) — Status: **IMPLEMENTED / SELF-VALIDATED / PENDING NEXT V1 BRAIN AUDIT** at commit `72e2d614e8a6347ca9f3a75f6f0558593caff637`, branch `claude/DEL-003-runtime-admission-task-packet`. Round-1 correction closed Brain's F1–F4 CHANGES_REQUIRED findings; the DEC-144 final Brain verification pass then accepted F2/F3/F4 and VQA-001's Contact correction but found one remaining F1 defect (readiness gate could treat any current-version FACT as positive readiness regardless of what it actually asserted), closed by the round-2 correction (structural `readinessOutcome` field). See `docs/exec-plans/active/DEL-003.md`. Not reopened by V2-CDO-001 absent concrete regression evidence.
 - `AKI-GIT-001` — Status: **IMPLEMENTED — READY FOR CHATGPT VERIFICATION**, draft PR `#1` open, not merged. See `docs/exec-plans/active/AKI-GIT-001.md`.
 
 ## Completed tasks
