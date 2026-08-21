@@ -58,19 +58,70 @@ test("no audit events yields an empty timeline scoped to the project", () => {
   assert.equal(timeline.projectId, "proj-1");
 });
 
+test("T3: an event with an unmapped/unknown eventType is omitted (fails closed), not guessed", () => {
+  const unknown = createAuditEvent({
+    job: jobInA,
+    eventId: "evt-unknown",
+    actorRef: "system",
+    eventType: "SOME_INTERNAL_EVENT_NOT_IN_THE_CLOSED_SET",
+    timestamp: "2026-08-21T09:00:00Z",
+  });
+  const timeline = buildDeliveryTimeline({ project: projectInA, auditEvents: [unknown] });
+  assert.deepEqual(timeline.entries, []);
+});
+
+test("T4: known eventTypes map deterministically to a closed-set customer category", () => {
+  const blocked = createAuditEvent({
+    job: jobInA,
+    eventId: "evt-blocked",
+    actorRef: "system",
+    eventType: "EXCEPTION_STATE_ENTERED:BLOCKED",
+    timestamp: "2026-08-21T09:00:00Z",
+  });
+  const recovering = createAuditEvent({
+    job: jobInA,
+    eventId: "evt-recovering",
+    actorRef: "system",
+    eventType: "EXCEPTION_STATE_ENTERED:RECOVERING",
+    timestamp: "2026-08-21T09:01:00Z",
+  });
+  const escalated = createAuditEvent({
+    job: jobInA,
+    eventId: "evt-escalated",
+    actorRef: "system",
+    eventType: "EXCEPTION_STATE_ENTERED:ESCALATED",
+    timestamp: "2026-08-21T09:02:00Z",
+  });
+  const stopped = createAuditEvent({
+    job: jobInA,
+    eventId: "evt-stopped",
+    actorRef: "system",
+    eventType: "EXCEPTION_STATE_ENTERED:STOPPED",
+    timestamp: "2026-08-21T09:03:00Z",
+  });
+  const timeline = buildDeliveryTimeline({
+    project: projectInA,
+    auditEvents: [blocked, recovering, escalated, stopped],
+  });
+  assert.deepEqual(
+    timeline.entries.map((entry) => entry.category),
+    ["BLOCKER", "STATUS_UPDATE", "ACTION_REQUIRED", "BLOCKER"],
+  );
+});
+
 test("entries are sorted ascending by timestamp regardless of input order", () => {
   const later = createAuditEvent({
     job: jobInA,
     eventId: "evt-2",
     actorRef: "system",
-    eventType: "STATE_CHANGED",
+    eventType: "EXCEPTION_STATE_ENTERED:BLOCKED",
     timestamp: "2026-08-21T12:00:00Z",
   });
   const earlier = createAuditEvent({
     job: jobInA,
     eventId: "evt-1",
     actorRef: "system",
-    eventType: "STATE_CHANGED",
+    eventType: "EXCEPTION_STATE_ENTERED:BLOCKED",
     timestamp: "2026-08-21T09:00:00Z",
   });
   const timeline = buildDeliveryTimeline({ project: projectInA, auditEvents: [later, earlier] });
@@ -80,36 +131,30 @@ test("entries are sorted ascending by timestamp regardless of input order", () =
   );
 });
 
-test("preserves reason when present and omits it when absent", () => {
-  const withReason = createAuditEvent({
+test("T1/T2: reason, actorRef and relatedRefs never appear on a customer timeline entry", () => {
+  const event = createAuditEvent({
     job: jobInA,
     eventId: "evt-1",
-    actorRef: "system",
+    actorRef: "internal-worker-42",
     eventType: "EXCEPTION_STATE_ENTERED:BLOCKED",
     timestamp: "2026-08-21T09:00:00Z",
-    reason: "waiting on customer-provided access",
+    reason: "internal detail that must not reach the customer",
+    relatedRefs: ["internal-ref-1"],
   });
-  const withoutReason = createAuditEvent({
-    job: jobInA,
-    eventId: "evt-2",
-    actorRef: "system",
-    eventType: "STATE_CHANGED",
-    timestamp: "2026-08-21T10:00:00Z",
-  });
-  const timeline = buildDeliveryTimeline({
-    project: projectInA,
-    auditEvents: [withReason, withoutReason],
-  });
-  assert.equal(timeline.entries[0]?.reason, "waiting on customer-provided access");
-  assert.equal("reason" in timeline.entries[1]!, false);
+  const timeline = buildDeliveryTimeline({ project: projectInA, auditEvents: [event] });
+  const entry = timeline.entries[0]!;
+  assert.deepEqual(Object.keys(entry).sort(), ["category", "eventId", "jobId", "timestamp"]);
+  assert.equal("reason" in entry, false);
+  assert.equal("actorRef" in entry, false);
+  assert.equal("relatedRefs" in entry, false);
 });
 
-test("rejects an audit event that belongs to a different tenant than the given project", () => {
+test("T5: rejects an audit event that belongs to a different tenant than the given project", () => {
   const foreignEvent = createAuditEvent({
     job: jobInB,
     eventId: "evt-x",
     actorRef: "system",
-    eventType: "STATE_CHANGED",
+    eventType: "EXCEPTION_STATE_ENTERED:BLOCKED",
     timestamp: "2026-08-21T09:00:00Z",
   });
   assert.throws(
@@ -118,7 +163,7 @@ test("rejects an audit event that belongs to a different tenant than the given p
   );
 });
 
-test("rejects an audit event that belongs to a different project within the same tenant", () => {
+test("T5: rejects an audit event that belongs to a different project within the same tenant", () => {
   const otherProjectInA = createProject({
     tenantScope: tenantA,
     customer: customerInA,
@@ -138,7 +183,7 @@ test("rejects an audit event that belongs to a different project within the same
     job: jobInOtherProject,
     eventId: "evt-y",
     actorRef: "system",
-    eventType: "STATE_CHANGED",
+    eventType: "EXCEPTION_STATE_ENTERED:BLOCKED",
     timestamp: "2026-08-21T09:00:00Z",
   });
   assert.throws(

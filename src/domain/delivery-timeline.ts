@@ -11,24 +11,41 @@ export class InvalidDeliveryTimelineError extends Error {
 
 /**
  * V2 Client & Delivery OS - first bounded slice ("unified delivery
- * timeline", AKILTA + AI Commerce Master Release Plan v1.0 Section 5,
- * "AKILTA v2.0 - CLIENT & DELIVERY OS"). A pure chronological projection
- * over already-canonical `AuditEvent` records for one project. It exposes
- * only the fields `AuditEvent` itself already documents as safe to
- * reference (no secret values, no unnecessary raw payload; see
- * `audit-event.ts`) and deliberately omits `relatedRefs` - narrowing what
- * a first bounded slice exposes is safer than guessing at a customer-
- * visibility classification for arbitrary `eventType` strings, which the
- * canonical source does not define. This is a minimal exposed surface,
- * not a claim that every field is customer-appropriate for every future
- * eventType.
+ * timeline", AKILTA + AI Commerce Master Release Plan v1.0 Section 5).
+ * CR-1 (Brain CHANGES_REQUIRED on checkpoint b37440d, 2026-08-21):
+ * AuditEvent stays internal. The customer-facing timeline must not
+ * expose raw `reason`, `actorRef`, `relatedRefs`, or arbitrary free-form
+ * `eventType` - only a deterministic, closed-set customer-safe category.
  */
+export type CustomerTimelineCategory =
+  | "STATUS_UPDATE"
+  | "BLOCKER"
+  | "VERIFICATION"
+  | "ACTION_REQUIRED"
+  | "WORKING_ARTIFACT"
+  | "APPROVAL";
+
+/**
+ * Deterministic, closed-set mapping from the raw `AuditEvent.eventType`
+ * strings this repository's domain kernel actually produces today (see
+ * `enterExceptionState` in outcome-job.ts, the only current producer) to
+ * a `CustomerTimelineCategory`. An unmapped eventType is not guessed at -
+ * it fails closed by omission (filtered out of the customer timeline
+ * entirely), per CR-1's explicit instruction not to invent ad-hoc
+ * redaction/classifier logic.
+ */
+const EVENT_TYPE_TO_CUSTOMER_CATEGORY: ReadonlyMap<string, CustomerTimelineCategory> = new Map([
+  ["EXCEPTION_STATE_ENTERED:BLOCKED", "BLOCKER"],
+  ["EXCEPTION_STATE_ENTERED:RECOVERING", "STATUS_UPDATE"],
+  ["EXCEPTION_STATE_ENTERED:ESCALATED", "ACTION_REQUIRED"],
+  ["EXCEPTION_STATE_ENTERED:STOPPED", "BLOCKER"],
+]);
+
 export interface DeliveryTimelineEntry {
   readonly eventId: AuditEvent["eventId"];
   readonly jobId: AuditEvent["jobId"];
-  readonly eventType: string;
+  readonly category: CustomerTimelineCategory;
   readonly timestamp: string;
-  readonly reason?: string;
 }
 
 export interface DeliveryTimeline {
@@ -41,14 +58,13 @@ export interface DeliveryTimeline {
  * Every input event must belong to the given project (same tenantId and
  * projectId) - same "cross-tenant/wrong-project ... binding fails closed"
  * discipline as `computeDeliveryStatus` and DEL-003 T7; a foreign event is
- * treated as contamination, not silently dropped.
+ * treated as contamination, not silently dropped. This check runs before
+ * category mapping/filtering, so a contaminated input still fails closed
+ * even if none of its events would otherwise map to a customer category.
  *
  * Entries are sorted ascending by `timestamp` using a plain string
- * comparison. Every existing timestamp value in this repository is an
- * ISO-8601 string (see `AuditEvent.timestamp`, `createAuditEvent`), for
- * which lexicographic order already equals chronological order; this
- * function does not parse or reformat the timestamp, and does not invent
- * a fallback for non-ISO-8601 input.
+ * comparison (existing timestamps in this repository are ISO-8601, for
+ * which lexicographic order already equals chronological order).
  */
 export function buildDeliveryTimeline(input: {
   project: Project;
@@ -68,13 +84,19 @@ export function buildDeliveryTimeline(input: {
   }
 
   const entries: DeliveryTimelineEntry[] = input.auditEvents
-    .map((event) => ({
-      eventId: event.eventId,
-      jobId: event.jobId,
-      eventType: event.eventType,
-      timestamp: event.timestamp,
-      ...(event.reason !== undefined ? { reason: event.reason } : {}),
-    }))
+    .map((event) => {
+      const category = EVENT_TYPE_TO_CUSTOMER_CATEGORY.get(event.eventType);
+      if (category === undefined) {
+        return undefined;
+      }
+      return {
+        eventId: event.eventId,
+        jobId: event.jobId,
+        category,
+        timestamp: event.timestamp,
+      };
+    })
+    .filter((entry): entry is DeliveryTimelineEntry => entry !== undefined)
     .sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
 
   return {
