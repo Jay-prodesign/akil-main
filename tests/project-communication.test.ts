@@ -149,6 +149,40 @@ test("O7: a duplicate communicationId within one history rejects", () => {
   );
 });
 
+test("CR-1: relatedPlanId/relatedPlanVersion together preserve an exact ProjectPlanVersion reference - two versions of the same plan remain distinguishable", () => {
+  const v1 = createProjectCommunicationRecord({
+    ...minimalRecordInput(),
+    communicationId: "comm-plan-v1",
+    relatedPlanId: "plan-1",
+    relatedPlanVersion: 1,
+  });
+  const v2 = createProjectCommunicationRecord({
+    ...minimalRecordInput(),
+    communicationId: "comm-plan-v2",
+    relatedPlanId: "plan-1",
+    relatedPlanVersion: 2,
+  });
+  assert.equal(v1.relatedPlanId, v2.relatedPlanId);
+  assert.equal(v1.relatedPlanVersion, 1);
+  assert.equal(v2.relatedPlanVersion, 2);
+  assert.notEqual(v1.relatedPlanVersion, v2.relatedPlanVersion);
+});
+
+test("CR-1: relatedPlanId without relatedPlanVersion rejects (partial plan reference is not exact)", () => {
+  const input = { ...minimalRecordInput(), relatedPlanId: "plan-1" };
+  assert.throws(() => createProjectCommunicationRecord(input), InvalidProjectCommunicationError);
+});
+
+test("CR-1: relatedPlanVersion without relatedPlanId rejects (partial plan reference is not exact)", () => {
+  const input = { ...minimalRecordInput(), relatedPlanVersion: 1 };
+  assert.throws(() => createProjectCommunicationRecord(input), InvalidProjectCommunicationError);
+});
+
+test("CR-1: relatedPlanVersion must be a positive integer", () => {
+  const input = { ...minimalRecordInput(), relatedPlanId: "plan-1", relatedPlanVersion: 0 };
+  assert.throws(() => createProjectCommunicationRecord(input), InvalidProjectCommunicationError);
+});
+
 test("O8: this module exposes no function that transitions or verifies an OutcomeJob or admits/verifies a ProjectPlan", () => {
   const communicationModule = {
     createProjectCommunicationRecord,

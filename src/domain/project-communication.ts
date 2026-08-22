@@ -49,13 +49,19 @@ const OBSERVATION_STATE_VALUES: ReadonlySet<string> = new Set<string>([
 /**
  * V2-CDO-003 "ProjectCommunicationRecord" (IN SCOPE #2). A customer-safe
  * communication/message record bound to exactly one ownership tuple.
- * `relatedPlanVersionId`/`relatedJobId` reuse the existing branded ID
- * types from `project-plan.ts`/`outcome-job.ts` (imported `import type`
- * only - this module has no runtime/value dependency on either module,
- * so it cannot call any transition/verification function from them; see
- * O8). All fields here are the complete customer-safe shape: no internal
- * notes, margins, prompts, credentials, raw secrets, or provider payload
- * fields exist on this type (O9).
+ * `relatedJobId` reuses the existing branded ID type from
+ * `outcome-job.ts`; `relatedPlanId`/`relatedPlanVersion` together reuse
+ * `ProjectPlanVersion.planId`/`ProjectPlanVersion.version` (CR-1, Brain
+ * checkpoint 48fc5e63: a `ProjectPlanVersion` is identified by `planId`
+ * *plus* `version` - see `OutcomeJobSpec.planId`/`OutcomeJobSpec.
+ * planVersion` in `outcome-job-spec.ts` for the same existing two-field
+ * convention - so `planId` alone can conflate two versions of the same
+ * plan and is not an exact reference). Both are `import type` only - this
+ * module has no runtime/value dependency on either module, so it cannot
+ * call any transition/verification function from them (O8). All fields
+ * here are the complete customer-safe shape: no internal notes, margins,
+ * prompts, credentials, raw secrets, or provider payload fields exist on
+ * this type (O9).
  */
 export interface ProjectCommunicationRecord {
   readonly communicationId: CommunicationId;
@@ -65,7 +71,8 @@ export interface ProjectCommunicationRecord {
   readonly requiredActor: RequiredActor;
   readonly observationState: CommunicationObservationState;
   readonly evidenceRef?: string;
-  readonly relatedPlanVersionId?: ProjectPlanVersion["planId"];
+  readonly relatedPlanId?: ProjectPlanVersion["planId"];
+  readonly relatedPlanVersion?: ProjectPlanVersion["version"];
   readonly relatedJobId?: OutcomeJob["jobId"];
   readonly relatedArtifactRef?: string;
   readonly timestamp: string;
@@ -96,6 +103,16 @@ function requireOptionalNonEmptyString(value: unknown, field: string): string | 
   return requireNonEmptyString(value, field);
 }
 
+function requireOptionalPositiveInteger(value: unknown, field: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new InvalidProjectCommunicationError(`${field} must be a positive integer`);
+  }
+  return value;
+}
+
 /**
  * O3-O5 construction-time validation.
  *
@@ -118,7 +135,8 @@ export function createProjectCommunicationRecord(input: {
   requiredActor: unknown;
   observationState: unknown;
   evidenceRef?: unknown;
-  relatedPlanVersionId?: unknown;
+  relatedPlanId?: unknown;
+  relatedPlanVersion?: unknown;
   relatedJobId?: unknown;
   relatedArtifactRef?: unknown;
   timestamp: unknown;
@@ -176,10 +194,19 @@ export function createProjectCommunicationRecord(input: {
     );
   }
 
-  const relatedPlanVersionId = requireOptionalNonEmptyString(
-    input.relatedPlanVersionId,
-    "relatedPlanVersionId",
+  const relatedPlanId = requireOptionalNonEmptyString(input.relatedPlanId, "relatedPlanId");
+  const relatedPlanVersion = requireOptionalPositiveInteger(
+    input.relatedPlanVersion,
+    "relatedPlanVersion",
   );
+  // CR-1: a ProjectPlanVersion is identified by planId + version together -
+  // a partial reference (one present, the other absent) is not an exact
+  // reference and is rejected rather than silently accepted.
+  if ((relatedPlanId === undefined) !== (relatedPlanVersion === undefined)) {
+    throw new InvalidProjectCommunicationError(
+      "relatedPlanId and relatedPlanVersion must both be present or both be absent",
+    );
+  }
   const relatedJobId = requireOptionalNonEmptyString(input.relatedJobId, "relatedJobId");
   const relatedArtifactRef = requireOptionalNonEmptyString(
     input.relatedArtifactRef,
@@ -195,8 +222,11 @@ export function createProjectCommunicationRecord(input: {
     requiredActor,
     observationState,
     ...(evidenceRef !== undefined ? { evidenceRef } : {}),
-    ...(relatedPlanVersionId !== undefined
-      ? { relatedPlanVersionId: relatedPlanVersionId as ProjectPlanVersion["planId"] }
+    ...(relatedPlanId !== undefined && relatedPlanVersion !== undefined
+      ? {
+          relatedPlanId: relatedPlanId as ProjectPlanVersion["planId"],
+          relatedPlanVersion: relatedPlanVersion as ProjectPlanVersion["version"],
+        }
       : {}),
     ...(relatedJobId !== undefined ? { relatedJobId: relatedJobId as OutcomeJob["jobId"] } : {}),
     ...(relatedArtifactRef !== undefined ? { relatedArtifactRef } : {}),
