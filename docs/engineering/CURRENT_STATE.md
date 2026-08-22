@@ -1,6 +1,6 @@
 # CURRENT_STATE.md
 
-Last updated: 2026-08-22, by Claude (Primary Engineer), after Brain returned **VERIFIED / PASS / CLOSED** on `V2-CDO-001` (checkpoint `b5a8c4fd422b61c91ba656e910a73ba6165727b7`) — see `docs/exec-plans/completed/V2-CDO-001.md`. `V2-CDO-002` (First Bounded Delivery Recipe Contract, `WEBSITE_BUILD_v1`) is now the authorized next V2 task. V1 DEL-003/AKI-GIT-001 state below is unchanged.
+Last updated: 2026-08-22, by Claude (Primary Engineer), after Brain returned **VERIFIED / PASS / CLOSED** on `V2-CDO-002` (checkpoint `f99cd2f46b178d2190ac94ff6052c955d3e5cd43`) — see `docs/exec-plans/completed/V2-CDO-002.md`. `V2-CDO-003` (First Bounded Customer Ownership & Project Communications Contract, OPS-010 Minimum V2 Slice) is now the authorized next V2 task. V1 DEL-003/AKI-GIT-001 state below is unchanged.
 
 ## Repository identity
 
@@ -30,12 +30,13 @@ Last updated: 2026-08-22, by Claude (Primary Engineer), after Brain returned **V
 
 ## Active tasks
 
-- `V2-CDO-002` (First Bounded Delivery Recipe Contract, `WEBSITE_BUILD_v1`) — Status: **IMPLEMENTED / SELF-VALIDATED / PENDING BRAIN AUDIT**, branch `claude/V2-CDO-002-task-packet`. Adds `src/domain/delivery-recipe.ts` (`DeliveryRecipe`/`DeliveryRecipeStep`/`DeliveryGate`/`DeliveryEvidenceRequirement`/`RecoverySemantics`) and one canonical `WEBSITE_BUILD_v1` fixture (`src/fixtures/website-build-v1-recipe.ts`) reusing the existing `website-build-v1` job-family identifier from `DEL-003`'s blueprint. D1–D11 test contract covered; 253/253 tests pass. See `docs/exec-plans/active/V2-CDO-002.md`.
+- `V2-CDO-003` (First Bounded Customer Ownership & Project Communications Contract, OPS-010 Minimum V2 Slice) — Status: **NOT YET STARTED**, authorized next V2 task per `V2-CDO-002`'s Brain PASS satisfying its dependency gate. Canonical scope/invariants are authoritative on its own Stable Engineering Handoff / Task Head (Drive `1IKVfUyuQrpVNWglIcJVAbSG46ZVwjjIr9KsMWgq-dug`, rev 1) — not yet mirrored into this repository's `docs/exec-plans/`.
 - `DEL-003` (second bounded slice: runtime admission + OutcomeJob wiring) — Status: **IMPLEMENTED / SELF-VALIDATED / PENDING NEXT V1 BRAIN AUDIT** at commit `72e2d614e8a6347ca9f3a75f6f0558593caff637`, branch `claude/DEL-003-runtime-admission-task-packet`. Round-1 correction closed Brain's F1–F4 CHANGES_REQUIRED findings; the DEC-144 final Brain verification pass then accepted F2/F3/F4 and VQA-001's Contact correction but found one remaining F1 defect (readiness gate could treat any current-version FACT as positive readiness regardless of what it actually asserted), closed by the round-2 correction (structural `readinessOutcome` field). See `docs/exec-plans/active/DEL-003.md`. Not reopened by V2-CDO-001 absent concrete regression evidence.
 - `AKI-GIT-001` — Status: **IMPLEMENTED — READY FOR CHATGPT VERIFICATION**, draft PR `#1` open, not merged. See `docs/exec-plans/active/AKI-GIT-001.md`.
 
 ## Completed tasks
 
+- `V2-CDO-002` (First Bounded Delivery Recipe Contract, `WEBSITE_BUILD_v1`) — Brain **VERIFIED / PASS / CLOSED** at `f99cd2f46b178d2190ac94ff6052c955d3e5cd43`. See `docs/exec-plans/completed/V2-CDO-002.md`.
 - `V2-CDO-001` (first bounded V2 Client & Delivery OS slice: project/service status + unified delivery timeline) — Brain **VERIFIED / PASS / CLOSED** at `b5a8c4fd422b61c91ba656e910a73ba6165727b7`. See `docs/exec-plans/completed/V2-CDO-001.md`.
 - `AKI-BE-001` — Brain **VERIFIED / COMPLETED** at `c2e7e7dee579b2fab614485631fa3cd1f53c6070`. See `docs/exec-plans/completed/AKI-BE-001.md`.
 - `ENG-ORCH-001` — Brain **VERIFIED / COMPLETED** at `a804ebe73822883122f3dfabd869a4651f94dd38`. See `docs/exec-plans/completed/ENG-ORCH-001.md`.
