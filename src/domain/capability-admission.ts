@@ -1,6 +1,6 @@
 import type { ProjectOwnershipRef } from "./project-ownership.js";
 import type { RequirementId } from "./offer-blueprint.js";
-import type { ConnectionBinding } from "./connection-authority.js";
+import type { ConnectionBinding, ConnectionRequirement } from "./connection-authority.js";
 
 export class InvalidCapabilityAdmissionError extends Error {
   constructor(reason: string) {
@@ -86,12 +86,27 @@ function ownershipEquals(a: ProjectOwnershipRef, b: ProjectOwnershipRef): boolea
  * `verifyConnectionBinding` - `connection-authority.ts` remains the sole
  * authority for that state), whose ownership tuple exactly matches this
  * observation's `ownership` (fail-closed cross-tenant/cross-project
- * binding, same pattern as `project-communication.ts` O6), and whose
- * requirement's `requiredCapabilityRef` matches the one given here - plus
- * a non-empty `evidenceRef`. `UNVERIFIED`/`UNSUPPORTED`/`INELIGIBLE`
- * never require any of that and can never be silently promoted: this is
- * the only construction function in the module, there is no separate
- * mutation/promotion path.
+ * binding, same pattern as `project-communication.ts` O6), plus a
+ * non-empty `evidenceRef`.
+ *
+ * CR-1 (Brain checkpoint 7b48fdc, capability/binding compatibility):
+ * `ConnectionBinding` carries only an opaque `connectionRequirementId`,
+ * not the capability it actually satisfies - so `binding` alone can
+ * never prove which capability it belongs to. `VERIFIED_AVAILABLE`
+ * therefore also requires the caller to supply the exact
+ * `ConnectionRequirement` the binding was constructed against, and this
+ * function proves two things transitively rather than trusting either
+ * value alone: (a) `requirement.requiredCapabilityRef` equals this
+ * observation's `requiredCapabilityRef` (the requirement is actually for
+ * the capability being admitted), and (b)
+ * `binding.connectionRequirementId` equals
+ * `requirement.connectionRequirementId` (the binding was actually issued
+ * against that exact requirement, not merely some other same-ownership
+ * one). Without both checks, a VERIFIED binding for capability A could be
+ * reused to admit capability B under the same ownership tuple.
+ * `UNVERIFIED`/`UNSUPPORTED`/`INELIGIBLE` never require any of this and
+ * can never be silently promoted: this is the only construction function
+ * in the module, there is no separate mutation/promotion path.
  */
 export function createCapabilityAdmission(input: {
   capabilityAdmissionId: unknown;
@@ -99,6 +114,7 @@ export function createCapabilityAdmission(input: {
   requiredCapabilityRef: unknown;
   status: unknown;
   binding?: ConnectionBinding;
+  requirement?: ConnectionRequirement;
   evidenceRef?: unknown;
 }): CapabilityAdmission {
   const capabilityAdmissionId = requireNonEmptyString(
@@ -131,6 +147,21 @@ export function createCapabilityAdmission(input: {
     if (input.binding === undefined) {
       throw new InvalidCapabilityAdmissionError(
         "VERIFIED_AVAILABLE requires a compatible VERIFIED ConnectionBinding",
+      );
+    }
+    if (input.requirement === undefined) {
+      throw new InvalidCapabilityAdmissionError(
+        "VERIFIED_AVAILABLE requires the ConnectionRequirement the binding was issued against, to prove capability compatibility",
+      );
+    }
+    if (input.requirement.requiredCapabilityRef !== requiredCapabilityRef) {
+      throw new InvalidCapabilityAdmissionError(
+        "VERIFIED_AVAILABLE requires the given requirement's requiredCapabilityRef to match this observation's requiredCapabilityRef",
+      );
+    }
+    if (input.binding.connectionRequirementId !== input.requirement.connectionRequirementId) {
+      throw new InvalidCapabilityAdmissionError(
+        "VERIFIED_AVAILABLE requires the given binding to have been issued against the given requirement",
       );
     }
     if (input.binding.connectionState !== "VERIFIED") {

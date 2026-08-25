@@ -73,5 +73,6 @@ export const WEBSITE_BUILD_V1_CAPABILITY_ADMISSION: CapabilityAdmission = create
   requiredCapabilityRef: "required-access-connections",
   status: "VERIFIED_AVAILABLE",
   binding: WEBSITE_BUILD_V1_CONNECTION_BINDING,
+  requirement: WEBSITE_BUILD_V1_CONNECTION_REQUIREMENT,
   evidenceRef: "internal://reference-fixtures/website-build-v1/capability-admission-evidence",
 });
