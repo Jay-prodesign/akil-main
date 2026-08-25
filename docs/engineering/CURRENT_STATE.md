@@ -1,6 +1,6 @@
 # CURRENT_STATE.md
 
-Last updated: 2026-08-22, by Claude (Primary Engineer), after implementing `V2-CDO-003` (First Bounded Customer Ownership & Project Communications Contract, OPS-010 Minimum V2 Slice) to `IMPLEMENTED / SELF-VALIDATED / PENDING BRAIN AUDIT` — see `docs/exec-plans/active/V2-CDO-003.md`. V1 DEL-003/AKI-GIT-001 state below is unchanged.
+Last updated: 2026-08-25, by Claude (Primary Engineer), starting `V2-CDO-004` (First Bounded Account/Connection Ownership & Admitted Capability Consumption Contract, CONN-001 Minimum V2 Slice) after Brain **VERIFIED / PASS / CLOSED** `V2-CDO-003` at `b9430b74fdc580ce66530899e1510bc4c5ddf2cb` — see `docs/exec-plans/completed/V2-CDO-003.md`. V1 DEL-003/AKI-GIT-001 state below is unchanged.
 
 ## Repository identity
 
@@ -30,12 +30,13 @@ Last updated: 2026-08-22, by Claude (Primary Engineer), after implementing `V2-C
 
 ## Active tasks
 
-- `V2-CDO-003` (First Bounded Customer Ownership & Project Communications Contract, OPS-010 Minimum V2 Slice) — Status: **IMPLEMENTED / SELF-VALIDATED / PENDING BRAIN AUDIT**, branch `claude/V2-CDO-003-task-packet`. Adds `src/domain/project-ownership.ts` (`ProjectOwnershipRef`) and `src/domain/project-communication.ts` (`ProjectCommunicationRecord`/`ProjectCommunicationHistory`, `CommunicationDirection`/`Classification`/`RequiredActor`/`ObservationState`), reusing `TenantScope.tenantId` as the organization mapping and `Customer`/`Project` identity directly; one canonical fixture reuses the existing `WEBSITE_BUILD_v1` project. O1–O11 test contract covered; 282/282 tests pass. See `docs/exec-plans/active/V2-CDO-003.md`.
+- `V2-CDO-004` (First Bounded Account/Connection Ownership & Admitted Capability Consumption Contract, CONN-001 Minimum V2 Slice) — Status: **IN PROGRESS**, branch `claude/V2-CDO-004-task-packet`, cut from `25213d78386b0a023e1f6a15e56ee2d2d07bbbad` (a docs-only descendant of the verified `V2-CDO-003` closure SHA `b9430b74fdc580ce66530899e1510bc4c5ddf2cb`). See `docs/exec-plans/active/V2-CDO-004.md`.
 - `DEL-003` (second bounded slice: runtime admission + OutcomeJob wiring) — Status: **IMPLEMENTED / SELF-VALIDATED / PENDING NEXT V1 BRAIN AUDIT** at commit `72e2d614e8a6347ca9f3a75f6f0558593caff637`, branch `claude/DEL-003-runtime-admission-task-packet`. Round-1 correction closed Brain's F1–F4 CHANGES_REQUIRED findings; the DEC-144 final Brain verification pass then accepted F2/F3/F4 and VQA-001's Contact correction but found one remaining F1 defect (readiness gate could treat any current-version FACT as positive readiness regardless of what it actually asserted), closed by the round-2 correction (structural `readinessOutcome` field). See `docs/exec-plans/active/DEL-003.md`. Not reopened by V2-CDO-001 absent concrete regression evidence.
 - `AKI-GIT-001` — Status: **IMPLEMENTED — READY FOR CHATGPT VERIFICATION**, draft PR `#1` open, not merged. See `docs/exec-plans/active/AKI-GIT-001.md`.
 
 ## Completed tasks
 
+- `V2-CDO-003` (First Bounded Customer Ownership & Project Communications Contract, OPS-010 Minimum V2 Slice) — Brain **VERIFIED / PASS / CLOSED** at `b9430b74fdc580ce66530899e1510bc4c5ddf2cb` after CR-1 correction. See `docs/exec-plans/completed/V2-CDO-003.md`.
 - `V2-CDO-002` (First Bounded Delivery Recipe Contract, `WEBSITE_BUILD_v1`) — Brain **VERIFIED / PASS / CLOSED** at `f99cd2f46b178d2190ac94ff6052c955d3e5cd43`. See `docs/exec-plans/completed/V2-CDO-002.md`.
 - `V2-CDO-001` (first bounded V2 Client & Delivery OS slice: project/service status + unified delivery timeline) — Brain **VERIFIED / PASS / CLOSED** at `b5a8c4fd422b61c91ba656e910a73ba6165727b7`. See `docs/exec-plans/completed/V2-CDO-001.md`.
 - `AKI-BE-001` — Brain **VERIFIED / COMPLETED** at `c2e7e7dee579b2fab614485631fa3cd1f53c6070`. See `docs/exec-plans/completed/AKI-BE-001.md`.
