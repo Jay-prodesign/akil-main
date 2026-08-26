@@ -12,4 +12,4 @@ Write an ADR when a decision is structural and expensive to reverse — e.g. cho
 
 ## Index
 
-No ADRs exist yet. This repository is at bootstrap (AKI-GIT-001) — no architectural decisions have been made or recorded.
+- [0001 — V2-APP-001 web-application shell: framework and placement](0001-v2-app-001-web-shell-framework.md) — Accepted 2026-08-26. Build the shell on `node:http` + a hand-written pure request handler; no third-party web framework introduced.
