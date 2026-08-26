@@ -41,7 +41,7 @@ test("A3: the shell starts on an ephemeral local port and serves a real HTTP req
       });
       assert.equal(response.status, 200);
       const body = await response.text();
-      assert.match(body, /Delivery status/);
+      assert.match(body, /Overall status/);
     },
   );
 });

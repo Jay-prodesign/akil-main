@@ -107,7 +107,7 @@ export function createRequestHandler(deps: {
         if (view.snapshot.deliveryStatus.overallStatus === "NOT_STARTED") {
           content = { kind: "EMPTY" };
         } else if (view.snapshot.deliveryStatus.overallStatus === "BLOCKED") {
-          content = { kind: "BLOCKED" };
+          content = { kind: "BLOCKED", snapshot: view.snapshot };
         } else {
           content = { kind: "READY", snapshot: view.snapshot };
         }

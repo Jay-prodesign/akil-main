@@ -1,22 +1,28 @@
-import type { ClientProjectSnapshot } from "../domain/client-project-snapshot.js";
+import type {
+  ClientProjectSnapshot,
+  CustomerSafeCapabilitySummary,
+  NextAction,
+  WorkingArtifactState,
+} from "../domain/client-project-snapshot.js";
+import type { DeliveryTimeline, DeliveryTimelineEntry } from "../domain/delivery-timeline.js";
+import type { ProjectCommunicationRecord } from "../domain/project-communication.js";
 
 /**
- * V2-APP-001 (IN SCOPE H): the deterministic, closed set of page content
- * this shell can render. This is intentionally broader than the states
- * `http-server.ts` currently wires from a live request (`LOADING`,
- * `UNAVAILABLE`, `UNSUPPORTED` have no live trigger in this bootstrap -
- * there is no async snapshot source yet and no capability-unsupported
- * concept at the shell level) - they are prepared render primitives for
- * V2-CDO-006 to reach, per "PREPARED != IMPLEMENTED" (DEC-153 Activation
- * Discipline): existing and directly unit-tested here, not fabricated as
- * live behavior this task does not actually produce.
+ * V2-APP-001 (IN SCOPE H) / V2-CDO-006: the deterministic, closed set of
+ * page content this shell can render. `LOADING`/`UNAVAILABLE`/
+ * `UNSUPPORTED` still have no live trigger in this synchronous, in-memory
+ * bootstrap (there is no async snapshot source yet and no
+ * capability-unsupported concept at the shell level) - they remain
+ * prepared render primitives per "PREPARED != IMPLEMENTED" (DEC-153
+ * Activation Discipline). Every other kind, including `BLOCKED`, is live:
+ * `request-handler.ts` reaches it from a real `ClientProjectSnapshot`.
  */
 export type ShellPageContent =
   | { readonly kind: "LOADING" }
   | { readonly kind: "EMPTY" }
   | { readonly kind: "UNAVAILABLE"; readonly reason: string }
   | { readonly kind: "UNSUPPORTED"; readonly reason: string }
-  | { readonly kind: "BLOCKED"; readonly reason?: string }
+  | { readonly kind: "BLOCKED"; readonly snapshot: ClientProjectSnapshot }
   | { readonly kind: "ERROR"; readonly reason: string }
   | { readonly kind: "NOT_FOUND" }
   | { readonly kind: "UNAUTHENTICATED" }
@@ -84,23 +90,203 @@ function renderPage(input: {
   ${input.bodyHtml}
 </main>
 <footer>
-  <p>This is an internal engineering shell checkpoint (V2-APP-001), not a released customer product.</p>
+  <p>This is an internal engineering checkpoint (V2-APP-001/V2-CDO-006), not a released customer product.</p>
 </footer>
 </body>
 </html>`;
 }
 
-function renderSnapshotBody(snapshot: ClientProjectSnapshot): string {
-  const nextActionLabel = snapshot.nextAction.owner.replace(/_/g, " ");
+const NEXT_ACTION_LABELS: Record<NextAction["owner"], { label: string; badge: string; tone: string }> = {
+  NO_ACTION_NEEDED: { label: "Nothing needed from you right now.", badge: "NO ACTION NEEDED", tone: "success" },
+  CLIENT_ACTION_REQUIRED: { label: "Action is needed from you.", badge: "YOUR ACTION", tone: "warning" },
+  AKILTA_ACTION_REQUIRED: { label: "AKILTA is handling the next step.", badge: "AKILTA WORKING", tone: "neutral" },
+  EXTERNAL_WAIT: { label: "Waiting on an external factor.", badge: "EXTERNAL WAIT", tone: "neutral" },
+};
+
+/**
+ * V2-CDO-006 (UX/CLAIM RULES): "Customer action is visually distinct from
+ * AKILTA internal work and External Wait" and "NO ACTION NEEDED should
+ * reduce unnecessary customer interruptions" - each owner gets its own
+ * always-visible text badge, never color alone (U2/U6).
+ */
+function renderNextActionSection(nextAction: NextAction): string {
+  const info = NEXT_ACTION_LABELS[nextAction.owner];
   return `
-  <section aria-labelledby="delivery-status-heading">
-    <h2 id="delivery-status-heading">Delivery status</h2>
-    <p>Overall status: <strong>${escapeHtml(snapshot.deliveryStatus.overallStatus)}</strong></p>
-  </section>
   <section aria-labelledby="next-action-heading">
     <h2 id="next-action-heading">Next action</h2>
-    <p>${escapeHtml(nextActionLabel)}</p>
-  </section>
+    <p class="status status-${info.tone}" role="status">${escapeHtml(info.badge)}</p>
+    <p>${escapeHtml(info.label)}</p>
+  </section>`;
+}
+
+const TIMELINE_CATEGORY_LABELS: Record<DeliveryTimelineEntry["category"], string> = {
+  STATUS_UPDATE: "Status update",
+  BLOCKER: "Blocking issue",
+  VERIFICATION: "Verified",
+  ACTION_REQUIRED: "Action required",
+  WORKING_ARTIFACT: "Working artifact update",
+  APPROVAL: "Approval",
+};
+
+/**
+ * V2-CDO-006 IA: "state-first milestone/timeline summary". Reuses the
+ * already customer-safe `DeliveryTimeline` (V2-CDO-001 CR-1) verbatim -
+ * no raw `reason`/`actorRef` ever reaches this layer (U11).
+ */
+function renderTimelineSection(timeline: DeliveryTimeline): string {
+  if (timeline.entries.length === 0) {
+    return `
+  <section aria-labelledby="timeline-heading">
+    <h2 id="timeline-heading">Timeline</h2>
+    <p>No updates recorded yet.</p>
+  </section>`;
+  }
+  const items = timeline.entries
+    .map(
+      (entry) =>
+        `<li>${escapeHtml(TIMELINE_CATEGORY_LABELS[entry.category])} — <time datetime="${escapeHtml(entry.timestamp)}">${escapeHtml(entry.timestamp)}</time></li>`,
+    )
+    .join("\n    ");
+  return `
+  <section aria-labelledby="timeline-heading">
+    <h2 id="timeline-heading">Timeline</h2>
+    <ul>
+    ${items}
+    </ul>
+  </section>`;
+}
+
+/**
+ * V2-CDO-006 IA: "blocker/external-wait card with customer-safe reason
+ * and timestamp when applicable". The only customer-safe blocker signal
+ * this repository produces is the timeline's own `BLOCKER` category
+ * (V2-CDO-001 CR-1) - never a raw internal `reason` string (U11). Absent
+ * such an entry, this states that truthfully rather than fabricating one.
+ */
+function renderBlockerSection(timeline: DeliveryTimeline): string {
+  const mostRecentBlocker = [...timeline.entries].filter((entry) => entry.category === "BLOCKER").at(-1);
+  const detail =
+    mostRecentBlocker !== undefined
+      ? `Blocked since <time datetime="${escapeHtml(mostRecentBlocker.timestamp)}">${escapeHtml(mostRecentBlocker.timestamp)}</time>.`
+      : "A blocking issue was detected. No further customer-safe detail is available yet.";
+  return `
+  <section aria-labelledby="blocker-heading">
+    <h2 id="blocker-heading">Blocked</h2>
+    <p>${detail}</p>
+  </section>`;
+}
+
+/**
+ * V2-CDO-006 IA: "Working Artifact area, clearly labelled preview/
+ * staging/sandbox/dry-run/verified ...; preview must never visually
+ * imply DONE/VERIFIED" and "current working version versus last
+ * customer-approved version where applicable" (U13/U14). `snapshot.
+ * workingArtifact` is only present when a real plan exists (A9) - the
+ * approval label always reflects `isCurrentVersionApproved` exactly as
+ * `isApprovalValidForPlan` computed it, never inferred separately here.
+ */
+function renderWorkingArtifactSection(workingArtifact: WorkingArtifactState): string {
+  const approvalLine = workingArtifact.isCurrentVersionApproved
+    ? `<p class="status status-success" role="status">Approved</p>`
+    : `<p class="status status-neutral" role="status">Preview — not yet approved</p>`;
+  const staleNotice =
+    workingArtifact.lastApprovedVersion !== undefined &&
+    workingArtifact.lastApprovedVersion !== workingArtifact.currentVersion
+      ? `<p>A newer version exists since the last approval (version ${escapeHtml(String(workingArtifact.lastApprovedVersion))} was approved; current is version ${escapeHtml(String(workingArtifact.currentVersion))}).</p>`
+      : "";
+  return `
+  <section aria-labelledby="working-artifact-heading">
+    <h2 id="working-artifact-heading">Working artifact</h2>
+    <p>Current version: ${escapeHtml(String(workingArtifact.currentVersion))}</p>
+    ${approvalLine}
+    ${staleNotice}
+  </section>`;
+}
+
+const CAPABILITY_STATUS_LABELS: Record<CustomerSafeCapabilitySummary["status"], string> = {
+  UNVERIFIED: "Not yet verified",
+  VERIFIED_AVAILABLE: "Ready",
+  UNSUPPORTED: "Not supported",
+  INELIGIBLE: "Not eligible",
+};
+
+/**
+ * V2-CDO-006 IA: "connection/capability readiness summary ... without
+ * secrets or provider credential detail" (U15). `CustomerSafeCapabilitySummary`
+ * already excludes `connectionBindingId`/`evidenceRef`/provider detail
+ * (V2-CDO-005 P9) - this renders only `requiredCapabilityRef` + `status`.
+ */
+function renderCapabilitiesSection(capabilities: ReadonlyArray<CustomerSafeCapabilitySummary>): string {
+  if (capabilities.length === 0) {
+    return "";
+  }
+  const items = capabilities
+    .map(
+      (capability) =>
+        `<li>${escapeHtml(capability.requiredCapabilityRef)}: ${escapeHtml(CAPABILITY_STATUS_LABELS[capability.status])}</li>`,
+    )
+    .join("\n    ");
+  return `
+  <section aria-labelledby="capabilities-heading">
+    <h2 id="capabilities-heading">Connections &amp; capabilities</h2>
+    <ul>
+    ${items}
+    </ul>
+  </section>`;
+}
+
+/**
+ * V2-CDO-006 IA: "latest safe update/evidence references". Renders only
+ * the already customer-safe `ProjectCommunicationRecord` fields (V2-CDO-003
+ * O9) - no message body/content field exists on this type to leak.
+ */
+function renderCommunicationsSection(records: ReadonlyArray<ProjectCommunicationRecord>): string {
+  if (records.length === 0) {
+    return "";
+  }
+  const items = [...records]
+    .sort((a, b) => (a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0))
+    .map((record) => {
+      const evidence = record.evidenceRef ?? record.relatedArtifactRef;
+      const evidenceLine = evidence !== undefined ? ` — evidence: ${escapeHtml(evidence)}` : "";
+      return `<li>${escapeHtml(record.classification)} (${escapeHtml(record.requiredActor)}) — <time datetime="${escapeHtml(record.timestamp)}">${escapeHtml(record.timestamp)}</time>${evidenceLine}</li>`;
+    })
+    .join("\n    ");
+  return `
+  <section aria-labelledby="communications-heading">
+    <h2 id="communications-heading">Recent updates</h2>
+    <ul>
+    ${items}
+    </ul>
+  </section>`;
+}
+
+/**
+ * V2-CDO-006 minimum IA: identity header, next action, (blocker card when
+ * blocked), timeline, working artifact, capabilities, recent updates,
+ * verified-completed-work count. Every section is driven only by fields
+ * already present on the customer-safe `ClientProjectSnapshot` (A9) - no
+ * section reaches around it into a private domain shape.
+ */
+function renderSnapshotBody(snapshot: ClientProjectSnapshot, options?: { blocked?: boolean }): string {
+  const header = `
+  <section aria-labelledby="project-identity-heading">
+    <h2 id="project-identity-heading">Project</h2>
+    <p>Customer: ${escapeHtml(snapshot.ownership.customerId)}</p>
+    <p>Project: ${escapeHtml(snapshot.ownership.projectId)}</p>
+    <p>Overall status: <strong>${escapeHtml(snapshot.deliveryStatus.overallStatus)}</strong></p>
+  </section>`;
+  const blockerSection = options?.blocked === true ? renderBlockerSection(snapshot.timeline) : "";
+  const workingArtifactSection =
+    snapshot.workingArtifact !== undefined ? renderWorkingArtifactSection(snapshot.workingArtifact) : "";
+  return `
+  ${header}
+  ${blockerSection}
+  ${renderNextActionSection(snapshot.nextAction)}
+  ${renderTimelineSection(snapshot.timeline)}
+  ${workingArtifactSection}
+  ${renderCapabilitiesSection(snapshot.capabilities)}
+  ${renderCommunicationsSection(snapshot.recentCommunications)}
   <section aria-labelledby="verified-work-heading">
     <h2 id="verified-work-heading">Verified completed work</h2>
     <p>${snapshot.verifiedCompletedJobIds.length} item(s) verified complete.</p>
@@ -167,7 +353,7 @@ export function renderShellPage(content: ShellPageContent): RenderedShellPage {
           title: "Blocked",
           statusLabel: "Blocked — attention needed",
           statusTone: "warning",
-          bodyHtml: `<p>${content.reason !== undefined ? escapeHtml(content.reason) : "This project currently has a blocking issue."}</p>`,
+          bodyHtml: renderSnapshotBody(content.snapshot, { blocked: true }),
         }),
       };
     case "ERROR":
