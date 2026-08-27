@@ -19,6 +19,7 @@ Dependency direction is strictly downward: `web` and `application` may depend on
 Grouped by the capability it backs:
 
 - **Tenancy/identity**: `tenant-scope.ts`, `customer.ts`, `project.ts`, `project-ownership.ts`, `authority.ts`, `connection-authority.ts`, `capability-admission.ts`
+- **Organization membership / role / assignment** (V3-ORG-001, first V3 slice): `organization-membership.ts` — `OrganizationMembership`/`OrganizationRole` (no owner role) + `AssignmentReference`/`resolveAssignmentStatus`; imports nothing from `authority.ts` — a role/membership can never itself grant permission or protected-action authority.
 - **Delivery/outcome tracking**: `delivery-recipe.ts`, `delivery-status.ts`, `delivery-timeline.ts`, `client-project-snapshot.ts`, `outcome-job.ts`, `outcome-job-spec.ts`, `outcome-job-wiring.ts`, `durable-outcome-job-store.ts`
 - **Delivery Project Advisor** (V2-CDO-008): `delivery-advisor.ts` — pure L0 Observe / L1 Recommend contract over `client-project-snapshot.ts` + `delivery-recipe.ts`; no mutation, no provider/model reference.
 - **Planning**: `project-plan.ts`, `project-plan-diff.ts`, `project-plan-validation.ts`, `plan-admission.ts`, `plan-admission-event.ts`, `plan-admission-run-state.ts`, `durable-plan-admission-store.ts`, `admission-readiness.ts`, `offer-blueprint.ts`, `sold-scope.ts`, `approval-reference.ts`

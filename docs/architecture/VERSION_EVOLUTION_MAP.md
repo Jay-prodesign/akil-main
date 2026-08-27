@@ -17,11 +17,21 @@ Tracks how the repository's actual implemented surface maps onto the DEC-160 V2�
 | First-party logged-in application shell + provider-neutral auth/session/tenant bootstrap | `V2-APP-001` | Brain `PASS / VERIFIED / CLOSED` (checkpoint `33f95a3dc1ae1fdae02992b781002b92267f3110`) |
 | Minimum logged-in Client Portal UI | `V2-CDO-006` | Brain `PASS / VERIFIED / CLOSED` (same checkpoint, same train) |
 | Bounded Delivery Project Advisor (L0 Observe / L1 Recommend) — domain contract + shell presentation layer | `V2-CDO-008` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification. `V2-CDO-007` (Delivery Recipe *breadth* beyond `WEBSITE_BUILD_v1`) remains superseded — its own goal was already delivered under `V2-CDO-002`, so it was not separately implemented; see `V2_TO_V5.md` "Current V2 state" for the full reasoning. |
-| — remaining V2 outcomes not yet built | Broader provider/model runtime (gated on separate DEC-154/155 admission), production auth/persistence, billing/support/CRM | No canonical task contract exists yet for any of these; the corridor's own "AI Engineering Operating System v1.0" authority-index document confirms no `V2-CDO-009`-or-later candidate is currently published (see `V2_TO_V5.md` "Corridor-admitted graph status") |
+| — remaining V2 outcomes not yet built | Broader provider/model runtime (gated on separate DEC-154/155 admission), production auth/persistence, billing/support/CRM | No canonical task contract exists yet for any of these. (An earlier version of this row also cited "no `V2-CDO-009`-or-later candidate published" as the reason no further V2 work exists at all — Brain's `HANDOFF_HEAD_REV: 10` rejected that as a valid exhaustion predicate; see `V2_TO_V5.md`'s "Current V3 state" for what the corrected progressive-elaboration scan found instead.) |
 
 ## V3.0 — Team, Sales & Agency OS
 
-`PREPARED / NON_SELECTOR`. Full blueprint at Drive `1joeMcCRtnDSotEmWa63fFG6uxGvbeU1LZApm7_5ap50`. Nothing in `src/` implements V3 scope yet (no roles/ownership model, no agency/partner org model, no multi-org controls).
+**Active (Workstream A only)**. Full blueprint at Drive `1joeMcCRtnDSotEmWa63fFG6uxGvbeU1LZApm7_5ap50`.
+
+| Capability slice | Task | Status |
+|---|---|---|
+| Workstream A: organization membership / role / assignment authority foundation | `V3-ORG-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification |
+| Workstream B: multi-owner sales/account/delivery semantics | — not started | Depends on Workstream A |
+| Workstream C: agency/partner multi-organization boundary | — not started | Depends on Workstream A |
+| Workstream D: SLA/escalation/attention model | — not started | — |
+| Workstream E: commission/pricing/discount authority read models | — not started | Controlled by DEC-146; depends on authoritative financial truth |
+| Workstream F: V3 logged-in frontend / role-aware IA | — not started | Depends on backend workstreams B-E |
+| Workstream G: cross-slice integration + V3 exit audit | — not started | Depends on all prior workstreams |
 
 ## V4.0 — 360 Digital Operations
 
