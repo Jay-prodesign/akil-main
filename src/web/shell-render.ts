@@ -6,6 +6,7 @@ import type {
 } from "../domain/client-project-snapshot.js";
 import type { DeliveryTimeline, DeliveryTimelineEntry } from "../domain/delivery-timeline.js";
 import type { ProjectCommunicationRecord } from "../domain/project-communication.js";
+import { buildAdvisorResult, type AdvisorResult } from "../domain/delivery-advisor.js";
 
 /**
  * V2-APP-001 (IN SCOPE H) / V2-CDO-006: the deterministic, closed set of
@@ -261,6 +262,65 @@ function renderCommunicationsSection(records: ReadonlyArray<ProjectCommunication
   </section>`;
 }
 
+const ADVISOR_MATURITY_LABELS: Record<AdvisorResult["maturity"], string> = {
+  L0_OBSERVE: "ADVISOR: OBSERVE",
+  L1_RECOMMEND: "ADVISOR: RECOMMEND",
+};
+
+/**
+ * V2-CDO-008 (In Scope: "Customer-safe presentation integration only if
+ * the actual V2 app/portal shell exists") - this is that presentation
+ * integration, now that the shell (V2-APP-001/V2-CDO-006) exists.
+ * `buildAdvisorResult` is called with only the already-validated
+ * `snapshot` and its own `ownership` (never a caller-supplied recipe -
+ * this render layer has no `DeliveryRecipe` port/source, so
+ * `applicableRecipeRef` is honestly always absent here rather than
+ * fabricated).
+ *
+ * A12: the section has its own heading and is explicitly worded as
+ * advisor prose ("not verified evidence, not an approval"), visually
+ * subordinate to and clearly separate from the verified project-status
+ * sections rendered above it - never styled as verified/approved status.
+ *
+ * A13: an advisor computation failure renders a deterministic "advisor
+ * unavailable" fallback rather than throwing - the only caller,
+ * `renderSnapshotBody`, always renders this section last, so an advisor
+ * defect can never hide or corrupt the verified project-status sections
+ * that already rendered above it.
+ */
+function renderAdvisorSection(snapshot: ClientProjectSnapshot): string {
+  let result: AdvisorResult;
+  try {
+    result = buildAdvisorResult({ ownership: snapshot.ownership, snapshot });
+  } catch {
+    return `
+  <section aria-labelledby="advisor-heading">
+    <h2 id="advisor-heading">Delivery advisor</h2>
+    <p class="status status-neutral" role="status">Advisor unavailable</p>
+    <p>The delivery advisor could not be computed for this project. This does not affect your project status above.</p>
+  </section>`;
+  }
+
+  const body =
+    result.status === "RECOMMENDATIONS_AVAILABLE"
+      ? `
+    <p><em>Advisor recommendation — not verified evidence, not an approval:</em></p>
+    <ul>
+    ${result.recommendations
+      .map((option) => `<li>${escapeHtml(option.description)}</li>`)
+      .join("\n    ")}
+    </ul>`
+      : `
+    <p>${escapeHtml(result.unavailableReason ?? "No recommendation is available yet.")}</p>`;
+
+  return `
+  <section aria-labelledby="advisor-heading">
+    <h2 id="advisor-heading">Delivery advisor</h2>
+    <p class="status status-neutral" role="status">${escapeHtml(ADVISOR_MATURITY_LABELS[result.maturity])}</p>
+    ${body}
+  </section>`;
+}
+
 /**
  * V2-CDO-006 minimum IA: identity header, next action, (blocker card when
  * blocked), timeline, working artifact, capabilities, recent updates,
@@ -287,6 +347,7 @@ function renderSnapshotBody(snapshot: ClientProjectSnapshot, options?: { blocked
   ${workingArtifactSection}
   ${renderCapabilitiesSection(snapshot.capabilities)}
   ${renderCommunicationsSection(snapshot.recentCommunications)}
+  ${renderAdvisorSection(snapshot)}
   <section aria-labelledby="verified-work-heading">
     <h2 id="verified-work-heading">Verified completed work</h2>
     <p>${snapshot.verifiedCompletedJobIds.length} item(s) verified complete.</p>

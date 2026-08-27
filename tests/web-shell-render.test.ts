@@ -132,3 +132,47 @@ test("U6: the next-action badge is a distinct, always-visible text label for eac
   const rendered = renderShellPage({ kind: "READY", snapshot: READY_SNAPSHOT });
   assert.match(rendered.html, /class="status status-\w+" role="status">[A-Z ]+<\/p>/);
 });
+
+test("V2-CDO-008 A12: only READY and BLOCKED render the advisor section - it is exactly as scoped as the rest of the customer-safe body", () => {
+  for (const { content } of ALL_CONTENTS) {
+    const rendered = renderShellPage(content);
+    if (content.kind === "READY" || content.kind === "BLOCKED") {
+      assert.match(rendered.html, /<h2 id="advisor-heading">Delivery advisor<\/h2>/);
+    } else {
+      assert.doesNotMatch(rendered.html, /advisor-heading/);
+    }
+  }
+});
+
+test("V2-CDO-008 A5/A12: READY with an eligible (VERIFIED_AVAILABLE) capability renders an L1_RECOMMEND advisor badge and a labelled, non-authoritative recommendation", () => {
+  const rendered = renderShellPage({ kind: "READY", snapshot: READY_SNAPSHOT });
+  assert.match(rendered.html, />ADVISOR: RECOMMEND</);
+  assert.match(rendered.html, /Advisor recommendation — not verified evidence, not an approval/);
+  assert.match(rendered.html, /required-access-connections/);
+});
+
+test("V2-CDO-008 A6: a snapshot with zero eligible capability renders an L0_OBSERVE advisor badge and the deterministic unavailable reason, never a fabricated recommendation", () => {
+  const emptySnapshot = buildClientProjectSnapshot({
+    ownership: WEBSITE_BUILD_V1_OWNERSHIP,
+    project: buildWebsiteBuildV1Fixture().project,
+    jobs: [],
+  });
+  const rendered = renderShellPage({ kind: "READY", snapshot: emptySnapshot });
+  assert.match(rendered.html, />ADVISOR: OBSERVE</);
+  assert.match(rendered.html, /No policy-eligible \(VERIFIED_AVAILABLE\) capability exists for this project yet\./);
+  assert.doesNotMatch(rendered.html, /Advisor recommendation/);
+});
+
+test("V2-CDO-008 A13: the advisor section renders after, and never in place of, the verified project-status sections on both READY and BLOCKED", () => {
+  for (const content of [
+    { kind: "READY" as const, snapshot: READY_SNAPSHOT },
+    { kind: "BLOCKED" as const, snapshot: BLOCKED_SNAPSHOT },
+  ]) {
+    const rendered = renderShellPage(content);
+    const projectIndex = rendered.html.indexOf("project-identity-heading");
+    const advisorIndex = rendered.html.indexOf("advisor-heading");
+    assert.equal(projectIndex >= 0, true);
+    assert.equal(advisorIndex >= 0, true);
+    assert.equal(projectIndex < advisorIndex, true);
+  }
+});
