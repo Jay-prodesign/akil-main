@@ -26,7 +26,7 @@ Tracks how the repository's actual implemented surface maps onto the DEC-160 V2�
 | Capability slice | Task | Status |
 |---|---|---|
 | Workstream A: organization membership / role / assignment authority foundation | `V3-ORG-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification |
-| Workstream B: multi-owner sales/account/delivery semantics | — not started | Depends on Workstream A |
+| Workstream B: multi-owner sales/account/delivery semantics (LeadOwner/DealOwner/AccountOwner/DeliveryOwner) | `V3-OWN-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification |
 | Workstream C: agency/partner multi-organization boundary | — not started | Depends on Workstream A |
 | Workstream D: SLA/escalation/attention model | — not started | — |
 | Workstream E: commission/pricing/discount authority read models | — not started | Controlled by DEC-146; depends on authoritative financial truth |
