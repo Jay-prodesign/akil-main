@@ -20,6 +20,7 @@ Grouped by the capability it backs:
 
 - **Tenancy/identity**: `tenant-scope.ts`, `customer.ts`, `project.ts`, `project-ownership.ts`, `authority.ts`, `connection-authority.ts`, `capability-admission.ts`
 - **Delivery/outcome tracking**: `delivery-recipe.ts`, `delivery-status.ts`, `delivery-timeline.ts`, `client-project-snapshot.ts`, `outcome-job.ts`, `outcome-job-spec.ts`, `outcome-job-wiring.ts`, `durable-outcome-job-store.ts`
+- **Delivery Project Advisor** (V2-CDO-008): `delivery-advisor.ts` — pure L0 Observe / L1 Recommend contract over `client-project-snapshot.ts` + `delivery-recipe.ts`; no mutation, no provider/model reference.
 - **Planning**: `project-plan.ts`, `project-plan-diff.ts`, `project-plan-validation.ts`, `plan-admission.ts`, `plan-admission-event.ts`, `plan-admission-run-state.ts`, `durable-plan-admission-store.ts`, `admission-readiness.ts`, `offer-blueprint.ts`, `sold-scope.ts`, `approval-reference.ts`
 - **Communication/evidence**: `project-communication.ts`, `customer-evidence.ts`, `evidence.ts`, `verification-result.ts`, `audit-event.ts`, `dec-138-provenance.ts`
 - **Engineering-orchestration primitives** (ENG-ORCH-001): `engineering-event-envelope.ts`, `engineering-run-state.ts`, `durable-engineering-store.ts`, `worker-invoker.ts`
@@ -35,7 +36,7 @@ Grouped by the capability it backs:
 
 ## `src/fixtures/`
 
-Deterministic, dev/test-only. `website-build-v1*.ts` back the `WEBSITE_BUILD_v1` Delivery Recipe fixture family (V2-CDO-002+); `web-shell.ts` backs the V2-APP-001/V2-CDO-006 dev session + snapshot fixtures. Mechanically excluded from any production path — see A7/A8 in `docs/exec-plans/completed/V2-APP-001.md` and the boundary-scan tests.
+Deterministic, dev/test-only. `website-build-v1*.ts` back the `WEBSITE_BUILD_v1` Delivery Recipe fixture family (V2-CDO-002+), including `website-build-v1-advisor.ts` (V2-CDO-008); `web-shell.ts` backs the V2-APP-001/V2-CDO-006 dev session + snapshot fixtures. Mechanically excluded from any production path — see A7/A8 in `docs/exec-plans/completed/V2-APP-001.md` and the boundary-scan tests.
 
 ## `src/web/` (V2-APP-001)
 
@@ -43,7 +44,7 @@ Deterministic, dev/test-only. `website-build-v1*.ts` back the `WEBSITE_BUILD_v1`
 - `session-provider.ts` (port) / `production-session-provider.ts` (fail-closed, no real IdP) / `dev-fixture-session-provider.ts` (dev-only, throws at construction time if `isProduction`).
 - `route-guard.ts` — `requireSession`, `requireTenantOwnership`, fail-closed.
 - `snapshot-view-state.ts` — tenant-ownership check before ever touching the snapshot source; maps to `FORBIDDEN_TENANT_SCOPE` / `NOT_FOUND` / `ERROR` / `READY`.
-- `shell-render.ts` — the one shared HTML shell (accessible, responsive), expanded by V2-CDO-006 into the Client Portal IA.
+- `shell-render.ts` — the one shared HTML shell (accessible, responsive), expanded by V2-CDO-006 into the Client Portal IA and by V2-CDO-008 (`renderAdvisorSection`) with the Delivery Advisor's L0/L1 presentation.
 - `request-handler.ts` — pure `IncomingRequestLike -> OutgoingResponseLike`, zero `node:http` import.
 - `http-server.ts` — the only file that imports `node:http`; the transport adapter.
 

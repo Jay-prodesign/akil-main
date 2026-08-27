@@ -31,6 +31,7 @@ No back-edges exist: `src/domain/` never imports from `application/`, `ports/`, 
 - `ClientProjectSnapshot` (`src/domain/client-project-snapshot.ts`, V2-CDO-005) is consumed verbatim by `src/web/snapshot-view-state.ts` and `shell-render.ts` (V2-APP-001/V2-CDO-006) — no second projection type was created.
 - `ProjectOwnershipRef` (`src/domain/project-ownership.ts`, V2-CDO-003) is reused directly by the V2-APP-001 tenant-scope checks.
 - `WEBSITE_BUILD_V1_OWNERSHIP` / `WEBSITE_BUILD_V1_CLIENT_PROJECT_SNAPSHOT` fixtures (V2-CDO-005) are reused directly by the V2-APP-001/V2-CDO-006 dev fixtures in `src/fixtures/web-shell.ts`, not re-derived.
+- `delivery-advisor.ts` (V2-CDO-008) depends only on types from `client-project-snapshot.ts` (V2-CDO-005) and `delivery-recipe.ts` (V2-CDO-002) — no create/transition/verify function from any domain module, so it cannot mutate `OutcomeJob`/`ProjectPlanVersion`/`ApprovalReference`/`CapabilityAdmission`/`ConnectionBinding` state. `shell-render.ts` (`src/web/`) calls `buildAdvisorResult` directly with the already-validated snapshot; no new port was added for this — the render layer has no `DeliveryRecipe` source, so it always calls `buildAdvisorResult` without a `recipe` argument.
 
 ## Known gaps
 

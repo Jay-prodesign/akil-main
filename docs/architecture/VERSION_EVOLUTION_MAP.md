@@ -16,7 +16,8 @@ Tracks how the repository's actual implemented surface maps onto the DEC-160 V2�
 | Customer-safe project & outcome projection contract | `V2-CDO-005` | Brain `PASS / VERIFIED / CLOSED` |
 | First-party logged-in application shell + provider-neutral auth/session/tenant bootstrap | `V2-APP-001` | Brain `PASS / VERIFIED / CLOSED` (checkpoint `33f95a3dc1ae1fdae02992b781002b92267f3110`) |
 | Minimum logged-in Client Portal UI | `V2-CDO-006` | Brain `PASS / VERIFIED / CLOSED` (same checkpoint, same train) |
-| — remaining V2 outcomes not yet built | Delivery Recipe *breadth* beyond `WEBSITE_BUILD_v1`, bounded AI Project Advisor, broader provider runtime, production auth/persistence, billing/support/CRM | `V2-CDO-007` / `V2-CDO-008` referenced as `PREPARED / NON_SELECTOR / NOT START_AUTHORIZED` in canonical Drive sources — **no detailed dependency-safe task contract exists yet** for either, so neither is an executable subcursor as of this writing (see `V2_TO_V5.md` "Current V2 state") |
+| Bounded Delivery Project Advisor (L0 Observe / L1 Recommend) — domain contract + shell presentation layer | `V2-CDO-008` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification. `V2-CDO-007` (Delivery Recipe *breadth* beyond `WEBSITE_BUILD_v1`) remains superseded — its own goal was already delivered under `V2-CDO-002`, so it was not separately implemented; see `V2_TO_V5.md` "Current V2 state" for the full reasoning. |
+| — remaining V2 outcomes not yet built | Broader provider/model runtime (gated on separate DEC-154/155 admission), production auth/persistence, billing/support/CRM | No canonical task contract exists yet for any of these; the corridor's own "AI Engineering Operating System v1.0" authority-index document confirms no `V2-CDO-009`-or-later candidate is currently published (see `V2_TO_V5.md` "Corridor-admitted graph status") |
 
 ## V3.0 — Team, Sales & Agency OS
 
