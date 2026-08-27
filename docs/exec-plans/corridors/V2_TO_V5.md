@@ -1,0 +1,41 @@
+# V2 → V5 Autonomous Engineering Corridor (repo-native projection)
+
+This is the repository-native projection of the canonical corridor contract. It is a condensed pointer, not a replacement — the full contract lives in Drive and is the authority of record if this projection and the Drive original ever disagree.
+
+- **Canonical source**: Drive `113M8-J5mYAUPM_BbMlOp0-EgDD4OpCVhNad2yk4crVA` — "AKILTA — V2→V5 Autonomous Engineering Corridor — Repository Projection & Deep Execution Packet v1.0".
+- **Decision authority**: DEC-160 (corridor), reinforced by DEC-150/153/157/158/159; DEC-161 (public-site parallel lane), DEC-162 (version-ahead readiness + parallel audit), DEC-163 (full-program-ahead readiness) apply where non-conflicting.
+- **Status of this projection**: created after Brain's `PASS / VERIFIED / CLOSED` disposition on the `V2-APP-001_TO_V2-CDO-006` transition checkpoint (`33f95a3dc1ae1fdae02992b781002b92267f3110`), per the canonical packet's own §17 instruction to project this model into repo-native files once that transition checkpoint clears.
+
+## What the corridor is
+
+One bounded, multi-version engineering corridor from AKILTA v2.0 (Client & Delivery OS) through v5.0 (AI-Native Technology Company OS), removing routine per-task Brain↔Claude permission ping-pong without weakening canonical scope, independent verification, tenant/security boundaries, project isolation, or protected external/live gates. The corridor is the single active engineering selector; a `CURRENT_WORK_SUBCURSOR` (see `docs/engineering/CURRENT_STATE.md`) is mutable execution state inside it, not a second selector. Roadmap is globally `NON_SELECTOR`; inside this corridor its admitted V2→V5 task/dependency graph is the candidate pool Claude may choose the next dependency-safe work unit from.
+
+## Version capability map (outcomes only — see the Drive packet §3 for full detail)
+
+| Version | Outcomes (target) | Status | Canonical blueprint |
+|---|---|---|---|
+| V2.0 — Client & Delivery OS | Logged-in client workspace; provider-neutral identity/session/tenant boundary; customer/project status & attention projection; Delivery Recipe capability; bounded AI Project Advisor; communication/evidence projection; accountable outcome delivery; admitted capability/connection boundaries; truthful loading/empty/unavailable/blocked/error states. | **Active** — see "Current V2 state" below. | Master program blueprint, Drive `1OjPfxJaBJCWsZrillMJk9hXdjrPkRqz6pSsDR-ICrps` (R22, `PREPARED / NON_SELECTOR / FULL-PROGRAM-AHEAD`) |
+| V3.0 — Team, Sales & Agency OS | Roles/ownership models; sales ownership & commission semantics; SLA/escalation; agency/partner org model, dashboards, context switching; multi-org controls; tenant-safe customer/project authority. | `PREPARED / NON_SELECTOR` | Drive `1joeMcCRtnDSotEmWa63fFG6uxGvbeU1LZApm7_5ap50` |
+| V4.0 — 360 Digital Operations | Unified operational routing/approval/reporting across admitted Website/CMS, Commerce, Social, Paid Media, AI/Content, CRM/Email, Listings/Maps, Hosting/DNS/Development surfaces; unsupported providers stay explicit. | `PREPARED / NON_SELECTOR` | Drive `1M5vANxdfuH7Vro_CAFenioAmWitGPS3TRlzd06d5DNs` |
+| V5.0 — AI-Native Technology Company OS | Company intelligence; cross-client reusable capability learning under evidence/policy controls; Product Lab; AI-native internal delivery; orchestration across AKILTA modules and the isolated versioned AI Commerce boundary. | `PREPARED / NON_SELECTOR` | Drive `1HfQ8Mzbos63LZPE_vZryd4TiLyfa8GFP_AdtmLR-el8` |
+
+Version names are capability/release checkpoints, not engineering permission stops. `Commercial Ready` / `GA` / `RELEASE_ELIGIBLE` / `LIVE` and public/customer activation remain separately governed and are never implied by reaching a version boundary.
+
+## Current V2 state
+
+- `V2-APP-001` → `V2-CDO-006` (DEC-158 continuous train) reached checkpoint `33f95a3dc1ae1fdae02992b781002b92267f3110`, `IMPLEMENTED / SELF-VALIDATED`, and — after two rounds of evidence-integrity correction on the CR-E3 rendered captures — Brain returned `PASS / VERIFIED / CLOSED` at that same checkpoint. See `docs/exec-plans/completed/V2-APP-001.md` for the full evidence trail.
+- `MERGE_DISPOSITION: HOLD_MERGE / DO_NOT_MERGE` remains controlling for that checkpoint's PR (`Jay-prodesign/akil-main#4`, draft) independent of the evidence PASS. Evidence PASS is not merge/release/deploy authority.
+- Completed V2 slices carried forward unchanged: `V2-CDO-001` through `V2-CDO-005` (see `docs/exec-plans/completed/`), `AKI-BE-001`, `ENG-ORCH-001`, and the `DEL-003` bounded slices.
+- `V2-CDO-007` / `V2-CDO-008` remain `PREPARED / NON_SELECTOR / NOT START_AUTHORIZED`: no detailed, dependency-safe task contract for either has been located in canonical Drive sources as of this projection. Per §9 of the canonical packet, a task record needs (at minimum) a goal, dependencies, entry conditions, in-scope/hard-non-scope, acceptance criteria, and an evidence contract before it is an executable subcursor — not just a placeholder name. Selecting either as the next subcursor without that detail would not be a dependency-safe selection; it would be inventing scope.
+
+## Claude's role inside the corridor (condensed — see Drive packet §5/§6/§12 for full text)
+
+Claude is the delegated Engineering Brain + Primary Engineer inside the corridor: fresh-read and reconcile live repo truth before mutating; reuse existing patterns; choose the next dependency-safe work unit from the corridor-admitted graph (not roadmap prose at large); make reversible technical/architecture-within-envelope decisions; implement/test/self-review/fix/evidence/update state; continue across task and version boundaries when entry predicates are satisfied — without a routine per-task Brain/Founder start ceremony. Claude must not self-expand product scope, cross a material architecture envelope silently, or use implementation convenience to bypass a protected gate. Brain retains company/product strategy, canonical scope/version authority, material architecture-envelope decisions outside the delegated bounds, protected-gate classification, and independent/final verification.
+
+## Autonomous execution loop (Drive packet §10)
+
+`INSPECT → REASON/PLAN → IMPLEMENT → TEST → ADVERSARIAL SELF-REVIEW → FIX → VERIFY → EVIDENCE → UPDATE STATE → NEXT`, applied per dependency-safe unit.
+
+## Hard stops (Drive packet §15 — not reproduced in full here)
+
+Material product/scope change outside this corridor; material architecture/security/privacy decision outside the delegated envelope; unresolved canonical conflict; a new external provider/dependency requiring admission; credential/access widening; destructive/irreversible action; production deploy/release/publication/DNS/live-customer activation; binding legal/privacy/customer commitment; payment/financial commitment; AI Commerce mutation without its own project authority; a missing prerequisite blocking all safe work on the affected path; or an explicit canonical/Founder stop. Direct-main merge is never granted by this corridor alone — branch/PR workflow only.

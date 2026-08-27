@@ -1,0 +1,37 @@
+# Dependency Map
+
+## External dependencies
+
+`package.json` declares **zero runtime dependencies**. `devDependencies` are limited to `typescript` and `@types/node`. Any change to this fact is itself a reportable dependency delta in the affected task's evidence (see `docs/engineering/ACCEPTANCE_CRITERIA.md`).
+
+The environment's pre-installed Playwright/Chromium (used to capture V2-APP-001/V2-CDO-006 rendered evidence) is an out-of-repo evidence-capture tool only — it is never imported by anything under `src/` or referenced in `package.json`.
+
+## Internal module dependency direction
+
+```
+src/web/        ──depends on──▶  src/domain/  (session-context types reuse none; snapshot-view-state
+                                                consumes ClientProjectSnapshot)
+                ──depends on──▶  src/fixtures/  (dev-fixture-session-provider, http-server dev wiring only —
+                                                 never from the production session provider path)
+
+src/application/──depends on──▶  src/domain/
+                ──depends on──▶  src/ports/
+
+src/fixtures/   ──depends on──▶  src/domain/   (fixture data is typed against real domain contracts)
+
+src/ports/      ──depends on──▶  src/domain/   (port signatures reference domain types)
+
+src/domain/     ──depends on──▶  (nothing else under src/)
+```
+
+No back-edges exist: `src/domain/` never imports from `application/`, `ports/`, `fixtures/`, or `web/`. This is enforced informally today by the boundary-scan tests (e.g. `tests/v2-app-001-boundary-scan.test.ts` asserts `production-session-provider.ts` never imports the dev-fixture module, and that only `http-server.ts` imports `node:http`) rather than a build-time lint rule — introducing one is a candidate, not yet-decided, improvement; do not assume it exists.
+
+## Cross-task reuse (not duplication)
+
+- `ClientProjectSnapshot` (`src/domain/client-project-snapshot.ts`, V2-CDO-005) is consumed verbatim by `src/web/snapshot-view-state.ts` and `shell-render.ts` (V2-APP-001/V2-CDO-006) — no second projection type was created.
+- `ProjectOwnershipRef` (`src/domain/project-ownership.ts`, V2-CDO-003) is reused directly by the V2-APP-001 tenant-scope checks.
+- `WEBSITE_BUILD_V1_OWNERSHIP` / `WEBSITE_BUILD_V1_CLIENT_PROJECT_SNAPSHOT` fixtures (V2-CDO-005) are reused directly by the V2-APP-001/V2-CDO-006 dev fixtures in `src/fixtures/web-shell.ts`, not re-derived.
+
+## Known gaps
+
+No persistence layer exists (`src/application/in-memory-*` are the only adapters), so there is currently no database/ORM dependency edge to map. No external provider/connector is wired — `src/domain/connection-authority.ts` and `capability-admission.ts` model admitted capability/connection *boundaries*, not live provider integrations.

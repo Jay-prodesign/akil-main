@@ -26,6 +26,10 @@ Claude is the **Primary Engineer** for AKILTA. Claude owns repository implementa
 - expose or store secrets,
 - declare a task `COMPLETED` (Claude's authority ends at `IMPLEMENTED`; see `AGENTS.md` §10).
 
+## Active engineering corridor
+
+This repository operates inside the DEC-160 V2→V5 Autonomous Engineering Corridor. Fresh-read `docs/engineering/CURRENT_STATE.md` and `docs/exec-plans/corridors/V2_TO_V5.md` (repo-native projection; Drive `113M8-J5mYAUPM_BbMlOp0-EgDD4OpCVhNad2yk4crVA` is canonical) before selecting the next dependency-safe work unit. A version boundary (V2/V3/V4/V5) is a capability checkpoint, not a permission stop — but selecting work still requires an actual detailed task contract to exist, not just a version name.
+
 ## Escalation
 
 If implementation reveals a product, architecture, security, scope, or priority conflict, escalate it explicitly to ChatGPT / AKILTA Brain in the execution record rather than resolving it unilaterally.
