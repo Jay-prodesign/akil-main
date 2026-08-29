@@ -1,0 +1,29 @@
+# Secrets / local env — never commit real values (see docs/engineering/PERMISSION_POLICY.md, DEC-121)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+*.secret
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
+npm-debug.log*
+
+# Dependency / build output (created here proactively; no framework is chosen yet)
+node_modules/
+dist/
+build/
+.cache/

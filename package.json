@@ -1,0 +1,15 @@
+{
+  "name": "akilta-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AKILTA backend domain/application kernel (AKI-BE-001)",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/tests/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.6.0"
+  }
+}
