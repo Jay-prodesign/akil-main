@@ -29,13 +29,19 @@ Tracks how the repository's actual implemented surface maps onto the DEC-160 V2�
 | Workstream B: multi-owner sales/account/delivery semantics (LeadOwner/DealOwner/AccountOwner/DeliveryOwner) | `V3-OWN-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification |
 | Workstream C: agency/partner multi-organization boundary | `V3-PTR-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification (domain contract only — presentation-layer multi-client context switching deferred, see exec-plan) |
 | Workstream D: SLA/escalation/attention model | `V3-SLA-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification (no invented AT_RISK heuristic; `contractualSlaStatus` always `UNKNOWN` — no real source exists) |
-| Workstream E: commission/pricing/discount authority read models | — not started | Controlled by DEC-146; depends on authoritative financial truth |
+| Workstream E: commission/pricing/discount authority read models | `V3-COM-001` (PR #5, open) | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification (bounded policy-neutral/read-only/fail-closed slice only; `discountAuthorityLevel` always `APPROVAL_REQUIRED`, `commissionLedgerStatus` always `UNKNOWN` — no real DEC-146 pricing-policy/financial-truth source integrated) |
 | Workstream F: V3 logged-in frontend / role-aware IA | — not started | Depends on backend workstreams B-E |
 | Workstream G: cross-slice integration + V3 exit audit | — not started | Depends on all prior workstreams |
 
 ## V4.0 — 360 Digital Operations
 
-`PREPARED / NON_SELECTOR`. Full blueprint at Drive `1M5vANxdfuH7Vro_CAFenioAmWitGPS3TRlzd06d5DNs`. Nothing in `src/` implements V4 scope yet (no operational routing/approval/reporting surface, no connector/adapter framework for the named external capability surfaces).
+**Active (Workstream A only, execution-maturity floor).** Full blueprint at Drive `1M5vANxdfuH7Vro_CAFenioAmWitGPS3TRlzd06d5DNs`.
+
+| Capability slice | Task | Status |
+|---|---|---|
+| Workstream A: service-to-capability routing (execution-maturity floor: `UNAVAILABLE`/`READ_ONLY` only) | `V4-SVC-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification — no real provider adapter exists yet, so `MANUAL`/`PROVIDER_NATIVE`/`ENGINEER_ASSISTED`/`DIAGNOSE`/`RECOMMEND`/`DRAFT_PREVIEW`/`APPROVAL_REQUIRED`/`CONTROLLED_APPLY` are declared but not producible by this slice |
+| Workstream B: unified operations attention/exception model | — not started | Reuses V3-SLA-001 attention semantics where natural |
+| Workstreams C–H (service adapters, approval/effect/recovery, evidence/outcome reporting, optimization loop, account-manager model, frontend IA) | — not started | Each depends on real provider adapters and/or the V4 frontend, none of which exist yet |
 
 ## V5.0 — AI-Native Technology Company OS
 
