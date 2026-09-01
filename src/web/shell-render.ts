@@ -7,6 +7,8 @@ import type {
 import type { DeliveryTimeline, DeliveryTimelineEntry } from "../domain/delivery-timeline.js";
 import type { ProjectCommunicationRecord } from "../domain/project-communication.js";
 import { buildAdvisorResult, type AdvisorResult } from "../domain/delivery-advisor.js";
+import type { TeamAttentionViewState } from "./team-attention-view-state.js";
+import type { TeamAttentionProjection } from "../domain/team-attention-projection.js";
 
 /**
  * V2-APP-001 (IN SCOPE H) / V2-CDO-006: the deterministic, closed set of
@@ -23,12 +25,12 @@ export type ShellPageContent =
   | { readonly kind: "EMPTY" }
   | { readonly kind: "UNAVAILABLE"; readonly reason: string }
   | { readonly kind: "UNSUPPORTED"; readonly reason: string }
-  | { readonly kind: "BLOCKED"; readonly snapshot: ClientProjectSnapshot }
+  | { readonly kind: "BLOCKED"; readonly snapshot: ClientProjectSnapshot; readonly teamAttention?: TeamAttentionViewState }
   | { readonly kind: "ERROR"; readonly reason: string }
   | { readonly kind: "NOT_FOUND" }
   | { readonly kind: "UNAUTHENTICATED" }
   | { readonly kind: "FORBIDDEN_TENANT_SCOPE" }
-  | { readonly kind: "READY"; readonly snapshot: ClientProjectSnapshot };
+  | { readonly kind: "READY"; readonly snapshot: ClientProjectSnapshot; readonly teamAttention?: TeamAttentionViewState };
 
 export interface RenderedShellPage {
   readonly status: number;
@@ -321,6 +323,68 @@ function renderAdvisorSection(snapshot: ClientProjectSnapshot): string {
   </section>`;
 }
 
+const OWNER_ROLE_LABELS: ReadonlyArray<{ label: string; field: keyof TeamAttentionProjection["owners"] }> = [
+  { label: "Lead Owner", field: "leadOwnerMembershipId" },
+  { label: "Deal Owner", field: "dealOwnerMembershipId" },
+  { label: "Account Owner", field: "accountOwnerMembershipId" },
+  { label: "Delivery Owner", field: "deliveryOwnerMembershipId" },
+];
+
+/**
+ * V3 Full Blueprint §9 (Workstream F floor slice): "acting organization/
+ * client context and current role are visible where ambiguity exists" +
+ * "LeadOwner/DealOwner/AccountOwner/DeliveryOwner render separately."
+ * This section renders only fields already present on the given
+ * `TeamAttentionViewState` (built exclusively from merged-main V3 A-D
+ * substrate, see `team-attention-projection.ts`) - it never computes or
+ * infers a role/owner/attention value itself. `UNAVAILABLE`/
+ * `FORBIDDEN_TENANT_SCOPE`/absent all render the identical honest
+ * "unavailable" message (A12: truthful unavailable state, never a
+ * fabricated default) so no caller can distinguish wiring detail from a
+ * genuine access boundary by reading the page.
+ *
+ * Commercial/commission/discount state is rendered as a fixed literal,
+ * not a computed value - Workstream E (commercial-authority read models)
+ * is a separate, independently-gated checkpoint; this section must not
+ * consume it or invent a competing commercial type (§8: "no role or
+ * ownership label silently grants... authority").
+ */
+function renderTeamAttentionSection(view: TeamAttentionViewState | undefined): string {
+  if (view === undefined || view.kind !== "READY") {
+    return `
+  <section aria-labelledby="team-attention-heading">
+    <h2 id="team-attention-heading">Team &amp; attention</h2>
+    <p class="status status-neutral" role="status">Unavailable</p>
+    <p>Team and attention context could not be loaded for this project. This does not affect your project status above.</p>
+  </section>`;
+  }
+
+  const { projection } = view;
+  const roleLine =
+    projection.viewerRole !== undefined
+      ? `<p>Your role: ${escapeHtml(projection.viewerRole)}</p>`
+      : `<p>Your role: not established</p>`;
+  const ownerItems = OWNER_ROLE_LABELS.map(({ label, field }) => {
+    const membershipId = projection.owners[field];
+    return `<li>${escapeHtml(label)}: ${membershipId !== undefined ? escapeHtml(membershipId) : "not assigned"}</li>`;
+  }).join("\n    ");
+  const attentionLine =
+    projection.attention !== undefined
+      ? `<p class="status status-${projection.attention.isActive ? "warning" : "success"}" role="status">Attention: ${escapeHtml(projection.attention.internalAttentionLevel)}${projection.attention.reason !== undefined ? ` — ${escapeHtml(projection.attention.reason)}` : ""}</p>`
+      : `<p class="status status-neutral" role="status">Attention: no data available</p>`;
+
+  return `
+  <section aria-labelledby="team-attention-heading">
+    <h2 id="team-attention-heading">Team &amp; attention</h2>
+    ${roleLine}
+    <ul>
+    ${ownerItems}
+    </ul>
+    ${attentionLine}
+    <p>Commercial: Unavailable — pending separate commercial-authority checkpoint</p>
+  </section>`;
+}
+
 /**
  * V2-CDO-006 minimum IA: identity header, next action, (blocker card when
  * blocked), timeline, working artifact, capabilities, recent updates,
@@ -328,7 +392,10 @@ function renderAdvisorSection(snapshot: ClientProjectSnapshot): string {
  * already present on the customer-safe `ClientProjectSnapshot` (A9) - no
  * section reaches around it into a private domain shape.
  */
-function renderSnapshotBody(snapshot: ClientProjectSnapshot, options?: { blocked?: boolean }): string {
+function renderSnapshotBody(
+  snapshot: ClientProjectSnapshot,
+  options?: { blocked?: boolean; teamAttention?: TeamAttentionViewState },
+): string {
   const header = `
   <section aria-labelledby="project-identity-heading">
     <h2 id="project-identity-heading">Project</h2>
@@ -348,6 +415,7 @@ function renderSnapshotBody(snapshot: ClientProjectSnapshot, options?: { blocked
   ${renderCapabilitiesSection(snapshot.capabilities)}
   ${renderCommunicationsSection(snapshot.recentCommunications)}
   ${renderAdvisorSection(snapshot)}
+  ${renderTeamAttentionSection(options?.teamAttention)}
   <section aria-labelledby="verified-work-heading">
     <h2 id="verified-work-heading">Verified completed work</h2>
     <p>${snapshot.verifiedCompletedJobIds.length} item(s) verified complete.</p>
@@ -414,7 +482,10 @@ export function renderShellPage(content: ShellPageContent): RenderedShellPage {
           title: "Blocked",
           statusLabel: "Blocked — attention needed",
           statusTone: "warning",
-          bodyHtml: renderSnapshotBody(content.snapshot, { blocked: true }),
+          bodyHtml: renderSnapshotBody(content.snapshot, {
+            blocked: true,
+            ...(content.teamAttention !== undefined ? { teamAttention: content.teamAttention } : {}),
+          }),
         }),
       };
     case "ERROR":
@@ -469,7 +540,10 @@ export function renderShellPage(content: ShellPageContent): RenderedShellPage {
           title: "Project status",
           statusLabel: "Signed in",
           statusTone: "success",
-          bodyHtml: renderSnapshotBody(content.snapshot),
+          bodyHtml: renderSnapshotBody(
+            content.snapshot,
+            content.teamAttention !== undefined ? { teamAttention: content.teamAttention } : undefined,
+          ),
         }),
       };
   }

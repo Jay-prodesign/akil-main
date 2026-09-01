@@ -7,6 +7,7 @@ import {
   WEB_SHELL_DEV_SESSION_TOKEN,
   WEB_SHELL_DEV_SESSION_FIXTURES,
   createWebShellFixtureSnapshotSource,
+  createWebShellFixtureTeamAttentionSource,
 } from "../src/fixtures/web-shell.js";
 import { WEBSITE_BUILD_V1_OWNERSHIP } from "../src/fixtures/website-build-v1-communication.js";
 import { buildWebsiteBuildV1Fixture } from "../src/fixtures/website-build-v1.js";
@@ -151,6 +152,30 @@ test("U6/U10: a project with a blocked job resolves 200 BLOCKED with a customer-
   assert.equal(response.status, 200);
   assert.match(response.body, /Blocked since/);
   assert.doesNotMatch(response.body, /internal engineering reason, not customer-safe/);
+});
+
+test("V3-F-001: without a teamAttentionSource wired, READY still renders 200 with an honest team-attention Unavailable section - no crash, no fabricated data", () => {
+  const handler = devHandler();
+  const response = handler(request({ headers: { [SESSION_TOKEN_HEADER]: WEB_SHELL_DEV_SESSION_TOKEN } }));
+  assert.equal(response.status, 200);
+  assert.match(response.body, /team-attention-heading/);
+  assert.match(response.body, />Unavailable</);
+});
+
+test("V3-F-001: with a teamAttentionSource wired, READY renders the resolved owner/attention/viewer-role fields", () => {
+  const handler = createRequestHandler({
+    sessionProvider: createDevFixtureSessionProvider({
+      fixtures: WEB_SHELL_DEV_SESSION_FIXTURES,
+      isProduction: false,
+    }),
+    snapshotSource: createWebShellFixtureSnapshotSource(),
+    teamAttentionSource: createWebShellFixtureTeamAttentionSource(),
+  });
+  const response = handler(request({ headers: { [SESSION_TOKEN_HEADER]: WEB_SHELL_DEV_SESSION_TOKEN } }));
+  assert.equal(response.status, 200);
+  assert.match(response.body, /Your role: STAFF/);
+  assert.match(response.body, /Lead Owner: /);
+  assert.doesNotMatch(response.body, /Lead Owner: not assigned/);
 });
 
 test("A7: the exact dev-fixture token that authenticates a dev-mode handler is rejected (401) by a production-mode handler", () => {

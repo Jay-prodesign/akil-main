@@ -1,9 +1,12 @@
 import { WEBSITE_BUILD_V1_OWNERSHIP } from "./website-build-v1-communication.js";
 import { WEBSITE_BUILD_V1_CLIENT_PROJECT_SNAPSHOT } from "./website-build-v1-snapshot.js";
+import { WEBSITE_BUILD_V1_TEAM_ATTENTION_PROJECTION } from "./website-build-v1-team-attention.js";
 import type { ProjectOwnershipRef } from "../domain/project-ownership.js";
 import type { ClientProjectSnapshot } from "../domain/client-project-snapshot.js";
+import type { TeamAttentionProjection } from "../domain/team-attention-projection.js";
 import { createAuthenticatedPrincipal, createSessionContext, type SessionContext } from "../web/session-context.js";
 import type { ClientProjectSnapshotSource } from "../web/snapshot-view-state.js";
+import type { TeamAttentionSource } from "../web/team-attention-view-state.js";
 
 /**
  * V2-APP-001: one deterministic dev-fixture session, scoped to exactly
@@ -47,6 +50,22 @@ export function createWebShellFixtureSnapshotSource(): ClientProjectSnapshotSour
   return {
     getSnapshot(ownership: ProjectOwnershipRef): ClientProjectSnapshot | undefined {
       return snapshots.find((snapshot) => ownershipEquals(snapshot.ownership, ownership));
+    },
+  };
+}
+
+/**
+ * V3 Full Blueprint §9 (Workstream F floor slice): a minimal,
+ * deterministic, in-memory `TeamAttentionSource` backed by the existing
+ * `WEBSITE_BUILD_V1_TEAM_ATTENTION_PROJECTION` fixture - a fixture, never
+ * a durable production data source, matching
+ * `createWebShellFixtureSnapshotSource`'s own pattern exactly.
+ */
+export function createWebShellFixtureTeamAttentionSource(): TeamAttentionSource {
+  const projections: ReadonlyArray<TeamAttentionProjection> = [WEBSITE_BUILD_V1_TEAM_ATTENTION_PROJECTION];
+  return {
+    getTeamAttentionProjection(ownership: ProjectOwnershipRef): TeamAttentionProjection | undefined {
+      return projections.find((projection) => ownershipEquals(projection, ownership));
     },
   };
 }

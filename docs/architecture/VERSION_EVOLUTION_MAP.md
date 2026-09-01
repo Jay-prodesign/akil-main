@@ -29,13 +29,19 @@ Tracks how the repository's actual implemented surface maps onto the DEC-160 V2�
 | Workstream B: multi-owner sales/account/delivery semantics (LeadOwner/DealOwner/AccountOwner/DeliveryOwner) | `V3-OWN-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification |
 | Workstream C: agency/partner multi-organization boundary | `V3-PTR-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification (domain contract only — presentation-layer multi-client context switching deferred, see exec-plan) |
 | Workstream D: SLA/escalation/attention model | `V3-SLA-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification (no invented AT_RISK heuristic; `contractualSlaStatus` always `UNKNOWN` — no real source exists) |
-| Workstream E: commission/pricing/discount authority read models | — not started | Controlled by DEC-146; depends on authoritative financial truth |
-| Workstream F: V3 logged-in frontend / role-aware IA | — not started | Depends on backend workstreams B-E |
-| Workstream G: cross-slice integration + V3 exit audit | — not started | Depends on all prior workstreams |
+| Workstream E: commission/pricing/discount authority read models (policy-neutral/read-only floor only) | `V3-COM-001` | `IMPLEMENTED / SELF-VALIDATED`, open PR `#5`, pending Brain verification. `CommissionLedgerStatus` single literal `UNKNOWN`; `DiscountAuthorityLevel` produces only `APPROVAL_REQUIRED`; zero numeric/financial fields. |
+| Workstream F: V3 logged-in frontend / role-aware IA (team/attention floor slice only) | `V3-F-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification. Surfaces organization/client context, viewer role, and LeadOwner/DealOwner/AccountOwner/DeliveryOwner separately in the existing shell, using only already-merged V3 A-D substrate; commercial state renders as a fixed "Unavailable" literal (does not consume unmerged `V3-COM-001`). |
+| Workstream G: cross-slice integration + V3 exit audit | — not started | Depends on all prior workstreams actually merged, not just implemented |
 
 ## V4.0 — 360 Digital Operations
 
-`PREPARED / NON_SELECTOR`. Full blueprint at Drive `1M5vANxdfuH7Vro_CAFenioAmWitGPS3TRlzd06d5DNs`. Nothing in `src/` implements V4 scope yet (no operational routing/approval/reporting surface, no connector/adapter framework for the named external capability surfaces).
+**Active (floor slices of Workstreams A and B only)**. Full blueprint at Drive `1M5vANxdfuH7Vro_CAFenioAmWitGPS3TRlzd06d5DNs`.
+
+| Capability slice | Task | Status |
+|---|---|---|
+| Workstream A: service-to-capability routing (10-rung `ExecutionMaturity` ladder declared; only the `UNAVAILABLE`/`READ_ONLY` floor is producible — no real provider adapter exists yet) | `V4-SVC-001` | `IMPLEMENTED / SELF-VALIDATED`, open PR `#6`, pending Brain verification |
+| Workstream B: unified operations attention/exception model (single real source domain, `DELIVERY_OUTCOME_JOB`, out of 11 blueprint-named candidate families) | `V4-OPS-001` | `IMPLEMENTED / SELF-VALIDATED`, open PR `#7`, pending Brain verification |
+| Workstreams C-H | — not started | Each depends on a real external provider/connector adapter that does not exist anywhere in this repository yet; not pulled forward without one |
 
 ## V5.0 — AI-Native Technology Company OS
 

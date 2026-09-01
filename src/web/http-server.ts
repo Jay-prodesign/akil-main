@@ -4,6 +4,7 @@ import { createProductionSessionProvider } from "./production-session-provider.j
 import { createDevFixtureSessionProvider } from "./dev-fixture-session-provider.js";
 import { createRequestHandler, type IncomingRequestLike } from "./request-handler.js";
 import type { ClientProjectSnapshotSource } from "./snapshot-view-state.js";
+import type { TeamAttentionSource } from "./team-attention-view-state.js";
 
 /**
  * V2-APP-001 (ADR 0001): the only file in this shell that imports
@@ -17,6 +18,7 @@ export function createHttpServer(deps: {
   isProduction: boolean;
   devSessionFixtures?: ReadonlyMap<string, SessionContext>;
   snapshotSource: ClientProjectSnapshotSource;
+  teamAttentionSource?: TeamAttentionSource;
 }): Server {
   const sessionProvider = deps.isProduction
     ? createProductionSessionProvider()
@@ -28,6 +30,7 @@ export function createHttpServer(deps: {
   const handleRequest = createRequestHandler({
     sessionProvider,
     snapshotSource: deps.snapshotSource,
+    ...(deps.teamAttentionSource !== undefined ? { teamAttentionSource: deps.teamAttentionSource } : {}),
   });
 
   return createServer((req, res) => {
