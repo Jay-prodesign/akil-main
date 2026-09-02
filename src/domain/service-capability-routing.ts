@@ -1,5 +1,6 @@
 import type { ProjectOwnershipRef } from "./project-ownership.js";
 import type { CapabilityAdmission } from "./capability-admission.js";
+import type { ConnectionBinding } from "./connection-authority.js";
 
 export class InvalidServiceCapabilityRouteError extends Error {
   constructor(reason: string) {
@@ -98,14 +99,34 @@ function requireNonEmptyString(value: unknown, field: string): string {
  * unsupported by construction, not by a separate check). `reason` always
  * cites the exact admission status this decision was made from
  * (§5: "routing records provenance and reason where decisions are
- * material"). `CapabilityAdmission` carries no timestamp field in this
- * repository yet, so staleness detection is not representable here - a
- * disclosed gap, not a silent omission.
+ * material").
+ *
+ * Bounded correction (Brain handoff Rev28, CHANGES_REQUIRED_SOURCE_SEMANTICS):
+ * `admission.status === "VERIFIED_AVAILABLE"` is an immutable snapshot -
+ * `CapabilityAdmission` carries no timestamp field in this repository, so
+ * the status alone cannot prove the underlying provider connection is
+ * still current. Promoting to `READ_ONLY` from that snapshot alone would
+ * let a stale or since-degraded/revoked connection appear as current
+ * executable support. `READ_ONLY` therefore now additionally requires the
+ * caller to supply the actual `ConnectionBinding` the admission was
+ * verified against (`connection-authority.ts` remains the sole authority
+ * over that binding's live `connectionState` - this module still imports
+ * no mutation function from it, type-only): the binding's own
+ * `connectionBindingId` must exactly match `admission.connectionBindingId`
+ * (fail closed on any capability/provider reference mismatch - a
+ * different, unrelated binding can never be substituted to manufacture a
+ * promotion), and `connectionBinding.connectionState` must currently be
+ * `"VERIFIED"`. A missing binding, a reference mismatch, or any other
+ * connection state (`REQUESTED`/`CONNECTED_UNVERIFIED`/`DEGRADED`/
+ * `REVOKED`/`HANDOVER_COMPLETE`) all resolve `UNAVAILABLE` with a reason
+ * naming the exact cause - absent authoritative proof of current provider
+ * connectivity is never promoted to executable support.
  */
 export function resolveServiceCapabilityRoute(input: {
   ownership: ProjectOwnershipRef;
   serviceFamilyRef: unknown;
   admission: CapabilityAdmission;
+  connectionBinding?: ConnectionBinding;
 }): ServiceCapabilityRoute {
   const serviceFamilyRef = requireNonEmptyString(input.serviceFamilyRef, "serviceFamilyRef");
 
@@ -128,11 +149,46 @@ export function resolveServiceCapabilityRoute(input: {
   };
 
   if (input.admission.status === "VERIFIED_AVAILABLE") {
+    const binding = input.connectionBinding;
+    if (binding === undefined) {
+      return {
+        ...base,
+        executionMaturity: "UNAVAILABLE",
+        reason:
+          "capability admission status is VERIFIED_AVAILABLE, but no ConnectionBinding was supplied to prove current provider connectivity; a stale or unproven admission cannot be promoted to READ_ONLY",
+      };
+    }
+    if (
+      binding.ownership.tenantId !== input.ownership.tenantId ||
+      binding.ownership.customerId !== input.ownership.customerId ||
+      binding.ownership.projectId !== input.ownership.projectId
+    ) {
+      return {
+        ...base,
+        executionMaturity: "UNAVAILABLE",
+        reason: "the supplied ConnectionBinding does not belong to the given ownership scope",
+      };
+    }
+    if (binding.connectionBindingId !== input.admission.connectionBindingId) {
+      return {
+        ...base,
+        executionMaturity: "UNAVAILABLE",
+        reason:
+          "the supplied ConnectionBinding's connectionBindingId does not match the admission's own connectionBindingId - a mismatched binding can never be substituted to manufacture a promotion",
+      };
+    }
+    if (binding.connectionState !== "VERIFIED") {
+      return {
+        ...base,
+        executionMaturity: "UNAVAILABLE",
+        reason: `the matching ConnectionBinding's connectionState is ${binding.connectionState}, not VERIFIED; provider connectivity is not currently proven`,
+      };
+    }
     return {
       ...base,
       executionMaturity: "READ_ONLY",
       reason:
-        "capability admission status is VERIFIED_AVAILABLE; capped at READ_ONLY because no adapter beyond passive observation exists yet",
+        "capability admission status is VERIFIED_AVAILABLE and the matching ConnectionBinding is currently VERIFIED; capped at READ_ONLY because no adapter beyond passive observation exists yet",
     };
   }
 

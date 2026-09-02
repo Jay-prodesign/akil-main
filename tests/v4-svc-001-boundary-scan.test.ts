@@ -76,14 +76,28 @@ test("V4-SVC-001: the only executionMaturity values ever assigned in source are 
   }
 });
 
-test("V4-SVC-001: service-capability-routing.ts has no import of authority.ts, outcome-job.ts, or connection-authority.ts mutation functions", () => {
+test("V4-SVC-001: service-capability-routing.ts has no import of authority.ts or outcome-job.ts", () => {
   const content = readFileSync(join(REPO_ROOT, "src/domain/service-capability-routing.ts"), "utf8");
   const importLines = content.split("\n").filter((line) => /^\s*import\b/.test(line));
   const violatingImport = importLines.find((line) =>
-    /["']\.\/(authority|outcome-job)\.js["']/.test(line) ||
-    /["']\.\/connection-authority\.js["']/.test(line),
+    /["']\.\/(authority|outcome-job)\.js["']/.test(line),
   );
   assert.equal(violatingImport, undefined);
+});
+
+test("V4-SVC-001 (Rev28 bounded correction): service-capability-routing.ts imports connection-authority.ts as types only - no create/transition/verify mutation function is pulled in", () => {
+  const content = readFileSync(join(REPO_ROOT, "src/domain/service-capability-routing.ts"), "utf8");
+  const importLines = content.split("\n").filter((line) => /^\s*import\b/.test(line));
+  const connectionAuthorityImport = importLines.find((line) =>
+    /["']\.\/connection-authority\.js["']/.test(line),
+  );
+  assert.ok(connectionAuthorityImport, "expected a type-only import of connection-authority.ts");
+  assert.match(connectionAuthorityImport!, /^\s*import\s+type\b/);
+  const violatingValueImport = importLines.find((line) =>
+    /["']\.\/connection-authority\.js["']/.test(line) &&
+    /\b(createConnectionRequirement|createConnectionBinding|transitionConnectionBinding|verifyConnectionBinding|createSecretRef)\b/.test(line),
+  );
+  assert.equal(violatingValueImport, undefined);
 });
 
 test("V4-SVC-001: service-capability-routing.ts imports nothing from src/web/ or src/application/ (domain depends on nothing else in src/)", () => {
