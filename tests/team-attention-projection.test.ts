@@ -142,3 +142,33 @@ test("reuses V3-OWN-001's own fixture history and viewer membership verbatim - n
   assert.equal(WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP.tenantId, WEBSITE_BUILD_V1_OWNERSHIP.tenantId);
   assert.equal(WEBSITE_BUILD_V1_TEAM_ATTENTION_STATE.tenantId, WEBSITE_BUILD_V1_OWNERSHIP.tenantId);
 });
+
+test("Rev28 bounded correction: viewerRole cannot be emitted from a non-current membership, because OrganizationMembership (V3-ORG-001) carries no status/supersede/revoke field at all in this bounded slice - there is no 'non-current' state for any accepted viewerMembership to be in", () => {
+  // Structural proof, not a runtime guess: OrganizationMembership's own
+  // field set is closed to exactly these four keys. Unlike
+  // OwnershipAssignment (which does have provenance-preserving
+  // supersede/reassignment semantics), there is no boolean/status/
+  // timestamp field here that could represent a stale or superseded
+  // membership - so buildTeamAttentionProjection's viewerRole check
+  // (tenant match only) already covers every representable case: any
+  // OrganizationMembership value the type system accepts is, by
+  // construction, not distinguishable from a "current" one, because this
+  // slice defines no alternative.
+  const membershipFieldNames = Object.keys(WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP).sort();
+  assert.deepEqual(membershipFieldNames, ["membershipId", "principalRef", "role", "tenantId"]);
+
+  // Corroborating behavioral proof: passing the exact same membership
+  // value twice (nothing to "expire" between calls, since no clock/state
+  // field exists) always yields the identical viewerRole - there is no
+  // hidden currency dimension this projection could be failing to check.
+  const first = buildTeamAttentionProjection({
+    ownership: WEBSITE_BUILD_V1_OWNERSHIP,
+    viewerMembership: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP,
+  });
+  const second = buildTeamAttentionProjection({
+    ownership: WEBSITE_BUILD_V1_OWNERSHIP,
+    viewerMembership: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP,
+  });
+  assert.equal(first.viewerRole, WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP.role);
+  assert.equal(first.viewerRole, second.viewerRole);
+});

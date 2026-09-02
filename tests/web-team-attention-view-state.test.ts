@@ -110,3 +110,59 @@ test("a source that throws resolves UNAVAILABLE, not an unhandled exception", ()
   });
   assert.equal(view.kind, "UNAVAILABLE");
 });
+
+test("Rev28 bounded correction: a source returning a projection for a different tenant than requested resolves UNAVAILABLE, not READY with foreign-scope data (adversarial/compromised source)", () => {
+  const session = sessionForOwnership(WEBSITE_BUILD_V1_OWNERSHIP);
+  const foreignTenantSource: TeamAttentionSource = {
+    getTeamAttentionProjection() {
+      return { ...WEBSITE_BUILD_V1_TEAM_ATTENTION_PROJECTION, tenantId: "tenant-unrelated-other" as typeof WEBSITE_BUILD_V1_TEAM_ATTENTION_PROJECTION.tenantId };
+    },
+  };
+  const view = resolveProtectedTeamAttentionView({
+    session,
+    requestedOwnership: WEBSITE_BUILD_V1_OWNERSHIP,
+    source: foreignTenantSource,
+  });
+  assert.equal(view.kind, "UNAVAILABLE");
+});
+
+test("Rev28 bounded correction: a source returning a projection for a different customer than requested resolves UNAVAILABLE, not READY with foreign-scope data (adversarial/compromised source)", () => {
+  const session = sessionForOwnership(WEBSITE_BUILD_V1_OWNERSHIP);
+  const foreignCustomerSource: TeamAttentionSource = {
+    getTeamAttentionProjection() {
+      return { ...WEBSITE_BUILD_V1_TEAM_ATTENTION_PROJECTION, customerId: "cust-unrelated-other" as typeof WEBSITE_BUILD_V1_TEAM_ATTENTION_PROJECTION.customerId };
+    },
+  };
+  const view = resolveProtectedTeamAttentionView({
+    session,
+    requestedOwnership: WEBSITE_BUILD_V1_OWNERSHIP,
+    source: foreignCustomerSource,
+  });
+  assert.equal(view.kind, "UNAVAILABLE");
+});
+
+test("Rev28 bounded correction: a source returning a projection for a different project than requested resolves UNAVAILABLE, not READY with foreign-scope data (adversarial/compromised source)", () => {
+  const session = sessionForOwnership(WEBSITE_BUILD_V1_OWNERSHIP);
+  const foreignProjectSource: TeamAttentionSource = {
+    getTeamAttentionProjection() {
+      return { ...WEBSITE_BUILD_V1_TEAM_ATTENTION_PROJECTION, projectId: "proj-unrelated-other-project" as typeof WEBSITE_BUILD_V1_TEAM_ATTENTION_PROJECTION.projectId };
+    },
+  };
+  const view = resolveProtectedTeamAttentionView({
+    session,
+    requestedOwnership: WEBSITE_BUILD_V1_OWNERSHIP,
+    source: foreignProjectSource,
+  });
+  assert.equal(view.kind, "UNAVAILABLE");
+});
+
+test("Rev28 bounded correction: a source returning the exact matching scope still resolves READY (the new check narrows nothing for honest sources)", () => {
+  const session = sessionForOwnership(WEBSITE_BUILD_V1_OWNERSHIP);
+  const source = fixtureSource();
+  const view = resolveProtectedTeamAttentionView({
+    session,
+    requestedOwnership: WEBSITE_BUILD_V1_OWNERSHIP,
+    source,
+  });
+  assert.equal(view.kind, "READY");
+});

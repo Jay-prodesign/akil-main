@@ -46,6 +46,22 @@ function tenantContextFromOwnership(ownership: ProjectOwnershipRef): TenantConte
  * caller (e.g. `request-handler.ts`) that has not wired this new port yet
  * degrades to `UNAVAILABLE` rather than throwing or fabricating data -
  * this port is additive, not a required dependency of the existing shell.
+ *
+ * Bounded correction (Brain handoff Rev28, CHANGES_REQUIRED_SOURCE_SECURITY
+ * on PR #8): "The resolver checks requested ownership before querying the
+ * source but does not fail closed if the returned projection itself
+ * carries a different tenant/customer/project scope. A faulty or
+ * compromised source could therefore yield READY with foreign-scope
+ * data." Checking `input.session` against `input.requestedOwnership`
+ * proves the caller is allowed to see *that* scope - it proves nothing
+ * about what `source.getTeamAttentionProjection` actually handed back.
+ * The returned `projection`'s own `tenantId`/`customerId`/`projectId` are
+ * therefore independently verified against `input.requestedOwnership`
+ * before it is ever wrapped in `READY`; any mismatch resolves
+ * `UNAVAILABLE` (the same honest "no trustworthy data" outcome already
+ * used for a missing/throwing source, per this type's own "UNAVAILABLE
+ * covers every 'no data' case uniformly" design) rather than leaking a
+ * foreign-scope projection.
  */
 export function resolveProtectedTeamAttentionView(input: {
   session: SessionContext;
@@ -75,5 +91,14 @@ export function resolveProtectedTeamAttentionView(input: {
   if (projection === undefined) {
     return { kind: "UNAVAILABLE" };
   }
+
+  if (
+    projection.tenantId !== input.requestedOwnership.tenantId ||
+    projection.customerId !== input.requestedOwnership.customerId ||
+    projection.projectId !== input.requestedOwnership.projectId
+  ) {
+    return { kind: "UNAVAILABLE" };
+  }
+
   return { kind: "READY", projection };
 }
