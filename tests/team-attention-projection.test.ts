@@ -12,8 +12,10 @@ import {
   WEBSITE_BUILD_V1_TEAM_ATTENTION_PROJECTION,
   WEBSITE_BUILD_V1_OWNER_HISTORY,
   WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP,
+  WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP_CURRENTNESS,
   WEBSITE_BUILD_V1_TEAM_ATTENTION_STATE,
 } from "../src/fixtures/website-build-v1-team-attention.js";
+import type { MembershipCurrentnessRecord } from "../src/domain/team-attention-projection.js";
 
 const fixture = buildWebsiteBuildV1Fixture();
 
@@ -143,32 +145,92 @@ test("reuses V3-OWN-001's own fixture history and viewer membership verbatim - n
   assert.equal(WEBSITE_BUILD_V1_TEAM_ATTENTION_STATE.tenantId, WEBSITE_BUILD_V1_OWNERSHIP.tenantId);
 });
 
-test("Rev28 bounded correction: viewerRole cannot be emitted from a non-current membership, because OrganizationMembership (V3-ORG-001) carries no status/supersede/revoke field at all in this bounded slice - there is no 'non-current' state for any accepted viewerMembership to be in", () => {
-  // Structural proof, not a runtime guess: OrganizationMembership's own
-  // field set is closed to exactly these four keys. Unlike
-  // OwnershipAssignment (which does have provenance-preserving
-  // supersede/reassignment semantics), there is no boolean/status/
-  // timestamp field here that could represent a stale or superseded
-  // membership - so buildTeamAttentionProjection's viewerRole check
-  // (tenant match only) already covers every representable case: any
-  // OrganizationMembership value the type system accepts is, by
-  // construction, not distinguishable from a "current" one, because this
-  // slice defines no alternative.
+test("Rev28 bounded correction (SUPERSEDED by Rev29): the prior structural-only 'OrganizationMembership has no status field, so it cannot be stale' argument is not accepted as proof of currentness - see the Rev29-tagged tests below for the corrected behavior", () => {
+  // This test is kept only to document what changed and why: the field
+  // set really is closed to these four keys (still true), but the ABSENCE
+  // of a status field on the type never proved that a given value is
+  // current - it only proved the type permits a stale and a current
+  // membership to look byte-identical. Brain handoff Rev29 rejected the
+  // old "tenant match alone is enough" behavior for exactly this reason.
   const membershipFieldNames = Object.keys(WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP).sort();
   assert.deepEqual(membershipFieldNames, ["membershipId", "principalRef", "role", "tenantId"]);
+});
 
-  // Corroborating behavioral proof: passing the exact same membership
-  // value twice (nothing to "expire" between calls, since no clock/state
-  // field exists) always yields the identical viewerRole - there is no
-  // hidden currency dimension this projection could be failing to check.
-  const first = buildTeamAttentionProjection({
+test("Rev29 bounded correction: viewerRole is emitted only when the viewer's membership is proven current via an authoritative currentness-directory record (not merely tenant-matched)", () => {
+  const projection = buildTeamAttentionProjection({
     ownership: WEBSITE_BUILD_V1_OWNERSHIP,
     viewerMembership: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP,
+    viewerMembershipCurrentness: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP_CURRENTNESS,
   });
-  const second = buildTeamAttentionProjection({
+  assert.equal(projection.viewerRole, WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP.role);
+});
+
+test("Rev29 bounded correction: unknown/unproven currentness (no currentness directory supplied at all) never emits viewerRole, even for the exact same membership value that IS current when proof is supplied", () => {
+  const projection = buildTeamAttentionProjection({
     ownership: WEBSITE_BUILD_V1_OWNERSHIP,
     viewerMembership: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP,
+    // no viewerMembershipCurrentness at all - this is the exact scenario
+    // Rev28's structural-proof test wrongly treated as safe.
   });
-  assert.equal(first.viewerRole, WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP.role);
-  assert.equal(first.viewerRole, second.viewerRole);
+  assert.equal(projection.viewerRole, undefined);
+  assert.equal(Object.hasOwn(projection, "viewerRole"), false);
+});
+
+test("Rev29 bounded correction: unknown/unproven currentness (a directory is supplied but has no record for this exact membershipId+tenantId) never emits viewerRole", () => {
+  const unrelatedDirectory: ReadonlyArray<MembershipCurrentnessRecord> = [
+    {
+      membershipId: "member-someone-else" as typeof WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP.membershipId,
+      tenantId: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP.tenantId,
+    },
+  ];
+  const projection = buildTeamAttentionProjection({
+    ownership: WEBSITE_BUILD_V1_OWNERSHIP,
+    viewerMembership: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP,
+    viewerMembershipCurrentness: unrelatedDirectory,
+  });
+  assert.equal(projection.viewerRole, undefined);
+});
+
+test("Rev29 bounded correction: a stale/superseded membership record (matching membershipId+tenantId, but carrying supersededAt) never emits viewerRole", () => {
+  const staleDirectory: ReadonlyArray<MembershipCurrentnessRecord> = [
+    {
+      membershipId: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP.membershipId,
+      tenantId: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP.tenantId,
+      supersededAt: "2026-08-15T00:00:00.000Z",
+    },
+  ];
+  const projection = buildTeamAttentionProjection({
+    ownership: WEBSITE_BUILD_V1_OWNERSHIP,
+    viewerMembership: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP,
+    viewerMembershipCurrentness: staleDirectory,
+  });
+  assert.equal(projection.viewerRole, undefined);
+});
+
+test("Rev29 bounded correction: a data-integrity ambiguity (two active/non-superseded records for the same membershipId+tenantId) fails closed to no viewerRole rather than guessing one", () => {
+  const ambiguousDirectory: ReadonlyArray<MembershipCurrentnessRecord> = [
+    { membershipId: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP.membershipId, tenantId: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP.tenantId },
+    { membershipId: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP.membershipId, tenantId: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP.tenantId },
+  ];
+  const projection = buildTeamAttentionProjection({
+    ownership: WEBSITE_BUILD_V1_OWNERSHIP,
+    viewerMembership: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP,
+    viewerMembershipCurrentness: ambiguousDirectory,
+  });
+  assert.equal(projection.viewerRole, undefined);
+});
+
+test("Rev29 bounded correction: a currentness record for a different tenant than the viewer's own membership never counts as proof (no cross-tenant currentness laundering)", () => {
+  const foreignTenantDirectory: ReadonlyArray<MembershipCurrentnessRecord> = [
+    {
+      membershipId: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP.membershipId,
+      tenantId: "tenant-unrelated-other" as typeof WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP.tenantId,
+    },
+  ];
+  const projection = buildTeamAttentionProjection({
+    ownership: WEBSITE_BUILD_V1_OWNERSHIP,
+    viewerMembership: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP,
+    viewerMembershipCurrentness: foreignTenantDirectory,
+  });
+  assert.equal(projection.viewerRole, undefined);
 });

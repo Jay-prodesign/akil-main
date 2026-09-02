@@ -4,7 +4,11 @@ import { createOrganizationMembership, type OrganizationMembership } from "../do
 import { createOwnershipAssignment, type OwnershipAssignment } from "../domain/ownership-assignment.js";
 import { createOutcomeJob, enterExceptionState } from "../domain/outcome-job.js";
 import { buildAttentionState, type AttentionState } from "../domain/attention-state.js";
-import { buildTeamAttentionProjection, type TeamAttentionProjection } from "../domain/team-attention-projection.js";
+import {
+  buildTeamAttentionProjection,
+  type TeamAttentionProjection,
+  type MembershipCurrentnessRecord,
+} from "../domain/team-attention-projection.js";
 
 const fixture = buildWebsiteBuildV1Fixture();
 
@@ -71,9 +75,24 @@ export const WEBSITE_BUILD_V1_TEAM_ATTENTION_STATE: AttentionState = buildAttent
   ownership: WEBSITE_BUILD_V1_OWNERSHIP,
 });
 
+/**
+ * Rev29 bounded correction: the authoritative currentness proof for
+ * `WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP`. A real membership-directory
+ * boundary would populate this; the reference fixture supplies exactly
+ * one active (non-superseded) record so the fixture's own `viewerRole`
+ * remains genuinely proven current, not merely tenant-matched.
+ */
+export const WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP_CURRENTNESS: ReadonlyArray<MembershipCurrentnessRecord> = [
+  {
+    membershipId: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP.membershipId,
+    tenantId: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP.tenantId,
+  },
+];
+
 export const WEBSITE_BUILD_V1_TEAM_ATTENTION_PROJECTION: TeamAttentionProjection = buildTeamAttentionProjection({
   ownership: WEBSITE_BUILD_V1_OWNERSHIP,
   viewerMembership: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP,
+  viewerMembershipCurrentness: WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP_CURRENTNESS,
   ownerHistory: WEBSITE_BUILD_V1_OWNER_HISTORY,
   attentionState: WEBSITE_BUILD_V1_TEAM_ATTENTION_STATE,
 });
