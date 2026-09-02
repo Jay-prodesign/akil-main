@@ -1,5 +1,13 @@
 import type { TenantScope } from "./tenant-scope.js";
 import type { AttentionState, InternalAttentionLevel } from "./attention-state.js";
+import type { OutcomeJob } from "./outcome-job.js";
+
+export class InvalidOperationsAttentionItemError extends Error {
+  constructor(reason: string) {
+    super(`Invalid OperationsAttentionItem: ${reason}`);
+    this.name = "InvalidOperationsAttentionItemError";
+  }
+}
 
 /**
  * V4 Full Blueprint §6, Workstream B, spine item C - "aggregate what
@@ -22,34 +30,40 @@ import type { AttentionState, InternalAttentionLevel } from "./attention-state.j
 export type AttentionSourceDomain = "DELIVERY_OUTCOME_JOB";
 
 /**
- * §6 required semantics: "each item retains source domain,
- * tenant/client/project/service/capability context, severity/urgency
- * evidence, accountable owner and next-safe-action reference where
- * known." This module reuses `AttentionState`'s own
- * `internalAttentionLevel`/`responsibleOwnerMembershipId`/`reason`/
- * `timestamp` verbatim as the severity/urgency/owner/evidence fields -
- * no parallel severity or ownership concept is invented. `isActive` is
- * a direct, honest derivation (`internalAttentionLevel !== "NORMAL"`),
- * not a separately trackable/mutable flag, so "stale resolved source
- * cannot remain active" (§6 acceptance) holds structurally: this value
- * is always recomputed from the exact `AttentionState` given, never
- * cached or independently toggled. `contractualSlaStatus` is
- * deliberately NOT carried into this aggregation - V3-SLA-001 already
- * established internal-attention and customer-contractual-SLA as
- * separate truths, and conflating them into one aggregated "attention"
- * concept would blur exactly the distinction that module exists to
- * preserve. No `nextSafeActionRef` field exists on this type at all -
- * no source for it exists anywhere in this repository, so it is
- * honestly omitted rather than fabricated (same discipline already
- * applied to `AttentionState` itself, §7).
+ * Bounded correction (Brain handoff Rev28, CHANGES_REQUIRED_SOURCE_SEMANTICS
+ * on PR #7): "Current attention items omit customer/client isolation...
+ * Tenant+project filtering alone is insufficient for cross-client
+ * isolation." `AttentionState` (V3-SLA-001) itself carries no customerId,
+ * so this type cannot be filled from it alone without fabricating a
+ * join. `OutcomeJob` (AKI-BE-001) already carries an authoritative
+ * `customerId` for the exact same job, so `toOperationsAttentionItem`
+ * below now requires the originating `OutcomeJob` as well, verifies it
+ * actually identifies the same tenant/project/job as the given
+ * `AttentionState` (fail closed on any mismatch), and only then reuses
+ * its `customerId` directly - never independently supplied or guessed.
+ *
+ * `evidenceFreshness` is the second Rev28 requirement: "represent
+ * freshness so absent/stale evidence cannot look current." Because
+ * `buildAttentionState` can honestly report `isActive: true` on a job
+ * already in an exception state even when no `latestExceptionEvent` was
+ * supplied to it (so `reason`/`timestamp` stay absent), an aggregated
+ * item could otherwise look identically "active" whether or not real
+ * evidence backs it. `evidenceFreshness` makes that distinction
+ * explicit and structural: `"CURRENT"` only when both `reason` and
+ * `timestamp` are present (i.e. backed by a real `AuditEvent`),
+ * `"UNKNOWN"` in every other case (including a `NORMAL`/inactive item,
+ * which makes no attention claim to be fresh or stale about in the
+ * first place) - never inferred or defaulted to `"CURRENT"`.
  */
 export interface OperationsAttentionItem {
   readonly sourceDomain: AttentionSourceDomain;
   readonly tenantId: TenantScope["tenantId"];
+  readonly customerId: OutcomeJob["customerId"];
   readonly projectId: AttentionState["projectId"];
   readonly jobId: AttentionState["jobId"];
   readonly isActive: boolean;
   readonly internalAttentionLevel: InternalAttentionLevel;
+  readonly evidenceFreshness: "CURRENT" | "UNKNOWN";
   readonly responsibleOwnerMembershipId?: AttentionState["responsibleOwnerMembershipId"];
   readonly reason?: string;
   readonly timestamp?: string;
@@ -62,15 +76,42 @@ export interface OperationsAttentionItem {
  * no independent judgment of its own beyond the mechanical `isActive`
  * derivation - it cannot promote/demote urgency, invent an owner, or
  * fabricate a reason/timestamp the source state does not already carry.
+ *
+ * Rev28 bounded correction: `job` must identify the exact same
+ * tenant/project/job as `state` - a mismatched `OutcomeJob` is rejected
+ * rather than silently attributing its `customerId` to a foreign
+ * `AttentionState` (no fabricated join).
  */
-export function toOperationsAttentionItem(state: AttentionState): OperationsAttentionItem {
+export function toOperationsAttentionItem(input: {
+  state: AttentionState;
+  job: OutcomeJob;
+}): OperationsAttentionItem {
+  const { state, job } = input;
+  if (job.jobId !== state.jobId) {
+    throw new InvalidOperationsAttentionItemError(
+      "job does not identify the same jobId as the given AttentionState",
+    );
+  }
+  if (job.tenantId !== state.tenantId) {
+    throw new InvalidOperationsAttentionItemError(
+      "job belongs to a different tenant than the given AttentionState",
+    );
+  }
+  if (job.projectId !== state.projectId) {
+    throw new InvalidOperationsAttentionItemError(
+      "job belongs to a different project than the given AttentionState",
+    );
+  }
   return {
     sourceDomain: "DELIVERY_OUTCOME_JOB",
     tenantId: state.tenantId,
+    customerId: job.customerId,
     projectId: state.projectId,
     jobId: state.jobId,
     isActive: state.internalAttentionLevel !== "NORMAL",
     internalAttentionLevel: state.internalAttentionLevel,
+    evidenceFreshness:
+      state.reason !== undefined && state.timestamp !== undefined ? "CURRENT" : "UNKNOWN",
     ...(state.responsibleOwnerMembershipId !== undefined
       ? { responsibleOwnerMembershipId: state.responsibleOwnerMembershipId }
       : {}),
@@ -82,9 +123,12 @@ export function toOperationsAttentionItem(state: AttentionState): OperationsAtte
 /**
  * §6 acceptance direction: "cross-client attention leakage rejects."
  * This is a pure filter, not a mutation: it never alters any item, and
- * only ever narrows the given list to the exact tenant/project scope
- * requested - an item for a different tenant or project is excluded,
- * never coerced into the requested scope.
+ * only ever narrows the given list to the exact tenant/customer/project
+ * scope requested - an item for a different tenant, customer, or
+ * project is excluded, never coerced into the requested scope. Rev28
+ * bounded correction: tenant+project filtering alone was insufficient
+ * for cross-client isolation (two customers can share a tenant), so
+ * `customerId` is now a required, independently-checked filter key.
  *
  * §6 acceptance direction: "escalation and next action are separately
  * authorized." This function exports no escalation/dismiss/resolve
@@ -93,10 +137,14 @@ export function toOperationsAttentionItem(state: AttentionState): OperationsAtte
 export function resolveActiveOperationsAttention(input: {
   items: ReadonlyArray<OperationsAttentionItem>;
   tenantId: TenantScope["tenantId"];
+  customerId: OutcomeJob["customerId"];
   projectId: AttentionState["projectId"];
 }): ReadonlyArray<OperationsAttentionItem> {
   return input.items.filter(
     (item) =>
-      item.isActive && item.tenantId === input.tenantId && item.projectId === input.projectId,
+      item.isActive &&
+      item.tenantId === input.tenantId &&
+      item.customerId === input.customerId &&
+      item.projectId === input.projectId,
   );
 }
