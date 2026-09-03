@@ -35,13 +35,13 @@ Tracks how the repository's actual implemented surface maps onto the DEC-160 V2�
 
 ## V4.0 — 360 Digital Operations
 
-**Active (Workstream A only, execution-maturity floor).** Full blueprint at Drive `1M5vANxdfuH7Vro_CAFenioAmWitGPS3TRlzd06d5DNs`.
+**Active (floor slices of Workstreams A and B only)**. Full blueprint at Drive `1M5vANxdfuH7Vro_CAFenioAmWitGPS3TRlzd06d5DNs`.
 
 | Capability slice | Task | Status |
 |---|---|---|
-| Workstream A: service-to-capability routing (execution-maturity floor: `UNAVAILABLE`/`READ_ONLY` only) | `V4-SVC-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification — no real provider adapter exists yet, so `MANUAL`/`PROVIDER_NATIVE`/`ENGINEER_ASSISTED`/`DIAGNOSE`/`RECOMMEND`/`DRAFT_PREVIEW`/`APPROVAL_REQUIRED`/`CONTROLLED_APPLY` are declared but not producible by this slice |
-| Workstream B: unified operations attention/exception model | — not started | Reuses V3-SLA-001 attention semantics where natural |
-| Workstreams C–H (service adapters, approval/effect/recovery, evidence/outcome reporting, optimization loop, account-manager model, frontend IA) | — not started | Each depends on real provider adapters and/or the V4 frontend, none of which exist yet |
+| Workstream A: service-to-capability routing (10-rung `ExecutionMaturity` ladder declared; only the `UNAVAILABLE`/`READ_ONLY` floor is producible — no real provider adapter exists yet) | `V4-SVC-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification |
+| Workstream B: unified operations attention/exception model (single real source domain, `DELIVERY_OUTCOME_JOB`, out of 11 blueprint-named candidate families) | `V4-OPS-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification |
+| Workstreams C-H | — not started | Each depends on a real external provider/connector adapter that does not exist anywhere in this repository yet; not pulled forward without one |
 
 ## V5.0 — AI-Native Technology Company OS
 
