@@ -2,6 +2,7 @@ import { createProjectOwnershipRef, type ProjectOwnershipRef } from "../domain/p
 import type { SessionProvider } from "./session-provider.js";
 import { requireSession, UnauthenticatedError } from "./route-guard.js";
 import { resolveProtectedSnapshotView, type ClientProjectSnapshotSource } from "./snapshot-view-state.js";
+import { resolveProtectedTeamAttentionView, type TeamAttentionSource } from "./team-attention-view-state.js";
 import { renderShellPage, type ShellPageContent, type RenderedShellPage } from "./shell-render.js";
 
 const SESSION_TOKEN_HEADER = "x-akilta-session-token";
@@ -63,6 +64,7 @@ function parsePortalPath(path: string): ProjectOwnershipRef | undefined {
 export function createRequestHandler(deps: {
   sessionProvider: SessionProvider;
   snapshotSource: ClientProjectSnapshotSource;
+  teamAttentionSource?: TeamAttentionSource;
 }): RequestHandler {
   return (request: IncomingRequestLike): OutgoingResponseLike => {
     if (request.method !== "GET") {
@@ -103,15 +105,23 @@ export function createRequestHandler(deps: {
       case "ERROR":
         content = { kind: "ERROR", reason: view.reason };
         break;
-      case "READY":
+      case "READY": {
         if (view.snapshot.deliveryStatus.overallStatus === "NOT_STARTED") {
           content = { kind: "EMPTY" };
-        } else if (view.snapshot.deliveryStatus.overallStatus === "BLOCKED") {
-          content = { kind: "BLOCKED", snapshot: view.snapshot };
+          break;
+        }
+        const teamAttentionView = resolveProtectedTeamAttentionView({
+          session,
+          requestedOwnership,
+          source: deps.teamAttentionSource,
+        });
+        if (view.snapshot.deliveryStatus.overallStatus === "BLOCKED") {
+          content = { kind: "BLOCKED", snapshot: view.snapshot, teamAttention: teamAttentionView };
         } else {
-          content = { kind: "READY", snapshot: view.snapshot };
+          content = { kind: "READY", snapshot: view.snapshot, teamAttention: teamAttentionView };
         }
         break;
+      }
     }
 
     return toResponse(renderShellPage(content));

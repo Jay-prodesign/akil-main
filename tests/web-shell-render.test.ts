@@ -6,6 +6,8 @@ import { WEBSITE_BUILD_V1_OWNERSHIP } from "../src/fixtures/website-build-v1-com
 import { buildWebsiteBuildV1Fixture } from "../src/fixtures/website-build-v1.js";
 import { createOutcomeJob, enterExceptionState } from "../src/domain/outcome-job.js";
 import { buildClientProjectSnapshot } from "../src/domain/client-project-snapshot.js";
+import type { TeamAttentionViewState } from "../src/web/team-attention-view-state.js";
+import { WEBSITE_BUILD_V1_TEAM_ATTENTION_PROJECTION } from "../src/fixtures/website-build-v1-team-attention.js";
 
 const READY_SNAPSHOT = WEBSITE_BUILD_V1_CLIENT_PROJECT_SNAPSHOT;
 
@@ -175,4 +177,60 @@ test("V2-CDO-008 A13: the advisor section renders after, and never in place of, 
     assert.equal(advisorIndex >= 0, true);
     assert.equal(projectIndex < advisorIndex, true);
   }
+});
+
+test("V3-F-001 A12: only READY and BLOCKED render the team-attention section - it is exactly as scoped as the rest of the customer-safe body", () => {
+  for (const { content } of ALL_CONTENTS) {
+    const rendered = renderShellPage(content);
+    if (content.kind === "READY" || content.kind === "BLOCKED") {
+      assert.match(rendered.html, /<h2 id="team-attention-heading">Team &amp; attention<\/h2>/);
+    } else {
+      assert.doesNotMatch(rendered.html, /team-attention-heading/);
+    }
+  }
+});
+
+test("V3-F-001: with no teamAttention supplied at all, the section renders the honest Unavailable state, never a fabricated default", () => {
+  const rendered = renderShellPage({ kind: "READY", snapshot: READY_SNAPSHOT });
+  const sectionStart = rendered.html.indexOf("team-attention-heading");
+  const sectionHtml = rendered.html.slice(sectionStart, sectionStart + 400);
+  assert.match(sectionHtml, />Unavailable</);
+});
+
+test("V3-F-001: an UNAVAILABLE teamAttention view renders the same honest Unavailable message as no wiring at all", () => {
+  const unavailable: TeamAttentionViewState = { kind: "UNAVAILABLE" };
+  const rendered = renderShellPage({ kind: "READY", snapshot: READY_SNAPSHOT, teamAttention: unavailable });
+  const sectionStart = rendered.html.indexOf("team-attention-heading");
+  const sectionHtml = rendered.html.slice(sectionStart, sectionStart + 400);
+  assert.match(sectionHtml, />Unavailable</);
+});
+
+test("V3-F-001: a FORBIDDEN_TENANT_SCOPE teamAttention view never distinguishes itself from Unavailable (no boundary detail leaked into the page)", () => {
+  const forbidden: TeamAttentionViewState = { kind: "FORBIDDEN_TENANT_SCOPE" };
+  const rendered = renderShellPage({ kind: "READY", snapshot: READY_SNAPSHOT, teamAttention: forbidden });
+  const sectionStart = rendered.html.indexOf("team-attention-heading");
+  const sectionHtml = rendered.html.slice(sectionStart, sectionStart + 400);
+  assert.match(sectionHtml, />Unavailable</);
+});
+
+test("V3-F-001: a READY teamAttention view renders each owner role separately, the viewer role, active attention, and a fixed commercial-unavailable literal", () => {
+  const ready: TeamAttentionViewState = { kind: "READY", projection: WEBSITE_BUILD_V1_TEAM_ATTENTION_PROJECTION };
+  const rendered = renderShellPage({ kind: "READY", snapshot: READY_SNAPSHOT, teamAttention: ready });
+  assert.match(rendered.html, /Your role: STAFF/);
+  assert.match(rendered.html, /Lead Owner: /);
+  assert.match(rendered.html, /Deal Owner: /);
+  assert.match(rendered.html, /Account Owner: /);
+  assert.match(rendered.html, /Delivery Owner: /);
+  assert.match(rendered.html, /Attention: EXCEPTION/);
+  assert.match(rendered.html, /Commercial: Unavailable/);
+});
+
+test("V3-F-001: a READY teamAttention view with no owner assigned for a role renders 'not assigned', never a guessed identifier", () => {
+  const projectionWithNoOwners = { ...WEBSITE_BUILD_V1_TEAM_ATTENTION_PROJECTION, owners: {} };
+  const ready: TeamAttentionViewState = { kind: "READY", projection: projectionWithNoOwners };
+  const rendered = renderShellPage({ kind: "READY", snapshot: READY_SNAPSHOT, teamAttention: ready });
+  assert.match(rendered.html, /Lead Owner: not assigned/);
+  assert.match(rendered.html, /Deal Owner: not assigned/);
+  assert.match(rendered.html, /Account Owner: not assigned/);
+  assert.match(rendered.html, /Delivery Owner: not assigned/);
 });

@@ -30,8 +30,8 @@ Tracks how the repository's actual implemented surface maps onto the DEC-160 V2�
 | Workstream C: agency/partner multi-organization boundary | `V3-PTR-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification (domain contract only — presentation-layer multi-client context switching deferred, see exec-plan) |
 | Workstream D: SLA/escalation/attention model | `V3-SLA-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification (no invented AT_RISK heuristic; `contractualSlaStatus` always `UNKNOWN` — no real source exists) |
 | Workstream E: commission/pricing/discount authority read models | `V3-COM-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification (bounded policy-neutral/read-only/fail-closed slice only; `discountAuthorityLevel` always `APPROVAL_REQUIRED`, `commissionLedgerStatus` always `UNKNOWN` — no real DEC-146 pricing-policy/financial-truth source integrated; commission %, discount thresholds, payout, reseller/wholesale economics and binding SLA terms remain unimplemented per canonical hard non-scope) |
-| Workstream F: V3 logged-in frontend / role-aware IA | — not started | Depends on backend workstreams B-E |
-| Workstream G: cross-slice integration + V3 exit audit | — not started | Depends on all prior workstreams |
+| Workstream F: V3 logged-in frontend / role-aware IA (team/attention floor slice only) | `V3-F-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification. Surfaces organization/client context, viewer role, and LeadOwner/DealOwner/AccountOwner/DeliveryOwner separately in the existing shell, using only already-merged V3 A-D substrate; commercial state renders as a fixed "Unavailable" literal (does not consume `V3-COM-001`). |
+| Workstream G: cross-slice integration + V3 exit audit | — not started | Depends on all prior workstreams actually merged, not just implemented |
 
 ## V4.0 — 360 Digital Operations
 
