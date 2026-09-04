@@ -49,8 +49,8 @@ Tracks how the repository's actual implemented surface maps onto the DEC-160 V2�
 
 | Capability slice | Task | Status |
 |---|---|---|
-| Workstream A/D floor: CHECKPOINT-after-PASS stale-approval invalidation, extending ENG-ORCH-001's `engineering-run-state.ts` | `V5-ENG-001` | `IMPLEMENTED / SELF-VALIDATED`, Brain Rev38 confirmed candidate, pending Brain PASS. Enforces "stale SHA approval cannot merge" / "post-review push invalidates old merge approval" as a tested domain invariant; no second orchestration engine. |
-| Workstream C: reusable project/repository bootstrap templates | — not selected | `ELIGIBLE_NOT_SELECTED` per Brain Rev35 — the §7 candidate reusable assets already exist as this repo's own scaffolding, but extracting them into a namespace-isolated template is architecturally larger than the V5-A/D floor above; not pulled forward yet. |
+| Workstream A/D floor: CHECKPOINT-after-PASS stale-approval invalidation, extending ENG-ORCH-001's `engineering-run-state.ts` | `V5-ENG-001` | `IMPLEMENTED / SELF-VALIDATED`, Brain Rev40 PASS, merged (PR #12, `19df961498896427223842f7de82df2d9f6a8304`; includes the Rev39 equal-fencing correction). Enforces "stale SHA approval cannot merge" / "post-review push invalidates old merge approval" as a tested domain invariant; no second orchestration engine. |
+| Workstream C: project/repository bootstrap template resolution (pure planning function; no filesystem/network side effect) | `V5-BOOT-001` | `IMPLEMENTED / SELF-VALIDATED`, Brain Rev42 confirmed candidate, pending Brain PASS. Reconsidered from Rev35's `ELIGIBLE_NOT_SELECTED` finding — cross-project isolation and secret/credential-cloning prohibition proven with synthetic project namespaces, no real second live repository required. |
 | Workstream B, E-L | — not started | No company-intelligence layer, no cross-client capability learning, no worker/model routing policy, no AI Commerce orchestration boundary — `AI Commerce` remains an explicitly separate, isolated project per `AGENTS.md`/`CLAUDE.md`. |
 
 ## How to keep this current
