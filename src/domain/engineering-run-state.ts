@@ -88,12 +88,31 @@ export interface EngineeringRunState {
   readonly pendingAnswers: ReadonlyArray<PendingAnswer>;
   readonly answeredQuestionEventIds: ReadonlyArray<EventId>;
   readonly reconciliation?: { readonly reason: string; readonly relatedEventId: EventId } | undefined;
+  /**
+   * V5 A/D: durable history of `BrainResolution`s superseded by a later
+   * `CHECKPOINT` on the same run (a post-review push) - see
+   * `CHECKPOINT_ACCEPTING_STATUSES` and the `CHECKPOINT` case in
+   * `applyEvent`. A resolution is superseded, never silently dropped, so a
+   * caller can always distinguish "no resolution ever existed" from "an
+   * approval existed but is now stale for the current checkpointSha".
+   */
+  readonly supersededResolutions: ReadonlyArray<BrainResolution>;
 }
 
+/**
+ * V5 A/D: `PASS` is included so a fresh `CHECKPOINT` (a post-review push)
+ * can explicitly invalidate a stale merge approval through an authorized
+ * transition, rather than being rejected as a no-op (see the `CHECKPOINT`
+ * case's `checkpointSha`-unchanged guard, which still treats a duplicate
+ * delivery of the *same* reviewed commit as a no-op rather than a genuine
+ * new push). `COMPLETED` is deliberately excluded - it remains terminal per
+ * `TERMINAL_STATUSES`, checked before this set is consulted.
+ */
 const CHECKPOINT_ACCEPTING_STATUSES: ReadonlySet<EngineeringRunStatus | "NONE"> = new Set([
   "NONE",
   "CHANGES_REQUIRED",
   "RESUME_AUTHORIZED",
+  "PASS",
 ]);
 
 const QUESTION_ACCEPTING_STATUSES: ReadonlySet<EngineeringRunStatus> = new Set([
@@ -268,6 +287,16 @@ export function applyEvent(
         // Wrong branch/base for an existing run fails closed (E1/E8).
         return state;
       }
+      if (state !== undefined && state.status === "PASS" && event.checkpointSha === state.checkpointSha) {
+        // A duplicate delivery of the exact reviewed commit is not a new
+        // push - preserve the existing PASS resolution as a safe no-op
+        // rather than invalidating a still-current approval.
+        return noOp(state, nextFencingToken);
+      }
+      const supersededResolutions =
+        state?.resolution !== undefined
+          ? [...state.supersededResolutions, state.resolution]
+          : (state?.supersededResolutions ?? []);
       return {
         projectRef: event.projectRef,
         taskId: event.taskId,
@@ -281,6 +310,7 @@ export function applyEvent(
         answeredQuestionEventIds: state?.answeredQuestionEventIds ?? [],
         appliedEventIds: appliedTracking?.appliedEventIds ?? [event.eventId],
         appliedIdempotencyKeys: appliedTracking?.appliedIdempotencyKeys ?? [event.idempotencyKey],
+        supersededResolutions,
       };
     }
 

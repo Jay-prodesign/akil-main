@@ -45,7 +45,13 @@ Tracks how the repository's actual implemented surface maps onto the DEC-160 V2�
 
 ## V5.0 — AI-Native Technology Company OS
 
-`PREPARED / NON_SELECTOR`. Full blueprint at Drive `1HfQ8Mzbos63LZPE_vZryd4TiLyfa8GFP_AdtmLR-el8`. Nothing in `src/` implements V5 scope yet (no company-intelligence layer, no cross-client capability learning, no AI Commerce orchestration boundary — `AI Commerce` remains an explicitly separate, isolated project per `AGENTS.md`/`CLAUDE.md`).
+**First floor slice landed (Workstream A/D extension only)**. Full blueprint at Drive `1HfQ8Mzbos63LZPE_vZryd4TiLyfa8GFP_AdtmLR-el8`.
+
+| Capability slice | Task | Status |
+|---|---|---|
+| Workstream A/D floor: CHECKPOINT-after-PASS stale-approval invalidation, extending ENG-ORCH-001's `engineering-run-state.ts` | `V5-ENG-001` | `IMPLEMENTED / SELF-VALIDATED`, Brain Rev38 confirmed candidate, pending Brain PASS. Enforces "stale SHA approval cannot merge" / "post-review push invalidates old merge approval" as a tested domain invariant; no second orchestration engine. |
+| Workstream C: reusable project/repository bootstrap templates | — not selected | `ELIGIBLE_NOT_SELECTED` per Brain Rev35 — the §7 candidate reusable assets already exist as this repo's own scaffolding, but extracting them into a namespace-isolated template is architecturally larger than the V5-A/D floor above; not pulled forward yet. |
+| Workstream B, E-L | — not started | No company-intelligence layer, no cross-client capability learning, no worker/model routing policy, no AI Commerce orchestration boundary — `AI Commerce` remains an explicitly separate, isolated project per `AGENTS.md`/`CLAUDE.md`. |
 
 ## How to keep this current
 
