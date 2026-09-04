@@ -456,10 +456,10 @@ test("E3: an out-of-order FLAG_REVIEW with a fencing token lower than the curren
   assert.deepEqual(lateOutOfOrder, resolved);
 });
 
-test("E3: a fresh higher-fenced CHECKPOINT cannot reopen/regress an already-PASS run without an explicit authorized path", () => {
+function passResolvedState(): EngineeringRunState {
   let state = checkpointedState();
   state = applyEvent(state, makeEvent({ eventType: "BEGIN_VERIFICATION", checkpointSha, fencingToken: 2 }))!;
-  const resolved = applyEvent(
+  return applyEvent(
     state,
     makeEvent({
       eventType: "RESOLVE",
@@ -470,13 +470,57 @@ test("E3: a fresh higher-fenced CHECKPOINT cannot reopen/regress an already-PASS
       fencingToken: 4,
     }),
   )!;
+}
+
+test("E3/V5-A: a duplicate CHECKPOINT delivering the exact same reviewed commit is a safe no-op - a still-current PASS approval is not invalidated", () => {
+  const resolved = passResolvedState();
   assert.equal(resolved.status, "PASS");
 
-  // Even a fresh, non-stale, higher-fenced CHECKPOINT cannot silently
-  // reopen a PASS-resolved run - CHECKPOINT is only accepted from
-  // NONE/CHANGES_REQUIRED/RESUME_AUTHORIZED, not PASS. Authority is not
-  // overridden merely by a later event arriving with a higher token.
-  const laterCheckpoint = applyEvent(
+  const duplicateCheckpoint = applyEvent(
+    resolved,
+    makeEvent({ eventType: "CHECKPOINT", branch, baseSha, checkpointSha, fencingToken: 5 }),
+  )!;
+  assert.equal(duplicateCheckpoint.status, "PASS");
+  assert.equal(duplicateCheckpoint.resolution?.checkpointSha, checkpointSha);
+  assert.equal(duplicateCheckpoint.supersededResolutions.length, 0);
+  assert.equal(duplicateCheckpoint.currentFencingToken, 5);
+});
+
+test("V5-A: a CHECKPOINT carrying a NEW checkpointSha but a fencing token merely EQUAL to the current one is a strict no-op - equal fencing cannot regress state any more than stale/lower fencing can", () => {
+  const resolved = passResolvedState();
+  assert.equal(resolved.currentFencingToken, 4);
+  const staleResolution = resolved.resolution;
+  assert.ok(staleResolution);
+
+  const equalFencingNewSha = applyEvent(
+    resolved,
+    makeEvent({
+      eventType: "CHECKPOINT",
+      branch,
+      baseSha,
+      checkpointSha: "checkpoint-sha-equal-fence",
+      fencingToken: 4, // equal to resolved.currentFencingToken, not lower and not higher
+    }),
+  )!;
+
+  // Equal fencing must NOT be treated as proof of a genuinely newer push -
+  // only a STRICTLY higher fencing token may invalidate a PASS approval.
+  // The run must remain exactly as it was: still PASS, still bound to the
+  // originally reviewed checkpointSha, resolution still current, and no
+  // new entry added to supersededResolutions.
+  assert.equal(equalFencingNewSha.status, "PASS");
+  assert.equal(equalFencingNewSha.checkpointSha, checkpointSha);
+  assert.equal(equalFencingNewSha.resolution, staleResolution);
+  assert.equal(equalFencingNewSha.supersededResolutions.length, 0);
+  assert.equal(equalFencingNewSha.currentFencingToken, 4);
+});
+
+test("V5-A: a fresh CHECKPOINT carrying a NEW checkpointSha (a post-review push) explicitly invalidates the stale PASS approval through an authorized transition", () => {
+  const resolved = passResolvedState();
+  const staleResolution = resolved.resolution;
+  assert.ok(staleResolution);
+
+  const postReviewPush = applyEvent(
     resolved,
     makeEvent({
       eventType: "CHECKPOINT",
@@ -486,9 +530,88 @@ test("E3: a fresh higher-fenced CHECKPOINT cannot reopen/regress an already-PASS
       fencingToken: 5,
     }),
   )!;
-  assert.equal(laterCheckpoint.status, "PASS");
-  assert.equal(laterCheckpoint.resolution?.checkpointSha, checkpointSha);
-  assert.equal(laterCheckpoint.currentFencingToken, 5);
+
+  // The run is explicitly reopened for the new commit - not stuck in a
+  // stale PASS state, and not silently ignored as a no-op.
+  assert.equal(postReviewPush.status, "CHECKPOINT_RECEIVED");
+  assert.equal(postReviewPush.checkpointSha, "checkpoint-sha-2");
+  assert.equal(postReviewPush.currentFencingToken, 5);
+
+  // The old approval is explicitly gone as CURRENT merge authority ...
+  assert.equal(postReviewPush.resolution, undefined);
+  // ... but retained as superseded history, not silently dropped.
+  assert.deepEqual(postReviewPush.supersededResolutions, [staleResolution]);
+
+  // A second genuine push chains correctly: the run can be re-verified and
+  // re-resolved for the new SHA, and a third push supersedes THAT
+  // resolution too, accumulating history rather than overwriting it.
+  let reVerified = applyEvent(
+    postReviewPush,
+    makeEvent({ eventType: "BEGIN_VERIFICATION", checkpointSha: "checkpoint-sha-2", fencingToken: 6 }),
+  )!;
+  const reResolved = applyEvent(
+    reVerified,
+    makeEvent({
+      eventType: "RESOLVE",
+      status: "PASS",
+      checkpointSha: "checkpoint-sha-2",
+      authorityRef: "Brain/ChatGPT",
+      evidenceRef: "internal://tests/v5-a-rechain",
+      fencingToken: 7,
+    }),
+  )!;
+  assert.equal(reResolved.status, "PASS");
+
+  const secondPostReviewPush = applyEvent(
+    reResolved,
+    makeEvent({
+      eventType: "CHECKPOINT",
+      branch,
+      baseSha,
+      checkpointSha: "checkpoint-sha-3",
+      fencingToken: 8,
+    }),
+  )!;
+  assert.equal(secondPostReviewPush.status, "CHECKPOINT_RECEIVED");
+  assert.equal(secondPostReviewPush.supersededResolutions.length, 2);
+  assert.equal(secondPostReviewPush.supersededResolutions[0], staleResolution);
+  assert.equal(secondPostReviewPush.supersededResolutions[1]?.checkpointSha, "checkpoint-sha-2");
+});
+
+test("V5-A: a stale-fenced CHECKPOINT still cannot invalidate a PASS approval - the global fencing floor is checked before the CHECKPOINT-accepting-status guard", () => {
+  const resolved = passResolvedState();
+  assert.equal(resolved.currentFencingToken, 4);
+
+  const staleCheckpoint = applyEvent(
+    resolved,
+    makeEvent({
+      eventType: "CHECKPOINT",
+      branch,
+      baseSha,
+      checkpointSha: "checkpoint-sha-2",
+      fencingToken: 3,
+    }),
+  )!;
+  assert.deepEqual(staleCheckpoint, resolved);
+});
+
+test("V5-A: COMPLETED remains terminal - a post-completion CHECKPOINT still cannot reopen the run (E3 invariant preserved)", () => {
+  const resolved = passResolvedState();
+  const completed = applyEvent(resolved, makeEvent({ eventType: "COMPLETE", fencingToken: 5 }))!;
+  assert.equal(completed.status, "COMPLETED");
+
+  const afterComplete = applyEvent(
+    completed,
+    makeEvent({
+      eventType: "CHECKPOINT",
+      branch,
+      baseSha,
+      checkpointSha: "checkpoint-sha-2",
+      fencingToken: 6,
+    }),
+  )!;
+  assert.equal(afterComplete.status, "COMPLETED");
+  assert.equal(afterComplete.checkpointSha, checkpointSha);
 });
 
 test("E12: RESOLVE CHANGES_REQUIRED produces a BrainResolution with full authority/evidence lineage", () => {
