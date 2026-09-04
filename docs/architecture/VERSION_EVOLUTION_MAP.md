@@ -21,7 +21,7 @@ Tracks how the repository's actual implemented surface maps onto the DEC-160 V2�
 
 ## V3.0 — Team, Sales & Agency OS
 
-**Active (Workstream A only)**. Full blueprint at Drive `1joeMcCRtnDSotEmWa63fFG6uxGvbeU1LZApm7_5ap50`.
+**Workstreams A-F merged; §14 version-end integration audit PASS/CLOSED (Brain Rev34, exact final main `6758de759bf17ecda49da7f4f8e1d07faa526655`)**. Full blueprint at Drive `1joeMcCRtnDSotEmWa63fFG6uxGvbeU1LZApm7_5ap50`.
 
 | Capability slice | Task | Status |
 |---|---|---|
@@ -31,7 +31,7 @@ Tracks how the repository's actual implemented surface maps onto the DEC-160 V2�
 | Workstream D: SLA/escalation/attention model | `V3-SLA-001` | `IMPLEMENTED / SELF-VALIDATED`, Brain PASS, merged (PR #4, `4ba5231309ac2fc72dd089cc947030a958eab77e`) (no invented AT_RISK heuristic; `contractualSlaStatus` always `UNKNOWN` — no real source exists) |
 | Workstream E: commission/pricing/discount authority read models | `V3-COM-001` | `IMPLEMENTED / SELF-VALIDATED`, Brain PASS, merged (PR #5, `5c91f18034a7ec435a4d83fccac856d354f8394f`) (bounded policy-neutral/read-only/fail-closed slice only; `discountAuthorityLevel` always `APPROVAL_REQUIRED`, `commissionLedgerStatus` always `UNKNOWN` — no real DEC-146 pricing-policy/financial-truth source integrated; commission %, discount thresholds, payout, reseller/wholesale economics and binding SLA terms remain unimplemented per canonical hard non-scope) |
 | Workstream F: V3 logged-in frontend / role-aware IA (team/attention floor slice only) | `V3-F-001` | `IMPLEMENTED / SELF-VALIDATED`, Brain PASS, merged (PR #8, `837214dc863970bdb05f29bf8611a3438735b3f4`). Surfaces organization/client context, viewer role, and LeadOwner/DealOwner/AccountOwner/DeliveryOwner separately in the existing shell, using only already-merged V3 A-D substrate; commercial state renders as a fixed "Unavailable" literal (does not consume `V3-COM-001`). |
-| V3 exit audit (blueprint §3 spine item H) | N/A — Brain review activity, not a Claude engineering task | With Workstreams A-F above all now merged, this is Brain's own §14 comprehensive integration audit against accumulated evidence, not a further source module for Claude to elaborate — see `docs/exec-plans/corridors/V2_TO_V5.md` "Current V3 state" for the full correction and blueprint citation. |
+| V3 exit audit (blueprint §3 spine item H) | N/A — Brain review activity, not a Claude engineering task | **PASS / VERSION_END_INTEGRATION_EDGE_CLOSED** (Brain Rev34, exact final main `6758de759bf17ecda49da7f4f8e1d07faa526655`) — Brain's own §14 comprehensive integration audit against the accumulated evidence of Workstreams A-F plus the PR #5-#9 post-merge transferable evidence package; not a Claude-authored source module. See `docs/exec-plans/corridors/V2_TO_V5.md` "V3 §14 version-end integration audit — CLOSED" for the full record. |
 
 ## V4.0 — 360 Digital Operations
 
