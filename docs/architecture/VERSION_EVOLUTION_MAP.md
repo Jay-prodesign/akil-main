@@ -25,13 +25,13 @@ Tracks how the repository's actual implemented surface maps onto the DEC-160 V2�
 
 | Capability slice | Task | Status |
 |---|---|---|
-| Workstream A: organization membership / role / assignment authority foundation | `V3-ORG-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification |
-| Workstream B: multi-owner sales/account/delivery semantics (LeadOwner/DealOwner/AccountOwner/DeliveryOwner) | `V3-OWN-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification |
-| Workstream C: agency/partner multi-organization boundary | `V3-PTR-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification (domain contract only — presentation-layer multi-client context switching deferred, see exec-plan) |
-| Workstream D: SLA/escalation/attention model | `V3-SLA-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification (no invented AT_RISK heuristic; `contractualSlaStatus` always `UNKNOWN` — no real source exists) |
-| Workstream E: commission/pricing/discount authority read models | `V3-COM-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification (bounded policy-neutral/read-only/fail-closed slice only; `discountAuthorityLevel` always `APPROVAL_REQUIRED`, `commissionLedgerStatus` always `UNKNOWN` — no real DEC-146 pricing-policy/financial-truth source integrated; commission %, discount thresholds, payout, reseller/wholesale economics and binding SLA terms remain unimplemented per canonical hard non-scope) |
-| Workstream F: V3 logged-in frontend / role-aware IA (team/attention floor slice only) | `V3-F-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification. Surfaces organization/client context, viewer role, and LeadOwner/DealOwner/AccountOwner/DeliveryOwner separately in the existing shell, using only already-merged V3 A-D substrate; commercial state renders as a fixed "Unavailable" literal (does not consume `V3-COM-001`). |
-| Workstream G: cross-slice integration + V3 exit audit | — not started | Depends on all prior workstreams actually merged, not just implemented |
+| Workstream A: organization membership / role / assignment authority foundation | `V3-ORG-001` | `IMPLEMENTED / SELF-VALIDATED`, Brain PASS, merged (PR #4, `4ba5231309ac2fc72dd089cc947030a958eab77e`) |
+| Workstream B: multi-owner sales/account/delivery semantics (LeadOwner/DealOwner/AccountOwner/DeliveryOwner) | `V3-OWN-001` | `IMPLEMENTED / SELF-VALIDATED`, Brain PASS, merged (PR #4, `4ba5231309ac2fc72dd089cc947030a958eab77e`) |
+| Workstream C: agency/partner multi-organization boundary | `V3-PTR-001` | `IMPLEMENTED / SELF-VALIDATED`, Brain PASS, merged (PR #4, `4ba5231309ac2fc72dd089cc947030a958eab77e`) (domain contract only — presentation-layer multi-client context switching deferred, see exec-plan) |
+| Workstream D: SLA/escalation/attention model | `V3-SLA-001` | `IMPLEMENTED / SELF-VALIDATED`, Brain PASS, merged (PR #4, `4ba5231309ac2fc72dd089cc947030a958eab77e`) (no invented AT_RISK heuristic; `contractualSlaStatus` always `UNKNOWN` — no real source exists) |
+| Workstream E: commission/pricing/discount authority read models | `V3-COM-001` | `IMPLEMENTED / SELF-VALIDATED`, Brain PASS, merged (PR #5, `5c91f18034a7ec435a4d83fccac856d354f8394f`) (bounded policy-neutral/read-only/fail-closed slice only; `discountAuthorityLevel` always `APPROVAL_REQUIRED`, `commissionLedgerStatus` always `UNKNOWN` — no real DEC-146 pricing-policy/financial-truth source integrated; commission %, discount thresholds, payout, reseller/wholesale economics and binding SLA terms remain unimplemented per canonical hard non-scope) |
+| Workstream F: V3 logged-in frontend / role-aware IA (team/attention floor slice only) | `V3-F-001` | `IMPLEMENTED / SELF-VALIDATED`, Brain PASS, merged (PR #8, `837214dc863970bdb05f29bf8611a3438735b3f4`). Surfaces organization/client context, viewer role, and LeadOwner/DealOwner/AccountOwner/DeliveryOwner separately in the existing shell, using only already-merged V3 A-D substrate; commercial state renders as a fixed "Unavailable" literal (does not consume `V3-COM-001`). |
+| V3 exit audit (blueprint §3 spine item H) | N/A — Brain review activity, not a Claude engineering task | With Workstreams A-F above all now merged, this is Brain's own §14 comprehensive integration audit against accumulated evidence, not a further source module for Claude to elaborate — see `docs/exec-plans/corridors/V2_TO_V5.md` "Current V3 state" for the full correction and blueprint citation. |
 
 ## V4.0 — 360 Digital Operations
 
@@ -39,8 +39,8 @@ Tracks how the repository's actual implemented surface maps onto the DEC-160 V2�
 
 | Capability slice | Task | Status |
 |---|---|---|
-| Workstream A: service-to-capability routing (10-rung `ExecutionMaturity` ladder declared; only the `UNAVAILABLE`/`READ_ONLY` floor is producible — no real provider adapter exists yet) | `V4-SVC-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification |
-| Workstream B: unified operations attention/exception model (single real source domain, `DELIVERY_OUTCOME_JOB`, out of 11 blueprint-named candidate families) | `V4-OPS-001` | `IMPLEMENTED / SELF-VALIDATED`, pending Brain verification |
+| Workstream A: service-to-capability routing (10-rung `ExecutionMaturity` ladder declared; only the `UNAVAILABLE`/`READ_ONLY` floor is producible — no real provider adapter exists yet) | `V4-SVC-001` | `IMPLEMENTED / SELF-VALIDATED`, Brain PASS, merged (PR #6, `c93a9cc1e8caf5da3c13d102bdb9fa7c778a5982`) |
+| Workstream B: unified operations attention/exception model (single real source domain, `DELIVERY_OUTCOME_JOB`, out of 11 blueprint-named candidate families) | `V4-OPS-001` | `IMPLEMENTED / SELF-VALIDATED`, Brain PASS, merged (PR #7, `6f403db130434b0228783584487dfdf43f3544f7`) |
 | Workstreams C-H | — not started | Each depends on a real external provider/connector adapter that does not exist anywhere in this repository yet; not pulled forward without one |
 
 ## V5.0 — AI-Native Technology Company OS
