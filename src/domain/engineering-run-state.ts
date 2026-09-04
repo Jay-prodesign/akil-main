@@ -287,11 +287,21 @@ export function applyEvent(
         // Wrong branch/base for an existing run fails closed (E1/E8).
         return state;
       }
-      if (state !== undefined && state.status === "PASS" && event.checkpointSha === state.checkpointSha) {
-        // A duplicate delivery of the exact reviewed commit is not a new
-        // push - preserve the existing PASS resolution as a safe no-op
-        // rather than invalidating a still-current approval.
-        return noOp(state, nextFencingToken);
+      if (state !== undefined && state.status === "PASS") {
+        // V5 A/D: only a STRICTLY newer push - a different checkpointSha
+        // AND a fencing token strictly greater than the current one - may
+        // invalidate a PASS approval. A duplicate delivery of the exact
+        // reviewed commit is not a new push, and an equal fencing token
+        // (already known not to be lower, per the global floor check above)
+        // is not proof of a newer writer either - both remain safe no-ops
+        // that preserve the still-current approval rather than regressing
+        // it, matching the Rev36/Rev38 acceptance contract that stale,
+        // lower, AND equal fencing must all fail to regress state.
+        const isGenuineNewPush =
+          event.checkpointSha !== state.checkpointSha && event.fencingToken > state.currentFencingToken;
+        if (!isGenuineNewPush) {
+          return noOp(state, nextFencingToken);
+        }
       }
       const supersededResolutions =
         state?.resolution !== undefined

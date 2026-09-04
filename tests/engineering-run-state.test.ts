@@ -486,6 +486,35 @@ test("E3/V5-A: a duplicate CHECKPOINT delivering the exact same reviewed commit 
   assert.equal(duplicateCheckpoint.currentFencingToken, 5);
 });
 
+test("V5-A: a CHECKPOINT carrying a NEW checkpointSha but a fencing token merely EQUAL to the current one is a strict no-op - equal fencing cannot regress state any more than stale/lower fencing can", () => {
+  const resolved = passResolvedState();
+  assert.equal(resolved.currentFencingToken, 4);
+  const staleResolution = resolved.resolution;
+  assert.ok(staleResolution);
+
+  const equalFencingNewSha = applyEvent(
+    resolved,
+    makeEvent({
+      eventType: "CHECKPOINT",
+      branch,
+      baseSha,
+      checkpointSha: "checkpoint-sha-equal-fence",
+      fencingToken: 4, // equal to resolved.currentFencingToken, not lower and not higher
+    }),
+  )!;
+
+  // Equal fencing must NOT be treated as proof of a genuinely newer push -
+  // only a STRICTLY higher fencing token may invalidate a PASS approval.
+  // The run must remain exactly as it was: still PASS, still bound to the
+  // originally reviewed checkpointSha, resolution still current, and no
+  // new entry added to supersededResolutions.
+  assert.equal(equalFencingNewSha.status, "PASS");
+  assert.equal(equalFencingNewSha.checkpointSha, checkpointSha);
+  assert.equal(equalFencingNewSha.resolution, staleResolution);
+  assert.equal(equalFencingNewSha.supersededResolutions.length, 0);
+  assert.equal(equalFencingNewSha.currentFencingToken, 4);
+});
+
 test("V5-A: a fresh CHECKPOINT carrying a NEW checkpointSha (a post-review push) explicitly invalidates the stale PASS approval through an authorized transition", () => {
   const resolved = passResolvedState();
   const staleResolution = resolved.resolution;
