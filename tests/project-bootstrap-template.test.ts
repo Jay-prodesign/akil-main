@@ -13,6 +13,7 @@ function asset(overrides: Partial<BootstrapTemplateAsset> = {}): BootstrapTempla
     sourceProjectRef: "akilta",
     sourceVersion: "v5",
     contentRef: "drive:1abc",
+    localApplicability: "ACCEPTED",
     ...overrides,
   };
 }
@@ -136,4 +137,55 @@ test("B8: a template with zero assets resolves an empty plan rather than throwin
   });
   assert.equal(plan.copiedAssets.length, 0);
   assert.equal(plan.rejectedAssets.length, 0);
+});
+
+test("B9 (Rev43 F1): an asset with an empty sourceProjectRef is rejected, not copied, despite a recognized kind", () => {
+  const emptyProvenanceAsset = asset({ sourceProjectRef: "" });
+  const plan = resolveProjectBootstrapPlan({
+    targetProjectNamespace: "bestprintsco",
+    existingProjectNamespaces: ["akilta"],
+    template: template([emptyProvenanceAsset]),
+  });
+  assert.equal(plan.copiedAssets.length, 0);
+  assert.equal(plan.rejectedAssets.length, 1);
+  assert.equal(plan.rejectedAssets[0]?.asset, emptyProvenanceAsset);
+  assert.match(plan.rejectedAssets[0]?.reason ?? "", /provenance.*must be non-empty/);
+});
+
+test("B10 (Rev43 F1): an asset with a whitespace-only sourceVersion is rejected, not copied", () => {
+  const whitespaceVersionAsset = asset({ sourceVersion: "   " });
+  const plan = resolveProjectBootstrapPlan({
+    targetProjectNamespace: "bestprintsco",
+    existingProjectNamespaces: ["akilta"],
+    template: template([whitespaceVersionAsset]),
+  });
+  assert.equal(plan.copiedAssets.length, 0);
+  assert.equal(plan.rejectedAssets.length, 1);
+  assert.match(plan.rejectedAssets[0]?.reason ?? "", /provenance.*must be non-empty/);
+});
+
+test("B11 (Rev43 F2): an asset with localApplicability NOT_APPLICABLE is rejected, not copied, despite a recognized kind and valid provenance", () => {
+  const notApplicableAsset = asset({ localApplicability: "NOT_APPLICABLE" });
+  const plan = resolveProjectBootstrapPlan({
+    targetProjectNamespace: "bestprintsco",
+    existingProjectNamespaces: ["akilta"],
+    template: template([notApplicableAsset]),
+  });
+  assert.equal(plan.copiedAssets.length, 0);
+  assert.equal(plan.rejectedAssets.length, 1);
+  assert.equal(plan.rejectedAssets[0]?.asset, notApplicableAsset);
+  assert.match(plan.rejectedAssets[0]?.reason ?? "", /local-applicability decision is "NOT_APPLICABLE", not ACCEPTED/);
+});
+
+test("B12 (Rev43 F2): a locally-applicable ACCEPTED asset retains source/version and supersedesLocalAuthority:false in copiedAssets", () => {
+  const plan = resolveProjectBootstrapPlan({
+    targetProjectNamespace: "bestprintsco",
+    existingProjectNamespaces: ["akilta"],
+    template: template([asset({ localApplicability: "ACCEPTED", sourceProjectRef: "akilta", sourceVersion: "v5-rev43" })]),
+  });
+  assert.equal(plan.copiedAssets.length, 1);
+  assert.equal(plan.copiedAssets[0]?.localApplicability, "ACCEPTED");
+  assert.equal(plan.copiedAssets[0]?.sourceProjectRef, "akilta");
+  assert.equal(plan.copiedAssets[0]?.sourceVersion, "v5-rev43");
+  assert.equal(plan.copiedAssets[0]?.supersedesLocalAuthority, false);
 });

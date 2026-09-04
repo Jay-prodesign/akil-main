@@ -47,6 +47,16 @@ const BOOTSTRAP_ASSET_KINDS: ReadonlySet<string> = new Set<BootstrapAssetKind>([
 ]);
 
 /**
+ * §7: imported decisions/patterns "are revalidated for local applicability."
+ * This is the explicit decision that revalidation produced, supplied by the
+ * caller on each asset - not inferred from `kind` recognition. Only
+ * `"ACCEPTED"` can enter `copiedAssets`; `"NOT_APPLICABLE"` is deterministically
+ * rejected regardless of `kind`, so a recognized asset kind alone can never
+ * grant local acceptance.
+ */
+export type LocalApplicabilityDecision = "ACCEPTED" | "NOT_APPLICABLE";
+
+/**
  * One reusable structural asset offered by a template source. `contentRef`
  * is an opaque pointer (a Drive/file/blob identifier, never the content
  * itself) - this module never reads, interprets, or executes whatever it
@@ -56,13 +66,16 @@ const BOOTSTRAP_ASSET_KINDS: ReadonlySet<string> = new Set<BootstrapAssetKind>([
  * `sourceProjectRef`/`sourceVersion` are carried so a receiving project can
  * always answer "where did this pattern come from and at what version" -
  * §7: "imported decisions identify source/version and are revalidated for
- * local applicability."
+ * local applicability." Both must be non-empty for an asset to be accepted;
+ * `localApplicability` is the recorded revalidation decision (see
+ * `LocalApplicabilityDecision`).
  */
 export interface BootstrapTemplateAsset {
   readonly kind: BootstrapAssetKind;
   readonly sourceProjectRef: string;
   readonly sourceVersion: string;
   readonly contentRef: string;
+  readonly localApplicability: LocalApplicabilityDecision;
 }
 
 export interface BootstrapTemplateSource {
@@ -126,10 +139,13 @@ function requireNonEmptyString(value: unknown, field: string): string {
  * namespace (§7 acceptance: unique project identifiers) rather than
  * silently reusing or colliding with an existing project's state.
  * Structure/pattern reuse only - never copies "mutable project truth,
- * customer data, secrets, or authority" (§7 Rules): an asset whose `kind`
- * is outside the closed `BootstrapAssetKind` set is rejected, not copied,
- * and every accepted asset is returned as read-only reusable structure via
- * `ResolvedBootstrapAsset`, never as an executable or authoritative value.
+ * customer data, secrets, or authority" (§7 Rules). An asset is rejected,
+ * not copied, if any of the following hold: its `kind` is outside the
+ * closed `BootstrapAssetKind` set; its `sourceProjectRef`/`sourceVersion`
+ * provenance is empty/whitespace; or its `localApplicability` decision is
+ * not `"ACCEPTED"`. Only an asset clearing all three enters `copiedAssets`,
+ * returned as read-only reusable structure via `ResolvedBootstrapAsset`,
+ * never as an executable or authoritative value.
  */
 export function resolveProjectBootstrapPlan(request: ProjectBootstrapRequest): ProjectBootstrapPlan {
   const targetProjectNamespace = requireNonEmptyString(
@@ -152,6 +168,20 @@ export function resolveProjectBootstrapPlan(request: ProjectBootstrapRequest): P
       rejectedAssets.push({
         asset,
         reason: `"${asset.kind}" is not a recognized reusable structural asset kind`,
+      });
+      continue;
+    }
+    if (asset.sourceProjectRef.trim().length === 0 || asset.sourceVersion.trim().length === 0) {
+      rejectedAssets.push({
+        asset,
+        reason: "asset provenance (sourceProjectRef/sourceVersion) must be non-empty",
+      });
+      continue;
+    }
+    if (asset.localApplicability !== "ACCEPTED") {
+      rejectedAssets.push({
+        asset,
+        reason: `asset local-applicability decision is "${asset.localApplicability}", not ACCEPTED`,
       });
       continue;
     }
