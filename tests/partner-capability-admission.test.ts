@@ -50,6 +50,7 @@ test("H3: admitPartnerCapabilityClaim with valid evidence and dates transitions 
   });
   const admitted = admitPartnerCapabilityClaim({
     claim,
+    admittingAuthorityId: "authority-ops-1",
     evidenceRef: "evidence:portfolio-review-2026",
     admittedAt: "2026-01-01T00:00:00.000Z",
     reviewByAt: "2027-01-01T00:00:00.000Z",
@@ -57,6 +58,7 @@ test("H3: admitPartnerCapabilityClaim with valid evidence and dates transitions 
   assert.equal(admitted.status, "ADMITTED");
   assert.equal(admitted.evidenceRef, "evidence:portfolio-review-2026");
   assert.equal(admitted.reviewByAt, "2027-01-01T00:00:00.000Z");
+  assert.equal(admitted.admittedByAuthorityId, "authority-ops-1");
 });
 
 test("H4: admitPartnerCapabilityClaim rejects an empty evidenceRef", () => {
@@ -68,6 +70,7 @@ test("H4: admitPartnerCapabilityClaim rejects an empty evidenceRef", () => {
   assert.throws(() => {
     admitPartnerCapabilityClaim({
       claim,
+      admittingAuthorityId: "authority-ops-1",
       evidenceRef: "",
       admittedAt: "2026-01-01T00:00:00.000Z",
       reviewByAt: "2027-01-01T00:00:00.000Z",
@@ -84,6 +87,7 @@ test("H5: admitPartnerCapabilityClaim rejects reviewByAt at or before admittedAt
   assert.throws(() => {
     admitPartnerCapabilityClaim({
       claim,
+      admittingAuthorityId: "authority-ops-1",
       evidenceRef: "evidence:x",
       admittedAt: "2026-06-01T00:00:00.000Z",
       reviewByAt: "2026-01-01T00:00:00.000Z",
@@ -99,6 +103,7 @@ test("H6: admitPartnerCapabilityClaim rejects re-admitting an already-ADMITTED c
   });
   const admitted = admitPartnerCapabilityClaim({
     claim,
+    admittingAuthorityId: "authority-ops-1",
     evidenceRef: "evidence:x",
     admittedAt: "2026-01-01T00:00:00.000Z",
     reviewByAt: "2027-01-01T00:00:00.000Z",
@@ -106,6 +111,7 @@ test("H6: admitPartnerCapabilityClaim rejects re-admitting an already-ADMITTED c
   assert.throws(() => {
     admitPartnerCapabilityClaim({
       claim: admitted,
+      admittingAuthorityId: "authority-ops-1",
       evidenceRef: "evidence:y",
       admittedAt: "2026-02-01T00:00:00.000Z",
       reviewByAt: "2027-02-01T00:00:00.000Z",
@@ -121,6 +127,7 @@ test("H7: revokePartnerCapabilityClaim transitions an ADMITTED claim to REVOKED"
   });
   const admitted = admitPartnerCapabilityClaim({
     claim,
+    admittingAuthorityId: "authority-ops-1",
     evidenceRef: "evidence:x",
     admittedAt: "2026-01-01T00:00:00.000Z",
     reviewByAt: "2027-01-01T00:00:00.000Z",
@@ -149,6 +156,7 @@ test("H9: revokePartnerCapabilityClaim rejects revoking an already-REVOKED claim
   });
   const admitted = admitPartnerCapabilityClaim({
     claim,
+    admittingAuthorityId: "authority-ops-1",
     evidenceRef: "evidence:x",
     admittedAt: "2026-01-01T00:00:00.000Z",
     reviewByAt: "2027-01-01T00:00:00.000Z",
@@ -177,6 +185,7 @@ test("H11: resolvePartnerCapabilityClaimStatus resolves ADMITTED as of a date be
   });
   const admitted = admitPartnerCapabilityClaim({
     claim,
+    admittingAuthorityId: "authority-ops-1",
     evidenceRef: "evidence:x",
     admittedAt: "2026-01-01T00:00:00.000Z",
     reviewByAt: "2027-01-01T00:00:00.000Z",
@@ -193,6 +202,7 @@ test("H12 (§12 'may expire'): resolvePartnerCapabilityClaimStatus resolves EXPI
   });
   const admitted = admitPartnerCapabilityClaim({
     claim,
+    admittingAuthorityId: "authority-ops-1",
     evidenceRef: "evidence:x",
     admittedAt: "2026-01-01T00:00:00.000Z",
     reviewByAt: "2027-01-01T00:00:00.000Z",
@@ -214,6 +224,7 @@ test("H13: resolvePartnerCapabilityClaimStatus resolves EXPIRED exactly at revie
   });
   const admitted = admitPartnerCapabilityClaim({
     claim,
+    admittingAuthorityId: "authority-ops-1",
     evidenceRef: "evidence:x",
     admittedAt: "2026-01-01T00:00:00.000Z",
     reviewByAt: "2027-01-01T00:00:00.000Z",
@@ -230,6 +241,7 @@ test("H14: resolvePartnerCapabilityClaimStatus passes through REVOKED unchanged 
   });
   const admitted = admitPartnerCapabilityClaim({
     claim,
+    admittingAuthorityId: "authority-ops-1",
     evidenceRef: "evidence:x",
     admittedAt: "2026-01-01T00:00:00.000Z",
     reviewByAt: "2027-01-01T00:00:00.000Z",
@@ -248,6 +260,7 @@ test("H15: an invalid admittedAt/reviewByAt timestamp fails closed with a thrown
   assert.throws(() => {
     admitPartnerCapabilityClaim({
       claim,
+      admittingAuthorityId: "authority-ops-1",
       evidenceRef: "evidence:x",
       admittedAt: "not-a-date",
       reviewByAt: "2027-01-01T00:00:00.000Z",
@@ -270,4 +283,55 @@ test("H16: empty partnerCapabilityClaimId or capabilityRef fails closed at const
       capabilityRef: "",
     });
   }, InvalidPartnerCapabilityClaimError);
+});
+
+test("H17 (Rev55 F1, §12 'capability claim cannot self-certify'): admitPartnerCapabilityClaim fails closed when admittingAuthorityId equals the claimant's own partnerOrganizationId", () => {
+  const claim = createPartnerCapabilityClaim({
+    partnerCapabilityClaimId: "claim-17",
+    partnerOrganization,
+    capabilityRef: "cap:seo-audit",
+  });
+  assert.throws(() => {
+    admitPartnerCapabilityClaim({
+      claim,
+      admittingAuthorityId: partnerOrganization.partnerOrganizationId,
+      evidenceRef: "evidence:self-supplied",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+      reviewByAt: "2027-01-01T00:00:00.000Z",
+    });
+  }, InvalidPartnerCapabilityClaimError);
+});
+
+test("H18 (Rev55 F1): admitPartnerCapabilityClaim rejects an empty admittingAuthorityId", () => {
+  const claim = createPartnerCapabilityClaim({
+    partnerCapabilityClaimId: "claim-18",
+    partnerOrganization,
+    capabilityRef: "cap:seo-audit",
+  });
+  assert.throws(() => {
+    admitPartnerCapabilityClaim({
+      claim,
+      admittingAuthorityId: "",
+      evidenceRef: "evidence:x",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+      reviewByAt: "2027-01-01T00:00:00.000Z",
+    });
+  }, InvalidPartnerCapabilityClaimError);
+});
+
+test("H19 (Rev55 F1): admitPartnerCapabilityClaim succeeds when admittingAuthorityId is a distinct identity from the claimant, and persists it on the admitted claim for audit", () => {
+  const claim = createPartnerCapabilityClaim({
+    partnerCapabilityClaimId: "claim-19",
+    partnerOrganization,
+    capabilityRef: "cap:seo-audit",
+  });
+  const admitted = admitPartnerCapabilityClaim({
+    claim,
+    admittingAuthorityId: "authority-independent-reviewer-7",
+    evidenceRef: "evidence:x",
+    admittedAt: "2026-01-01T00:00:00.000Z",
+    reviewByAt: "2027-01-01T00:00:00.000Z",
+  });
+  assert.equal(admitted.admittedByAuthorityId, "authority-independent-reviewer-7");
+  assert.notEqual(admitted.admittedByAuthorityId, admitted.partnerOrganizationId);
 });

@@ -10,6 +10,15 @@ export class InvalidPartnerCapabilityClaimError extends Error {
 type PartnerCapabilityClaimId = string & { readonly __brand: "PartnerCapabilityClaimId" };
 
 /**
+ * Rev55 F1 correction: the identity of whoever admits a claim, kept as its
+ * own branded type so it can never be silently confused with (or
+ * substituted by) a `PartnerOrganizationId`. This is what makes "capability
+ * claim cannot self-certify" an enforced invariant rather than a caller
+ * convention - see the fail-closed check in `admitPartnerCapabilityClaim`.
+ */
+type AdmittingAuthorityId = string & { readonly __brand: "AdmittingAuthorityId" };
+
+/**
  * V5 Workstream H (Partner Network Operations), §12 text: "partner
  * capability claims require evidence/admission and may expire/review."
  * A claim is always constructed `UNVERIFIED` (see `createPartnerCapabilityClaim`
@@ -34,7 +43,11 @@ export type PartnerCapabilityClaimStatus = "UNVERIFIED" | "ADMITTED" | "EXPIRED"
  * module never interprets it, only carries and compares it for identity.
  * `evidenceRef`/`admittedAt`/`reviewByAt` are present only once a claim has
  * been through `admitPartnerCapabilityClaim` - a freshly created claim (see
- * `createPartnerCapabilityClaim`) has none of them.
+ * `createPartnerCapabilityClaim`) has none of them. `admittedByAuthorityId`
+ * (Rev55 F1 correction) records exactly which independent authority
+ * performed the admission, distinct from `partnerOrganizationId` - the
+ * claimant - making that provenance explicit and auditable on the claim
+ * itself rather than left to caller convention.
  */
 export interface PartnerCapabilityClaim {
   readonly partnerCapabilityClaimId: PartnerCapabilityClaimId;
@@ -44,6 +57,7 @@ export interface PartnerCapabilityClaim {
   readonly evidenceRef?: string;
   readonly admittedAt?: string;
   readonly reviewByAt?: string;
+  readonly admittedByAuthorityId?: AdmittingAuthorityId;
   readonly revokedAt?: string;
 }
 
@@ -96,9 +110,20 @@ export function createPartnerCapabilityClaim(input: {
  * `UNVERIFIED` claim can be admitted; `ADMITTED`/`EXPIRED`/`REVOKED` all
  * reject re-admission (a stale or already-decided claim cannot be silently
  * re-processed into a fresh admission).
+ *
+ * Rev55 F1 correction: `evidenceRef`/`reviewByAt` alone do not prove the
+ * admission came from an authority independent of the claimant - a
+ * partner organization could otherwise supply its own evidence and dates
+ * and call this function on its own claim. `admittingAuthorityId` makes
+ * that authority explicit and auditable (persisted as
+ * `admittedByAuthorityId`), and self-admission is now a structural,
+ * fail-closed rejection: an `admittingAuthorityId` equal to the claim's own
+ * `partnerOrganizationId` is refused outright, independent of whatever
+ * evidence/dates accompany it.
  */
 export function admitPartnerCapabilityClaim(input: {
   claim: PartnerCapabilityClaim;
+  admittingAuthorityId: unknown;
   evidenceRef: unknown;
   admittedAt: unknown;
   reviewByAt: unknown;
@@ -106,6 +131,15 @@ export function admitPartnerCapabilityClaim(input: {
   if (input.claim.status !== "UNVERIFIED") {
     throw new InvalidPartnerCapabilityClaimError(
       `only an UNVERIFIED claim can be admitted (current status: ${input.claim.status})`,
+    );
+  }
+  const admittingAuthorityId = requireNonEmptyString(
+    input.admittingAuthorityId,
+    "admittingAuthorityId",
+  ) as AdmittingAuthorityId;
+  if ((admittingAuthorityId as string) === (input.claim.partnerOrganizationId as string)) {
+    throw new InvalidPartnerCapabilityClaimError(
+      "admittingAuthorityId must be independent of the claimant partner organization (self-admission is not permitted)",
     );
   }
   const evidenceRef = requireNonEmptyString(input.evidenceRef, "evidenceRef");
@@ -120,6 +154,7 @@ export function admitPartnerCapabilityClaim(input: {
     evidenceRef,
     admittedAt: admittedAt.raw,
     reviewByAt: reviewByAt.raw,
+    admittedByAuthorityId: admittingAuthorityId,
   };
 }
 
