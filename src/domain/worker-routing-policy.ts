@@ -22,7 +22,8 @@ export type WorkerTrustStatus = "ADMITTED" | "UNTRUSTED" | "REVOKED";
  * workers are never selected; a caller supplying a fallback candidate
  * after an unavailable primary is exercising ordinary graceful
  * degradation, not a special code path - the same eligibility filter
- * applies uniformly to every candidate.
+ * applies uniformly to every candidate, including its tool/policy/
+ * authority checks (a fallback can never route on relaxed requirements).
  */
 export type WorkerAvailability = "AVAILABLE" | "UNAVAILABLE" | "DEGRADED";
 
@@ -36,22 +37,45 @@ export type WorkerAvailability = "AVAILABLE" | "UNAVAILABLE" | "DEGRADED";
 export type WorkerRiskLevel = "STANDARD" | "HIGH_RISK";
 
 /**
+ * §6 required semantics: "provider availability != admission != authority."
+ * `authorityLevel` is a distinct dimension from `trustStatus` (admission)
+ * and `maxRiskLevel` (risk tolerance) - it represents the explicit
+ * authority a worker has been granted (e.g. to act on `ELEVATED`-authority
+ * routes such as those touching protected/high-trust scope), and is never
+ * inferred from admission or risk tolerance alone. `ELEVATED` satisfies a
+ * route requiring either level; `STANDARD` satisfies only a `STANDARD`
+ * requirement.
+ */
+export type WorkerAuthorityLevel = "STANDARD" | "ELEVATED";
+
+const AUTHORITY_RANK: Readonly<Record<WorkerAuthorityLevel, number>> = {
+  STANDARD: 0,
+  ELEVATED: 1,
+};
+
+/**
  * §6 required semantics: "each worker has declared capabilities/tools/
  * policy constraints/evaluation evidence." `evaluationEvidenceRef` is an
  * opaque pointer to that evidence - this module never reads or
  * reinterprets it, only requires it to be present (a worker with no
- * evidence pointer cannot be admitted-and-routable). `costWeight` is a
- * caller-supplied, opaque relative-cost figure used only for the ORDER a
- * caller presents candidates in - it plays no role in the eligibility
- * filter itself, which is what proves §6's "cost optimization cannot
- * bypass policy."
+ * evidence pointer cannot be admitted-and-routable). `declaredToolRefs` and
+ * `declaredPolicyConstraintRefs` are opaque pointers too (e.g. to a tool
+ * grant or a privacy/security certification) - this module never
+ * interprets what they mean, only whether a worker declares every one a
+ * route requires. `costWeight` is a caller-supplied, opaque relative-cost
+ * figure used only for the ORDER a caller presents candidates in - it
+ * plays no role in the eligibility filter itself, which is what proves
+ * §6's "cost optimization cannot bypass policy."
  */
 export interface AdmittedWorker {
   readonly workerId: string;
   readonly declaredCapabilityRefs: ReadonlyArray<string>;
+  readonly declaredToolRefs: ReadonlyArray<string>;
+  readonly declaredPolicyConstraintRefs: ReadonlyArray<string>;
   readonly trustStatus: WorkerTrustStatus;
   readonly availability: WorkerAvailability;
   readonly maxRiskLevel: WorkerRiskLevel;
+  readonly authorityLevel: WorkerAuthorityLevel;
   readonly costWeight: number;
   readonly evaluationEvidenceRef: string;
 }
@@ -76,6 +100,16 @@ export interface WorkerRoutingDecision {
 export interface WorkerRoutingRequest {
   readonly requiredCapabilityRef: string;
   readonly riskLevel: WorkerRiskLevel;
+  /**
+   * Required tool-access pointers and policy/privacy/security constraint
+   * pointers for this route. Both are explicit, caller-declared arrays
+   * (possibly empty when a route genuinely requires none) - a worker
+   * missing even one required entry can never be selected, and no
+   * fallback candidate can be selected on a relaxed subset of these.
+   */
+  readonly requiredToolRefs: ReadonlyArray<string>;
+  readonly requiredPolicyConstraintRefs: ReadonlyArray<string>;
+  readonly requiredAuthorityLevel: WorkerAuthorityLevel;
   readonly requiresIndependentReview: boolean;
   /**
    * Caller-supplied candidate order (e.g. cost-ascending). The eligibility
@@ -100,10 +134,17 @@ function requireNonEmptyString(value: unknown, field: string): string {
   return value;
 }
 
+function includesAll(declared: ReadonlyArray<string>, required: ReadonlyArray<string>): boolean {
+  return required.every((ref) => declared.includes(ref));
+}
+
 function isEligible(
   worker: AdmittedWorker,
   requiredCapabilityRef: string,
   riskLevel: WorkerRiskLevel,
+  requiredToolRefs: ReadonlyArray<string>,
+  requiredPolicyConstraintRefs: ReadonlyArray<string>,
+  requiredAuthorityLevel: WorkerAuthorityLevel,
 ): boolean {
   if (worker.trustStatus !== "ADMITTED") {
     return false;
@@ -123,6 +164,15 @@ function isEligible(
   if (riskLevel === "HIGH_RISK" && worker.maxRiskLevel !== "HIGH_RISK") {
     return false;
   }
+  if (!includesAll(worker.declaredToolRefs, requiredToolRefs)) {
+    return false;
+  }
+  if (!includesAll(worker.declaredPolicyConstraintRefs, requiredPolicyConstraintRefs)) {
+    return false;
+  }
+  if (AUTHORITY_RANK[worker.authorityLevel] < AUTHORITY_RANK[requiredAuthorityLevel]) {
+    return false;
+  }
   return true;
 }
 
@@ -130,13 +180,25 @@ function selectFirstEligible(
   candidates: ReadonlyArray<AdmittedWorker>,
   requiredCapabilityRef: string,
   riskLevel: WorkerRiskLevel,
+  requiredToolRefs: ReadonlyArray<string>,
+  requiredPolicyConstraintRefs: ReadonlyArray<string>,
+  requiredAuthorityLevel: WorkerAuthorityLevel,
   excludeWorkerId?: string,
 ): AdmittedWorker | undefined {
   for (const candidate of candidates) {
     if (excludeWorkerId !== undefined && candidate.workerId === excludeWorkerId) {
       continue;
     }
-    if (isEligible(candidate, requiredCapabilityRef, riskLevel)) {
+    if (
+      isEligible(
+        candidate,
+        requiredCapabilityRef,
+        riskLevel,
+        requiredToolRefs,
+        requiredPolicyConstraintRefs,
+        requiredAuthorityLevel,
+      )
+    ) {
       return candidate;
     }
   }
@@ -150,21 +212,26 @@ function selectFirstEligible(
  * canonical company memory" - this module carries no memory at all).
  *
  * Fails closed (throws `InvalidWorkerRoutingRequestError`) only on
- * malformed structural input (empty `requiredCapabilityRef`, or
- * `requiresIndependentReview`/`riskLevel: "HIGH_RISK"` with no
- * `reviewerCandidates` supplied at all). A policy outcome that fails to
- * find an eligible worker is never a thrown error - it is an explicit
- * `REJECTED` decision with a reason, so "provider outage degrades
- * gracefully" (§6) rather than crashing the caller.
+ * malformed structural input (empty `requiredCapabilityRef`, invalid
+ * `riskLevel`/`requiredAuthorityLevel`, or `requiresIndependentReview`/
+ * `riskLevel: "HIGH_RISK"` with no `reviewerCandidates` supplied at all).
+ * A policy outcome that fails to find an eligible worker is never a thrown
+ * error - it is an explicit `REJECTED` decision with a reason, so
+ * "provider outage degrades gracefully" (§6) rather than crashing the
+ * caller.
  *
  * Executor selection: the first candidate in `executorCandidates` that is
  * `ADMITTED`, `AVAILABLE`, declares `requiredCapabilityRef`, carries a
- * non-empty `evaluationEvidenceRef`, and (for `HIGH_RISK` work) has
+ * non-empty `evaluationEvidenceRef`, declares every `requiredToolRef` and
+ * `requiredPolicyConstraintRef`, has an `authorityLevel` at least
+ * `requiredAuthorityLevel`, and (for `HIGH_RISK` work) has
  * `maxRiskLevel: "HIGH_RISK"`. Candidate order is caller-supplied
  * preference (e.g. cost-ascending) - it has no effect on eligibility, so
  * an ineligible-but-cheaper worker earlier in the list is never chosen
  * over an eligible one later in it (§6: "cost optimization cannot bypass
- * policy").
+ * policy"), and a fallback candidate is held to the exact same tool/
+ * policy/authority bar as the primary - fallback never routes on a
+ * relaxed requirement set.
  *
  * Reviewer selection (only when `requiresIndependentReview` or
  * `riskLevel === "HIGH_RISK"`): the first `reviewerCandidates` entry that
@@ -182,6 +249,16 @@ export function resolveWorkerRoute(request: WorkerRoutingRequest): WorkerRouting
   if (request.riskLevel !== "STANDARD" && request.riskLevel !== "HIGH_RISK") {
     throw new InvalidWorkerRoutingRequestError('riskLevel must be "STANDARD" or "HIGH_RISK"');
   }
+  if (request.requiredAuthorityLevel !== "STANDARD" && request.requiredAuthorityLevel !== "ELEVATED") {
+    throw new InvalidWorkerRoutingRequestError(
+      'requiredAuthorityLevel must be "STANDARD" or "ELEVATED"',
+    );
+  }
+  if (!Array.isArray(request.requiredToolRefs) || !Array.isArray(request.requiredPolicyConstraintRefs)) {
+    throw new InvalidWorkerRoutingRequestError(
+      "requiredToolRefs and requiredPolicyConstraintRefs must both be arrays (an empty array is valid when none are required)",
+    );
+  }
   const needsIndependentReview = request.requiresIndependentReview || request.riskLevel === "HIGH_RISK";
   if (needsIndependentReview && request.reviewerCandidates === undefined) {
     throw new InvalidWorkerRoutingRequestError(
@@ -189,14 +266,21 @@ export function resolveWorkerRoute(request: WorkerRoutingRequest): WorkerRouting
     );
   }
 
-  const executor = selectFirstEligible(request.executorCandidates, requiredCapabilityRef, request.riskLevel);
+  const executor = selectFirstEligible(
+    request.executorCandidates,
+    requiredCapabilityRef,
+    request.riskLevel,
+    request.requiredToolRefs,
+    request.requiredPolicyConstraintRefs,
+    request.requiredAuthorityLevel,
+  );
   if (executor === undefined) {
     return {
       requiredCapabilityRef,
       riskLevel: request.riskLevel,
       status: "REJECTED",
       reason:
-        "no admitted, available worker declares the required capability at the required risk level",
+        "no admitted, available worker declares the required capability, tools, policy constraints, and authority level at the required risk level",
     };
   }
 
@@ -206,7 +290,7 @@ export function resolveWorkerRoute(request: WorkerRoutingRequest): WorkerRouting
       riskLevel: request.riskLevel,
       status: "ROUTED",
       executorWorkerId: executor.workerId,
-      reason: `worker ${executor.workerId} is ADMITTED, AVAILABLE, declares ${requiredCapabilityRef}, and is authorized for ${request.riskLevel} risk; independent review not required for this route`,
+      reason: `worker ${executor.workerId} is ADMITTED, AVAILABLE, declares ${requiredCapabilityRef} plus every required tool/policy constraint, meets the required authority level, and is authorized for ${request.riskLevel} risk; independent review not required for this route`,
     };
   }
 
@@ -214,6 +298,9 @@ export function resolveWorkerRoute(request: WorkerRoutingRequest): WorkerRouting
     request.reviewerCandidates as ReadonlyArray<AdmittedWorker>,
     requiredCapabilityRef,
     request.riskLevel,
+    request.requiredToolRefs,
+    request.requiredPolicyConstraintRefs,
+    request.requiredAuthorityLevel,
     executor.workerId,
   );
   if (reviewer === undefined) {
@@ -232,6 +319,6 @@ export function resolveWorkerRoute(request: WorkerRoutingRequest): WorkerRouting
     status: "ROUTED",
     executorWorkerId: executor.workerId,
     reviewerWorkerId: reviewer.workerId,
-    reason: `worker ${executor.workerId} is authorized as executor and worker ${reviewer.workerId} is authorized as an independent reviewer, both ADMITTED/AVAILABLE/capable at ${request.riskLevel} risk`,
+    reason: `worker ${executor.workerId} is authorized as executor and worker ${reviewer.workerId} is authorized as an independent reviewer, both meeting every required capability/tool/policy/authority constraint at ${request.riskLevel} risk`,
   };
 }
