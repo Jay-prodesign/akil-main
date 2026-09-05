@@ -59,6 +59,7 @@ test("E1: a mismatched branch/baseSha binding is itself rejected without mutatio
     state,
     makeEvent({
       eventType: "RESOLVE",
+      fromRole: "BRAIN",
       status: "CHANGES_REQUIRED",
       checkpointSha,
       authorityRef: "Brain/ChatGPT",
@@ -133,6 +134,7 @@ test("E3: authority does not regress past COMPLETED for a late-arriving event", 
     state,
     makeEvent({
       eventType: "RESOLVE",
+      fromRole: "BRAIN",
       status: "PASS",
       checkpointSha,
       authorityRef: "Brain/ChatGPT",
@@ -175,6 +177,7 @@ test("E7: a newer fencing token invalidates a stale lease holder's mutation atte
     answered,
     makeEvent({
       eventType: "RESOLVE",
+      fromRole: "BRAIN",
       status: "PASS",
       checkpointSha,
       authorityRef: "stale-worker",
@@ -194,6 +197,7 @@ test("E7: dual concurrent leases cannot both win - only the higher fencing token
     state,
     makeEvent({
       eventType: "RESOLVE",
+      fromRole: "BRAIN",
       status: "CHANGES_REQUIRED",
       checkpointSha,
       authorityRef: "worker-a",
@@ -205,6 +209,7 @@ test("E7: dual concurrent leases cannot both win - only the higher fencing token
     lowFenceResolution,
     makeEvent({
       eventType: "RESOLVE",
+      fromRole: "BRAIN",
       status: "PASS",
       checkpointSha,
       authorityRef: "worker-b",
@@ -328,6 +333,7 @@ test("E7 (pre-state): once a run exists, the pre-state floor tracking is a no-op
     makeEvent({ eventType: "BEGIN_VERIFICATION", checkpointSha, fencingToken: 2 }),
     makeEvent({
       eventType: "RESOLVE",
+      fromRole: "BRAIN",
       status: "PASS",
       checkpointSha,
       authorityRef: "Brain/ChatGPT",
@@ -358,6 +364,7 @@ test("E8: wrong checkpointSha on RESOLVE fails closed without mutation", () => {
     state,
     makeEvent({
       eventType: "RESOLVE",
+      fromRole: "BRAIN",
       status: "PASS",
       checkpointSha: "wrong-sha",
       authorityRef: "Brain/ChatGPT",
@@ -405,6 +412,7 @@ test("E12: PASS requires a canonically bound BrainResolution and retains authori
     state,
     makeEvent({
       eventType: "RESOLVE",
+      fromRole: "BRAIN",
       status: "PASS",
       checkpointSha,
       authorityRef: "Brain/ChatGPT",
@@ -438,6 +446,7 @@ test("E3: an out-of-order FLAG_REVIEW with a fencing token lower than the curren
     state,
     makeEvent({
       eventType: "RESOLVE",
+      fromRole: "BRAIN",
       status: "PASS",
       checkpointSha,
       authorityRef: "Brain/ChatGPT",
@@ -463,6 +472,7 @@ function passResolvedState(): EngineeringRunState {
     state,
     makeEvent({
       eventType: "RESOLVE",
+      fromRole: "BRAIN",
       status: "PASS",
       checkpointSha,
       authorityRef: "Brain/ChatGPT",
@@ -553,6 +563,7 @@ test("V5-A: a fresh CHECKPOINT carrying a NEW checkpointSha (a post-review push)
     reVerified,
     makeEvent({
       eventType: "RESOLVE",
+      fromRole: "BRAIN",
       status: "PASS",
       checkpointSha: "checkpoint-sha-2",
       authorityRef: "Brain/ChatGPT",
@@ -621,6 +632,7 @@ test("E12: RESOLVE CHANGES_REQUIRED produces a BrainResolution with full authori
     state,
     makeEvent({
       eventType: "RESOLVE",
+      fromRole: "BRAIN",
       status: "CHANGES_REQUIRED",
       checkpointSha,
       authorityRef: "Brain/ChatGPT",
@@ -642,6 +654,7 @@ test("E12: RESOLVE PASS with an authorizedNextTaskRef carries the authorized nex
     state,
     makeEvent({
       eventType: "RESOLVE",
+      fromRole: "BRAIN",
       status: "PASS",
       checkpointSha,
       authorityRef: "Brain/ChatGPT",
@@ -660,6 +673,7 @@ test("E12: RESOLVE PASS without an authorizedNextTaskRef leaves it absent (no co
     state,
     makeEvent({
       eventType: "RESOLVE",
+      fromRole: "BRAIN",
       status: "PASS",
       checkpointSha,
       authorityRef: "Brain/ChatGPT",
@@ -668,4 +682,81 @@ test("E12: RESOLVE PASS without an authorizedNextTaskRef leaves it absent (no co
     }),
   )!;
   assert.equal(resolved.resolution?.authorizedNextTaskRef, undefined);
+});
+
+test("V5-A: a WORKER-authored RESOLVE(PASS) is rejected as a self-certification attempt - agent cannot self-mark final VERIFIED", () => {
+  let state = checkpointedState();
+  state = applyEvent(state, makeEvent({ eventType: "BEGIN_VERIFICATION", checkpointSha, fencingToken: 2 }))!;
+  const selfCertifyAttempt = applyEvent(
+    state,
+    makeEvent({
+      eventType: "RESOLVE",
+      fromRole: "WORKER",
+      status: "PASS",
+      checkpointSha,
+      authorityRef: "self-claimed",
+      evidenceRef: "internal://tests/v5-a-self-certify",
+      fencingToken: 3,
+    }),
+  )!;
+  assert.equal(selfCertifyAttempt.status, "VERIFYING");
+  assert.equal(selfCertifyAttempt.resolution, undefined);
+});
+
+test("V5-A: a WORKER-authored RESOLVE(CHANGES_REQUIRED) is also rejected - self-marking either disposition is forbidden, not only PASS", () => {
+  let state = checkpointedState();
+  state = applyEvent(state, makeEvent({ eventType: "BEGIN_VERIFICATION", checkpointSha, fencingToken: 2 }))!;
+  const selfCertifyAttempt = applyEvent(
+    state,
+    makeEvent({
+      eventType: "RESOLVE",
+      fromRole: "WORKER",
+      status: "CHANGES_REQUIRED",
+      checkpointSha,
+      authorityRef: "self-claimed",
+      evidenceRef: "internal://tests/v5-a-self-certify-cr",
+      fencingToken: 3,
+    }),
+  )!;
+  assert.equal(selfCertifyAttempt.status, "VERIFYING");
+  assert.equal(selfCertifyAttempt.resolution, undefined);
+});
+
+test("V5-A: an OWNER-authored RESOLVE is accepted - the role check admits independent BRAIN review or an explicit OWNER override, never WORKER self-certification", () => {
+  let state = checkpointedState();
+  state = applyEvent(state, makeEvent({ eventType: "BEGIN_VERIFICATION", checkpointSha, fencingToken: 2 }))!;
+  const resolved = applyEvent(
+    state,
+    makeEvent({
+      eventType: "RESOLVE",
+      fromRole: "OWNER",
+      status: "PASS",
+      checkpointSha,
+      authorityRef: "Founder",
+      evidenceRef: "internal://tests/v5-a-owner-resolve",
+      fencingToken: 3,
+    }),
+  )!;
+  assert.equal(resolved.status, "PASS");
+  assert.equal(resolved.resolution?.decision, "PASS");
+});
+
+test("V5-A: a rejected self-certification RESOLVE still advances the fencing floor (E7 convention) without granting any business effect", () => {
+  let state = checkpointedState();
+  state = applyEvent(state, makeEvent({ eventType: "BEGIN_VERIFICATION", checkpointSha, fencingToken: 2 }))!;
+  const selfCertifyAttempt = applyEvent(
+    state,
+    makeEvent({
+      eventType: "RESOLVE",
+      fromRole: "WORKER",
+      status: "PASS",
+      checkpointSha,
+      authorityRef: "self-claimed",
+      evidenceRef: "internal://tests/v5-a-fencing-floor",
+      fencingToken: 9,
+    }),
+  )!;
+  assert.equal(selfCertifyAttempt.currentFencingToken, 9);
+  assert.equal(selfCertifyAttempt.status, "VERIFYING");
+  assert.equal(selfCertifyAttempt.resolution, undefined);
 });
