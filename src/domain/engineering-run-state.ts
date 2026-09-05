@@ -36,6 +36,8 @@ export type BrainResolutionDecision = "PASS" | "CHANGES_REQUIRED";
  * Constructed only inside `applyEvent`'s RESOLVE handling, from an event
  * that itself carries the exact project/task/branch/checkpointSha binding
  * required for the resolution to apply - never self-granted by a worker.
+ * V5 Workstream A: this is enforced, not just documented - `applyEvent`
+ * rejects any RESOLVE whose `fromRole` is not `"BRAIN"` or `"OWNER"`.
  */
 export interface BrainResolution {
   readonly projectRef: string;
@@ -343,6 +345,13 @@ export function applyEvent(
 
     case "RESOLVE": {
       if (state === undefined || (state.status !== "VERIFYING" && state.status !== "REVIEW_REQUIRED")) {
+        return noOp(state, nextFencingToken);
+      }
+      if (event.fromRole !== "BRAIN" && event.fromRole !== "OWNER") {
+        // V5 Workstream A acceptance: "agent cannot self-mark final
+        // VERIFIED" - a WORKER-authored RESOLVE is a self-certification
+        // attempt and must fail closed exactly like a wrong-status or
+        // wrong-binding RESOLVE, never producing a BrainResolution.
         return noOp(state, nextFencingToken);
       }
       if (event.status !== "PASS" && event.status !== "CHANGES_REQUIRED") {
