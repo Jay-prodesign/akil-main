@@ -243,3 +243,59 @@ test("F15: an empty/whitespace-only projectRef fails closed", () => {
     InvalidCrossDomainIntelligenceRequestError,
   );
 });
+
+test("F16 (Rev49 F1): an insight with an empty sourceRef is rejected, not silently included as reusable provenance", () => {
+  const noSource = insight({ sourceRef: "" });
+  const snapshot = buildCrossDomainIntelligenceSnapshot({
+    tenantScope,
+    projectRef,
+    insights: [noSource],
+    freshnessThresholdMs: 30 * 60 * 1000,
+    asOf,
+  });
+  assert.equal(snapshot.reconciled.length, 0);
+  assert.equal(snapshot.rejectedInsights.length, 1);
+  assert.equal(snapshot.rejectedInsights[0]?.insight, noSource);
+  assert.match(snapshot.rejectedInsights[0]?.reason ?? "", /sourceRef must be non-empty/);
+});
+
+test("F17 (Rev49 F1): an insight with a whitespace-only sourceRef is rejected", () => {
+  const whitespaceSource = insight({ sourceRef: "   " });
+  const snapshot = buildCrossDomainIntelligenceSnapshot({
+    tenantScope,
+    projectRef,
+    insights: [whitespaceSource],
+    freshnessThresholdMs: 30 * 60 * 1000,
+    asOf,
+  });
+  assert.equal(snapshot.reconciled.length, 0);
+  assert.equal(snapshot.rejectedInsights.length, 1);
+  assert.match(snapshot.rejectedInsights[0]?.reason ?? "", /sourceRef must be non-empty/);
+});
+
+test("F18 (Rev49 F2): an insight captured in the future relative to asOf is rejected, never resolved as CURRENT", () => {
+  const futureInsight = insight({ capturedAt: "2099-01-01T00:00:00.000Z" });
+  const snapshot = buildCrossDomainIntelligenceSnapshot({
+    tenantScope,
+    projectRef,
+    insights: [futureInsight],
+    freshnessThresholdMs: 1000,
+    asOf,
+  });
+  assert.equal(snapshot.reconciled.length, 0);
+  assert.equal(snapshot.rejectedInsights.length, 1);
+  assert.equal(snapshot.rejectedInsights[0]?.insight, futureInsight);
+  assert.match(snapshot.rejectedInsights[0]?.reason ?? "", /capturedAt cannot be in the future relative to asOf/);
+});
+
+test("F19 (Rev49 F2): a capturedAt exactly equal to asOf is accepted (boundary: not \"in the future\")", () => {
+  const snapshot = buildCrossDomainIntelligenceSnapshot({
+    tenantScope,
+    projectRef,
+    insights: [insight({ capturedAt: asOf })],
+    freshnessThresholdMs: 0,
+    asOf,
+  });
+  assert.equal(snapshot.rejectedInsights.length, 0);
+  assert.equal(snapshot.reconciled[0]?.status, "CURRENT");
+});

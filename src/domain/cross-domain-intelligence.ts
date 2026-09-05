@@ -48,7 +48,10 @@ export type IntelligenceEvidenceKind = "OBSERVED" | "DERIVED";
  * already-existing typed record (e.g. a `CommercialAuthoritySnapshot` or
  * `OperationsAttentionItem`) this insight was read from - this module never
  * reads or reaches into that record itself, matching every other
- * `src/domain/` module's isolation.
+ * `src/domain/` module's isolation. `sourceRef` must be non-empty and
+ * `capturedAt` must not be in the future relative to the request's `asOf` -
+ * both enforced by `buildCrossDomainIntelligenceSnapshot`, not merely
+ * documented.
  */
 export interface IntelligenceInsight {
   readonly tenantScope: TenantScope;
@@ -118,7 +121,12 @@ function requireNonEmptyString(value: unknown, field: string): string {
  * Fail-closed on scope mismatch (§10: "tenant/customer confidential data
  * stays access-scoped" / "no cross-client data leakage"): an insight whose
  * `tenantScope`/`projectRef` differs from the request's is rejected, never
- * silently included.
+ * silently included. Also fail-closed on an empty `sourceRef` (an insight
+ * with no real provenance pointer is not an insight) and on a `capturedAt`
+ * in the future relative to `asOf` (evidence cannot be "captured" after the
+ * point in time the snapshot is being built for - without this check a
+ * future-dated insight's negative age would otherwise satisfy any
+ * non-negative freshness threshold and be wrongly treated as current).
  *
  * For each remaining `subjectRef`, insights captured within
  * `freshnessThresholdMs` of `asOf` are "fresh"; the rest are "stale".
@@ -165,9 +173,21 @@ export function buildCrossDomainIntelligenceSnapshot(
       });
       continue;
     }
+    if (typeof insight.sourceRef !== "string" || insight.sourceRef.trim().length === 0) {
+      rejectedInsights.push({ insight, reason: "sourceRef must be non-empty" });
+      continue;
+    }
     const capturedAtMs = Date.parse(insight.capturedAt);
     if (Number.isNaN(capturedAtMs)) {
       rejectedInsights.push({ insight, reason: "capturedAt is not a valid ISO timestamp" });
+      continue;
+    }
+    if (capturedAtMs > asOfMs) {
+      // A capturedAt in the future relative to asOf cannot be genuine
+      // evidence "as of" this snapshot - reject it outright rather than
+      // letting the freshness filter below treat it as fresh (a negative
+      // age is still "<= freshnessThresholdMs").
+      rejectedInsights.push({ insight, reason: "capturedAt cannot be in the future relative to asOf" });
       continue;
     }
     accepted.push(insight);
