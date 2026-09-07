@@ -138,6 +138,19 @@ function includesAll(declared: ReadonlyArray<string>, required: ReadonlyArray<st
   return required.every((ref) => declared.includes(ref));
 }
 
+/**
+ * Rev60 F1: `AUTHORITY_RANK` is a lookup table, not a type guard - a
+ * malformed/unknown runtime `authorityLevel` (e.g. from untyped input)
+ * indexes to `undefined`, and `undefined < requiredRank` evaluates `false`
+ * in JavaScript, which would otherwise let the rank comparison in
+ * `isEligible` silently treat the candidate as authorized. This guard
+ * fails closed on any value outside the two representable levels before
+ * the rank comparison ever runs.
+ */
+function isRecognizedAuthorityLevel(value: unknown): boolean {
+  return value === "STANDARD" || value === "ELEVATED";
+}
+
 function isEligible(
   worker: AdmittedWorker,
   requiredCapabilityRef: string,
@@ -168,6 +181,9 @@ function isEligible(
     return false;
   }
   if (!includesAll(worker.declaredPolicyConstraintRefs, requiredPolicyConstraintRefs)) {
+    return false;
+  }
+  if (!isRecognizedAuthorityLevel(worker.authorityLevel)) {
     return false;
   }
   if (AUTHORITY_RANK[worker.authorityLevel] < AUTHORITY_RANK[requiredAuthorityLevel]) {
