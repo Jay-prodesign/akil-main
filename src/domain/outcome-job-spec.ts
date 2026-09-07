@@ -34,8 +34,21 @@ export interface OutcomeJobSpec {
   readonly sourceBlueprintVersion: ProjectPlanVersion["sourceBlueprintVersion"];
 }
 
+/**
+ * Rev62 AUD-DEL-02 correction: `ProjectPlanVersion` identity is
+ * project-scoped (a `planId` is never asserted unique across an entire
+ * tenant), but `specId` previously omitted `projectId` entirely. Two
+ * distinct, equally legitimate projects in the same tenant can compile a
+ * plan with the same `planId`/version/requirement (nothing forbids
+ * reusing a planId across projects), which produced identical `specId`
+ * values - and `wireAdmittedOutcomeJobs` reuses `specId` verbatim as the
+ * runtime `jobId`, which `FileDurableOutcomeJobStore` keys by
+ * tenantId + jobId. `projectId` is now part of `specId` so two projects
+ * sharing a planId/version/requirement can never collide on runtime job
+ * identity.
+ */
 function specIdFor(plan: ProjectPlanVersion, node: PlanNode): OutcomeJobSpecId {
-  return `${plan.planId}:v${plan.version}:${node.requirementId}` as OutcomeJobSpecId;
+  return `${plan.projectId}:${plan.planId}:v${plan.version}:${node.requirementId}` as OutcomeJobSpecId;
 }
 
 /**

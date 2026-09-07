@@ -82,6 +82,32 @@ test("A9: a source returning undefined (no snapshot exists yet) resolves NOT_FOU
   assert.equal(source.callCount, 1);
 });
 
+test("Rev62 AUD-V2-02: a source returning a foreign-scope snapshot resolves NOT_FOUND, never READY with leaked foreign data", () => {
+  const session = sessionForOwnership(WEBSITE_BUILD_V1_OWNERSHIP);
+  const foreignScopedSource: ClientProjectSnapshotSource = {
+    getSnapshot() {
+      // Deliberately returns a snapshot scoped to a different project than
+      // the one requested/authorized - simulates a faulty/compromised
+      // source responding with foreign-tenant data despite the session's
+      // own tenant/project check having already passed.
+      return {
+        ...WEBSITE_BUILD_V1_CLIENT_PROJECT_SNAPSHOT,
+        ownership: createProjectOwnershipRef({
+          tenantId: WEBSITE_BUILD_V1_CLIENT_PROJECT_SNAPSHOT.ownership.tenantId,
+          customerId: WEBSITE_BUILD_V1_CLIENT_PROJECT_SNAPSHOT.ownership.customerId,
+          projectId: "some-foreign-project",
+        }),
+      };
+    },
+  };
+  const view = resolveProtectedSnapshotView({
+    session,
+    requestedOwnership: WEBSITE_BUILD_V1_OWNERSHIP,
+    source: foreignScopedSource,
+  });
+  assert.equal(view.kind, "NOT_FOUND");
+});
+
 test("A9: a source that throws resolves ERROR with a bounded reason, not an unhandled exception", () => {
   const session = sessionForOwnership(WEBSITE_BUILD_V1_OWNERSHIP);
   const throwingSource: ClientProjectSnapshotSource = {

@@ -43,6 +43,19 @@ function tenantContextFromOwnership(ownership: ProjectOwnershipRef): TenantConte
  * failed `requireSession` should never reach this function; it is not
  * re-checked here (that failure mode is handled by `requireSession`
  * before this function is invoked - see `request-handler.ts`).
+ *
+ * Rev62 AUD-V2-02 correction: checking `input.session` against
+ * `input.requestedOwnership` proves the caller is allowed to see *that*
+ * scope - it proves nothing about what `source.getSnapshot` actually
+ * handed back. `resolveProtectedTeamAttentionView` (V3, corrected under
+ * Rev28) already independently re-verifies its source's returned
+ * projection scope before READY; this port never received the same
+ * correction. The returned `snapshot.ownership` is therefore
+ * independently verified against `input.requestedOwnership` (including
+ * `serviceRef`) before it is ever wrapped in `READY`; any mismatch
+ * resolves `NOT_FOUND` (the same honest "no snapshot for this request"
+ * outcome already used when the source has nothing at all) rather than
+ * leaking a foreign-scope snapshot from a faulty/compromised source.
  */
 export function resolveProtectedSnapshotView(input: {
   session: SessionContext;
@@ -68,5 +81,15 @@ export function resolveProtectedSnapshotView(input: {
   if (snapshot === undefined) {
     return { kind: "NOT_FOUND" };
   }
+
+  if (
+    snapshot.ownership.tenantId !== input.requestedOwnership.tenantId ||
+    snapshot.ownership.customerId !== input.requestedOwnership.customerId ||
+    snapshot.ownership.projectId !== input.requestedOwnership.projectId ||
+    snapshot.ownership.serviceRef !== input.requestedOwnership.serviceRef
+  ) {
+    return { kind: "NOT_FOUND" };
+  }
+
   return { kind: "READY", snapshot };
 }

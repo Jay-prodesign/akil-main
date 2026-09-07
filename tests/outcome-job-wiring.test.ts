@@ -268,8 +268,65 @@ test("T11: wired OutcomeJob identifiers remain traceable to their exact Project/
   });
 
   for (const job of jobs) {
-    assert.ok(job.jobId.startsWith(`${plan.planId}:v${plan.version}:`));
+    assert.ok(job.jobId.startsWith(`${plan.projectId}:${plan.planId}:v${plan.version}:`));
     assert.ok(job.jobId.includes(job.jobFamily));
+  }
+});
+
+test("Rev62 AUD-DEL-02: two distinct projects with the same planId/version/requirement produce distinct, non-colliding jobIds", () => {
+  const fixtureA = buildWebsiteBuildV1Fixture();
+  const fixtureB = buildWebsiteBuildV1Fixture();
+  const otherTenantScope = createTenantScope(fixtureA.tenantScope.tenantId);
+  const otherCustomer = createCustomer({
+    tenantScope: otherTenantScope,
+    customerId: fixtureA.customer.customerId,
+    displayName: "Other Project Customer",
+  });
+  const otherProject = createProject({
+    tenantScope: otherTenantScope,
+    customer: otherCustomer,
+    projectId: "proj-del-02-other",
+    ownerRef: fixtureA.project.ownerRef,
+    state: "active",
+  });
+  const otherSoldScope = createSoldScope({
+    tenantScope: otherTenantScope,
+    project: otherProject,
+    soldScopeId: fixtureA.soldScope.soldScopeId,
+    outcomeContractRef: fixtureA.soldScope.outcomeContractRef,
+    includedRequirementIds: fixtureA.soldScope.includedRequirementIds,
+    excludedRequirementIds: fixtureA.soldScope.excludedRequirementIds,
+  });
+
+  // Same planId/version, same tenant, but a genuinely different project -
+  // nothing in this repository asserts tenant-wide planId uniqueness, so
+  // this is a legitimate scenario, not a contrived one.
+  const planA = compilePlan({
+    tenantScope: fixtureA.tenantScope,
+    project: fixtureA.project,
+    planId: "plan-del-02-shared",
+    blueprint: fixtureA.blueprint,
+    soldScope: fixtureA.soldScope,
+    evidence: fixtureA.evidence,
+    now: "2026-08-19T00:00:00.000Z",
+  });
+  const planB = compilePlan({
+    tenantScope: otherTenantScope,
+    project: otherProject,
+    planId: "plan-del-02-shared",
+    blueprint: fixtureB.blueprint,
+    soldScope: otherSoldScope,
+    now: "2026-08-19T00:00:00.000Z",
+  });
+
+  const specsA = deriveOutcomeJobSpecs(planA);
+  const specsB = deriveOutcomeJobSpecs(planB);
+  assert.ok(specsA.length > 0 && specsB.length > 0);
+
+  const specIdsA = new Set(specsA.map((spec) => spec.specId));
+  const specIdsB = specsB.map((spec) => spec.specId);
+  for (const specId of specIdsB) {
+    assert.equal(specIdsA.has(specId), false, `specId "${specId}" collided across distinct projects`);
   }
 });
 
