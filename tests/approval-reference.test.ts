@@ -131,3 +131,107 @@ test("T10: an approval is invalid against a same-version plan reconstructed with
   };
   assert.equal(isApprovalValidForPlan(approval, tamperedPlan), false);
 });
+
+test("Rev62 AUD-V2-01: an approval is invalid against a payload-identical plan belonging to a different project (same tenant)", () => {
+  const scope = createSoldScope({
+    tenantScope,
+    project,
+    soldScopeId: "scope-1",
+    outcomeContractRef: "contract-1",
+    excludedRequirementIds: ["b"],
+  });
+  const plan = compilePlan({
+    tenantScope,
+    project,
+    planId: "plan-1",
+    blueprint,
+    soldScope: scope,
+    now: "2026-08-18T00:00:00.000Z",
+  });
+  const approval = createApprovalReference({
+    plan,
+    approvalId: "approval-1",
+    approvedAt: "2026-08-18T00:05:00.000Z",
+    approverRef: "owner:founder",
+  });
+
+  const otherProject = createProject({
+    tenantScope,
+    customer,
+    projectId: "proj-2",
+    ownerRef: "owner-1",
+    state: "active",
+  });
+  const otherScope = createSoldScope({
+    tenantScope,
+    project: otherProject,
+    soldScopeId: "scope-1",
+    outcomeContractRef: "contract-1",
+    excludedRequirementIds: ["b"],
+  });
+  const otherProjectPlan = compilePlan({
+    tenantScope,
+    project: otherProject,
+    planId: "plan-1",
+    blueprint,
+    soldScope: otherScope,
+    now: "2026-08-18T00:00:00.000Z",
+  });
+
+  assert.equal(isApprovalValidForPlan(approval, otherProjectPlan), false);
+});
+
+test("Rev62 AUD-V2-01: an approval is invalid against a payload-identical plan belonging to a different tenant", () => {
+  const scope = createSoldScope({
+    tenantScope,
+    project,
+    soldScopeId: "scope-1",
+    outcomeContractRef: "contract-1",
+    excludedRequirementIds: ["b"],
+  });
+  const plan = compilePlan({
+    tenantScope,
+    project,
+    planId: "plan-1",
+    blueprint,
+    soldScope: scope,
+    now: "2026-08-18T00:00:00.000Z",
+  });
+  const approval = createApprovalReference({
+    plan,
+    approvalId: "approval-1",
+    approvedAt: "2026-08-18T00:05:00.000Z",
+    approverRef: "owner:founder",
+  });
+
+  const otherTenantScope = createTenantScope("tenant-b");
+  const otherTenantCustomer = createCustomer({
+    tenantScope: otherTenantScope,
+    customerId: "cust-1",
+    displayName: "Acme",
+  });
+  const otherTenantProject = createProject({
+    tenantScope: otherTenantScope,
+    customer: otherTenantCustomer,
+    projectId: "proj-1",
+    ownerRef: "owner-1",
+    state: "active",
+  });
+  const otherTenantSoldScope = createSoldScope({
+    tenantScope: otherTenantScope,
+    project: otherTenantProject,
+    soldScopeId: "scope-1",
+    outcomeContractRef: "contract-1",
+    excludedRequirementIds: ["b"],
+  });
+  const otherTenantPlan = compilePlan({
+    tenantScope: otherTenantScope,
+    project: otherTenantProject,
+    planId: "plan-1",
+    blueprint,
+    soldScope: otherTenantSoldScope,
+    now: "2026-08-18T00:00:00.000Z",
+  });
+
+  assert.equal(isApprovalValidForPlan(approval, otherTenantPlan), false);
+});

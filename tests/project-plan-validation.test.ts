@@ -136,3 +136,26 @@ test("rejects validating a plan against a blueprint it was not compiled from", (
   });
   assert.throws(() => validatePlan(plan, unrelatedBlueprint), InvalidPlanValidationInputError);
 });
+
+test("Rev62 AUD-DEL-01: rejects validating a plan against a same-id, different-version blueprint", () => {
+  const soldScope = createSoldScope({
+    tenantScope,
+    project,
+    soldScopeId: "scope-1",
+    outcomeContractRef: "contract-1",
+    excludedRequirementIds: ["b"],
+  });
+  const plan = compileWithSoldScope(soldScope);
+  assert.equal(plan.sourceBlueprintId, blueprint.blueprintId);
+  assert.equal(plan.sourceBlueprintVersion, blueprint.version);
+
+  const laterVersionBlueprint = createOfferBlueprintVersion({
+    blueprintId: "bp-1",
+    version: "2.0.0",
+    requirements: [
+      { requirementId: "a", description: "A", necessity: "REQUIRED", dependsOn: [] },
+      { requirementId: "b", description: "B", necessity: "REQUIRED", dependsOn: [] },
+    ],
+  });
+  assert.throws(() => validatePlan(plan, laterVersionBlueprint), InvalidPlanValidationInputError);
+});

@@ -45,6 +45,15 @@ export function validatePlan(
       "plan.sourceBlueprintId does not match the given blueprint",
     );
   }
+  // Rev62 AUD-DEL-01: blueprintId alone does not pin an exact blueprint
+  // artifact - a plan compiled from one version of a blueprint must not
+  // validate against a same-id, different-version blueprint, since that
+  // version's requirement necessity/dependency set can differ.
+  if (plan.sourceBlueprintVersion !== blueprint.version) {
+    throw new InvalidPlanValidationInputError(
+      "plan.sourceBlueprintVersion does not match the given blueprint's version",
+    );
+  }
 
   const nodesByRequirement = new Map(
     plan.nodes.map((node) => [node.requirementId, node]),
