@@ -259,10 +259,35 @@ export type PartnerClientAccessStatus = "AUTHORIZED" | "REVOKED" | "UNAUTHORIZED
  * Fail-closed: a `PartnerEmployeeMembership`'s mere existence is never
  * consulted here - only an `ACTIVE` `PartnerClientAssignment` matching
  * the exact membership id AND the full `ownership` (tenant/customer/
- * project) tuple resolves `AUTHORIZED`. A matching but `REVOKED`
- * assignment resolves `REVOKED` (distinct from `UNAUTHORIZED`, i.e.
- * never granted at all) so a caller can tell "access was removed" from
- * "access never existed" - neither is ever treated as `AUTHORIZED`.
+ * project/serviceRef) tuple resolves `AUTHORIZED`. A matching but
+ * `REVOKED` assignment resolves `REVOKED` (distinct from `UNAUTHORIZED`,
+ * i.e. never granted at all) so a caller can tell "access was removed"
+ * from "access never existed" - neither is ever treated as `AUTHORIZED`.
+ *
+ * Rev62 AUD-V3-01 correction: `revokePartnerClientAssignment` preserves
+ * provenance by returning a *new* value (same `partnerClientAssignmentId`,
+ * status `REVOKED`) rather than mutating the original - so a truthful
+ * immutable history can legitimately contain both the original `ACTIVE`
+ * record and its `REVOKED` successor for the exact same assignment
+ * identity. Resolution is therefore done per assignment identity first:
+ * for any `partnerClientAssignmentId` that appears with a `REVOKED`
+ * status anywhere in the matches, that identity's effective state is
+ * `REVOKED` regardless of array order or an also-present `ACTIVE` record
+ * for the same id - a revocation successor always dominates the prior
+ * grant it revoked. Only a genuinely distinct assignment identity (a new
+ * grant, e.g. a fresh `createPartnerClientAssignment` call - which always
+ * mints a new id) with no `REVOKED` record of its own can resolve
+ * `AUTHORIZED`.
+ *
+ * Rev62 AUD-V3-02 correction: `ProjectOwnershipRef.serviceRef` is part of
+ * ownership identity whenever service context is explicit (§6 "explicit
+ * agency employee -> client/account assignment"), but this resolver
+ * previously matched only tenantId/customerId/projectId. `serviceRef` is
+ * now matched exactly (including the absent-vs-present case, since
+ * `undefined === undefined` is true but `undefined !== "svc-x"`), so an
+ * assignment scoped to Service A can never authorize Service B, and an
+ * assignment with no service scope can never authorize a service-scoped
+ * request or vice versa.
  */
 export function resolvePartnerClientAccess(input: {
   partnerEmployeeMembershipId: PartnerEmployeeMembership["partnerEmployeeMembershipId"];
@@ -274,14 +299,25 @@ export function resolvePartnerClientAccess(input: {
       assignment.partnerEmployeeMembershipId === input.partnerEmployeeMembershipId &&
       assignment.ownership.tenantId === input.ownership.tenantId &&
       assignment.ownership.customerId === input.ownership.customerId &&
-      assignment.ownership.projectId === input.ownership.projectId,
+      assignment.ownership.projectId === input.ownership.projectId &&
+      assignment.ownership.serviceRef === input.ownership.serviceRef,
   );
-  const active = matches.find((assignment) => assignment.status === "ACTIVE");
-  if (active !== undefined) {
+
+  const revokedAssignmentIds = new Set(
+    matches
+      .filter((assignment) => assignment.status === "REVOKED")
+      .map((assignment) => assignment.partnerClientAssignmentId),
+  );
+
+  const hasAuthorized = matches.some(
+    (assignment) =>
+      assignment.status === "ACTIVE" &&
+      !revokedAssignmentIds.has(assignment.partnerClientAssignmentId),
+  );
+  if (hasAuthorized) {
     return "AUTHORIZED";
   }
-  const revoked = matches.find((assignment) => assignment.status === "REVOKED");
-  if (revoked !== undefined) {
+  if (revokedAssignmentIds.size > 0) {
     return "REVOKED";
   }
   return "UNAUTHORIZED";
