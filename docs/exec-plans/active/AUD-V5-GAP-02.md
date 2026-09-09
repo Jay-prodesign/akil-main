@@ -21,10 +21,18 @@ Provide the missing first edge of the V5 Cold-Start First Customer chain: a pure
   - `resolveCanonicalServiceFromOrder(order, catalog)` — pure function. Returns `{ status: "RESOLVED", blueprintId, blueprintVersion, recipeId }` when exactly one catalog entry declares the order's `serviceRef`; returns `{ status: "UNRESOLVED_SERVICE", reason }` (never a fabricated "closest" match) when none does; throws `InvalidCommercialOrderError` when more than one catalog entry declares the same `serviceRef` (ambiguous catalog is a caller/data-integrity defect — same "throw rather than guess" discipline as `resolveCurrentOwner`, V3-OWN-001).
 - `src/fixtures/website-build-v1-commercial-order.ts`: `WEBSITE_BUILD_V1_SERVICE_CATALOG` (one entry, reusing `WEBSITE_BUILD_V1_BLUEPRINT`/`WEBSITE_BUILD_V1_RECIPE` verbatim) + `buildWebsiteBuildV1CommercialOrderFixture()`, a genuine zero-history fixture: only a `TenantScope`, `Customer`, `CommercialOrder`, and its `CanonicalServiceResolution` — no `Project`/`SoldScope`/evidence constructed alongside it, proving this edge does not require or presuppose downstream state.
 
+## Extension: Conditional Intake + compiled-plan Readiness (same branch, same checkpoint)
+
+Continuing the same corridor loop immediately (same "smallest likely next convergence slice" Brain named as one unit — "Commercial Order → Canonical Service/Recipe Resolution → Conditional Intake/Readiness"): closes the second and third named gaps.
+
+- `src/domain/commercial-order-intake.ts` (new): `intakeSoldScopeFromResolution(input)` — the Cold-Start audit's own exact words for this gap: *"Conditional Intake: PARTIAL; sold-scope/evidence/blueprint primitives exist but no order-driven intake compiler."* Fails closed (`InvalidCommercialOrderIntakeError`) unless `resolution.status === "RESOLVED"` and the supplied `blueprint`'s `blueprintId`/`version` exactly match the order's own resolved `blueprintId`/`blueprintVersion` — the missing binding between "what the order resolved to" and "what SoldScope gets built." Delegates entirely to the already-verified `createSoldScope` for everything else; no sold-scope construction logic duplicated.
+- `src/fixtures/website-build-v1-commercial-order.ts` extended with `buildWebsiteBuildV1ColdStartFixture()`: proves the full chain end to end from one zero-history order — order → resolution → intake-compiled `SoldScope` (fail-closed bound to the resolved blueprint) → `compilePlan` → `validatePlan` returning `COMPLETE` ("Brief Completeness / Readiness" — the audit's `PARTIAL end-to-end` finding). Project creation is deliberately direct (not bootstrap-template-driven — `project-bootstrap-template.ts`/V5-BOOT-001 stays a separate, untouched concern) to isolate this chain from bootstrap-template composition, which remains future work.
+- `tests/commercial-order-intake.test.ts` (new): 9 tests — positive intake, field forwarding, `UNRESOLVED_SERVICE` rejection, blueprint-identity mismatch rejection, blueprint-version mismatch rejection, tenant-mismatch delegation, and three fixture-level end-to-end proofs (chain succeeds, plan independently re-validates `COMPLETE`, catalog/blueprint version consistency).
+
 ## Explicitly deferred (not invented)
 
-- **Conditional Intake/Readiness wiring** (the next link in Brain's named chain) is out of scope for this checkpoint. This resolver's `RESOLVED` output (`blueprintId`/`blueprintVersion`/`recipeId`) is a plain value a future checkpoint can feed into `createSoldScope`/`compilePlan`/`evaluateReadiness` — none of that existing, separately-tested machinery is touched, duplicated, or bypassed here.
-- **Project/repository bootstrap from a resolved order** is not wired here either — `project-bootstrap-template.ts` (V5-BOOT-001) remains a separate, already-tested concern; composing them is future work, not fabricated in this checkpoint.
+- **Evidence-based admission readiness** (`evaluateReadiness`/`admitPlan`, which require caller-supplied `CustomerEvidenceItem`s) remains out of scope — this checkpoint proves the compiled plan is structurally `COMPLETE`, not that it is `ADMITTED`. No customer evidence is fabricated to force an admission result.
+- **Project/repository bootstrap from a resolved order** is not wired here — `project-bootstrap-template.ts` (V5-BOOT-001) remains a separate, already-tested concern; composing them is future work, not fabricated in this checkpoint.
 - No real commerce/payment/checkout/order-management system, no numeric/currency field, no discount/commission/payout value — none exists anywhere in this repository (DEC-146/153).
 - No real service/product catalog persistence or lookup service — the catalog is a plain caller-supplied array, matching every other domain module's "no persistence/network/filesystem coupling" pattern.
 
@@ -39,7 +47,7 @@ Provide the missing first edge of the V5 Cold-Start First Customer chain: a pure
 
 ## Hard Non-Scope
 
-No filesystem/network/child_process import (`commercial-order.ts` imports only four sibling domain modules, all type-only). No provider/model hard-coding. No secret/credential material. No execution of the resolved recipe/plan. No merge/deploy/release/production/publication/customer-binding/legal/financial action anywhere in this checkpoint's source.
+No filesystem/network/child_process import anywhere in `commercial-order.ts` or `commercial-order-intake.ts` (sibling domain-module imports only, all type-only except the direct delegation to `createSoldScope`). No provider/model hard-coding. No secret/credential material. No execution of the resolved recipe/plan. No merge/deploy/release/production/publication/customer-binding/legal/financial action anywhere in this checkpoint's source.
 
 ## Test Coverage
 
@@ -64,8 +72,8 @@ All in `tests/commercial-order.test.ts`:
 ## Evidence
 
 - `rm -rf dist && npx tsc -p tsconfig.json`: exit 0, strict mode, zero errors, clean rebuild.
-- `node --test dist/tests/*.test.js`: **718/718 pass** (705 pre-existing on this base + 13 new), 0 fail/cancelled/skipped/todo.
-- `git diff --stat origin/main -- src/ tests/`: exactly 3 new files (`src/domain/commercial-order.ts`, `src/fixtures/website-build-v1-commercial-order.ts`, `tests/commercial-order.test.ts`), 428 insertions, 0 deletions, 0 deletions/modifications to any existing file.
+- `node --test dist/tests/*.test.js`: **727/727 pass** (705 pre-existing on this base + 13 resolution tests + 9 intake tests), 0 fail/cancelled/skipped/todo.
+- `git diff --stat origin/main -- src/ tests/`: exactly 5 new files (`src/domain/commercial-order.ts`, `src/domain/commercial-order-intake.ts`, `src/fixtures/website-build-v1-commercial-order.ts`, `tests/commercial-order.test.ts`, `tests/commercial-order-intake.test.ts`), 0 deletions/modifications to any existing file.
 - `git diff origin/main -- package.json package-lock.json`: empty — zero new dependency introduced.
 
 ## Status
