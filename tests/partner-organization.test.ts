@@ -214,6 +214,133 @@ test("an already-revoked assignment cannot be revoked again", () => {
   );
 });
 
+test("Rev62 AUD-V3-01: an immutable [ACTIVE, REVOKED] history for the same assignment identity resolves REVOKED, never AUTHORIZED", () => {
+  const assignment = createPartnerClientAssignment({
+    partnerClientAssignmentId: "assignment-1",
+    partnerEmployeeMembership: employeeA1,
+    ownership: ownershipClient1,
+    grantedAt: "2026-08-27T00:00:00Z",
+  });
+  const revoked = revokePartnerClientAssignment({ assignment, revokedAt: "2026-08-27T01:00:00Z" });
+  // The original ACTIVE record is never mutated (provenance is preserved),
+  // so a truthful immutable history can legitimately contain both the
+  // original grant and its revocation successor for the same identity.
+  const status = resolvePartnerClientAccess({
+    partnerEmployeeMembershipId: employeeA1.partnerEmployeeMembershipId,
+    assignments: [assignment, revoked],
+    ownership: ownershipClient1,
+  });
+  assert.equal(status, "REVOKED");
+  assert.notEqual(status, "AUTHORIZED");
+});
+
+test("Rev62 AUD-V3-01: history order does not matter - [REVOKED, ACTIVE] for the same identity also resolves REVOKED", () => {
+  const assignment = createPartnerClientAssignment({
+    partnerClientAssignmentId: "assignment-1",
+    partnerEmployeeMembership: employeeA1,
+    ownership: ownershipClient1,
+    grantedAt: "2026-08-27T00:00:00Z",
+  });
+  const revoked = revokePartnerClientAssignment({ assignment, revokedAt: "2026-08-27T01:00:00Z" });
+  const status = resolvePartnerClientAccess({
+    partnerEmployeeMembershipId: employeeA1.partnerEmployeeMembershipId,
+    assignments: [revoked, assignment],
+    ownership: ownershipClient1,
+  });
+  assert.equal(status, "REVOKED");
+  assert.notEqual(status, "AUTHORIZED");
+});
+
+test("Rev62 AUD-V3-01: a genuinely distinct, later assignment (fresh id) for the same employee/client still resolves AUTHORIZED even alongside an earlier revoked one", () => {
+  const firstGrant = createPartnerClientAssignment({
+    partnerClientAssignmentId: "assignment-1",
+    partnerEmployeeMembership: employeeA1,
+    ownership: ownershipClient1,
+    grantedAt: "2026-08-27T00:00:00Z",
+  });
+  const firstRevoked = revokePartnerClientAssignment({
+    assignment: firstGrant,
+    revokedAt: "2026-08-27T01:00:00Z",
+  });
+  const regrant = createPartnerClientAssignment({
+    partnerClientAssignmentId: "assignment-2",
+    partnerEmployeeMembership: employeeA1,
+    ownership: ownershipClient1,
+    grantedAt: "2026-08-27T02:00:00Z",
+  });
+  const status = resolvePartnerClientAccess({
+    partnerEmployeeMembershipId: employeeA1.partnerEmployeeMembershipId,
+    assignments: [firstGrant, firstRevoked, regrant],
+    ownership: ownershipClient1,
+  });
+  assert.equal(status, "AUTHORIZED");
+});
+
+test("Rev62 AUD-V3-02: an assignment scoped to Service A does not authorize a request scoped to Service B", () => {
+  const serviceAOwnership = createProjectOwnershipRef({
+    tenantId: "tenant-a",
+    customerId: "customer-1",
+    projectId: "project-1",
+    serviceRef: "service-a",
+  });
+  const serviceBOwnership = createProjectOwnershipRef({
+    tenantId: "tenant-a",
+    customerId: "customer-1",
+    projectId: "project-1",
+    serviceRef: "service-b",
+  });
+  const assignment = createPartnerClientAssignment({
+    partnerClientAssignmentId: "assignment-service-a",
+    partnerEmployeeMembership: employeeA1,
+    ownership: serviceAOwnership,
+    grantedAt: "2026-08-27T00:00:00Z",
+  });
+  const status = resolvePartnerClientAccess({
+    partnerEmployeeMembershipId: employeeA1.partnerEmployeeMembershipId,
+    assignments: [assignment],
+    ownership: serviceBOwnership,
+  });
+  assert.equal(status, "UNAUTHORIZED");
+});
+
+test("Rev62 AUD-V3-02: a service-scoped assignment does not authorize an absent-serviceRef request, and vice versa", () => {
+  const serviceScopedOwnership = createProjectOwnershipRef({
+    tenantId: "tenant-a",
+    customerId: "customer-1",
+    projectId: "project-1",
+    serviceRef: "service-a",
+  });
+  const serviceScopedAssignment = createPartnerClientAssignment({
+    partnerClientAssignmentId: "assignment-service-scoped",
+    partnerEmployeeMembership: employeeA1,
+    ownership: serviceScopedOwnership,
+    grantedAt: "2026-08-27T00:00:00Z",
+  });
+  assert.equal(
+    resolvePartnerClientAccess({
+      partnerEmployeeMembershipId: employeeA1.partnerEmployeeMembershipId,
+      assignments: [serviceScopedAssignment],
+      ownership: ownershipClient1,
+    }),
+    "UNAUTHORIZED",
+  );
+
+  const unscopedAssignment = createPartnerClientAssignment({
+    partnerClientAssignmentId: "assignment-unscoped",
+    partnerEmployeeMembership: employeeA1,
+    ownership: ownershipClient1,
+    grantedAt: "2026-08-27T00:00:00Z",
+  });
+  assert.equal(
+    resolvePartnerClientAccess({
+      partnerEmployeeMembershipId: employeeA1.partnerEmployeeMembershipId,
+      assignments: [unscopedAssignment],
+      ownership: serviceScopedOwnership,
+    }),
+    "UNAUTHORIZED",
+  );
+});
+
 test("relationshipType (reseller/co-brand/wholesale) is never consulted by resolvePartnerClientAccess - representable, but grants no rights by presence", () => {
   const resellerOrg = createPartnerOrganization({
     partnerOrganizationId: "reseller-org",

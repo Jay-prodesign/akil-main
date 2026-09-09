@@ -18,9 +18,22 @@ type ApprovalId = string & { readonly __brand: "ApprovalId" };
  * were reconstructed with the same id/version but different node
  * content - only a payload-identical reconstruction of the exact
  * approved version would still validate.
+ *
+ * Rev62 AUD-V2-01 correction: `ProjectPlanVersion` is tenant/project-
+ * scoped, but the identity above previously carried only `planId`/
+ * `planVersion`/`payloadHash` - none of which include tenant or project.
+ * A plan is free to reuse the same `planId`/version/content shape across
+ * different tenants or projects (nothing in `project-plan.ts` forbids
+ * it), so an approval genuinely granted for Project A's plan could
+ * validate against a payload-identical Project B plan carrying the same
+ * planId/version. `tenantId`/`projectId` are now bound directly on the
+ * reference (not merely folded into the hash) so validation fails closed
+ * even before comparing content.
  */
 export interface ApprovalReference {
   readonly approvalId: ApprovalId;
+  readonly tenantId: ProjectPlanVersion["tenantId"];
+  readonly projectId: ProjectPlanVersion["projectId"];
   readonly planId: ProjectPlanVersion["planId"];
   readonly planVersion: ProjectPlanVersion["version"];
   readonly payloadHash: string;
@@ -55,6 +68,8 @@ function requireNonEmptyString(value: unknown, field: string): string {
  */
 function hashPlanPayload(plan: ProjectPlanVersion): string {
   const canonical = JSON.stringify({
+    tenantId: plan.tenantId,
+    projectId: plan.projectId,
     planId: plan.planId,
     version: plan.version,
     sourceBlueprintId: plan.sourceBlueprintId,
@@ -82,6 +97,8 @@ export function createApprovalReference(input: {
   const approverRef = requireNonEmptyString(input.approverRef, "approverRef");
   return {
     approvalId: approvalId as ApprovalId,
+    tenantId: input.plan.tenantId,
+    projectId: input.plan.projectId,
     planId: input.plan.planId,
     planVersion: input.plan.version,
     payloadHash: hashPlanPayload(input.plan),
@@ -92,16 +109,20 @@ export function createApprovalReference(input: {
 
 /**
  * T10: an approval is valid for a plan only if it names the exact same
- * planId, version, AND content-hash. A material change (new version, or
- * same version number reconstructed with different content) invalidates
- * it - prior approval never silently carries forward across a materially
- * changed artifact/version.
+ * tenant, project, planId, version, AND content-hash. A material change
+ * (new version, same version number reconstructed with different
+ * content, or - Rev62 AUD-V2-01 - a payload-identical plan belonging to a
+ * different tenant/project) invalidates it - prior approval never
+ * silently carries forward across a materially changed or
+ * cross-tenant/cross-project artifact.
  */
 export function isApprovalValidForPlan(
   approval: ApprovalReference,
   plan: ProjectPlanVersion,
 ): boolean {
   return (
+    approval.tenantId === plan.tenantId &&
+    approval.projectId === plan.projectId &&
     approval.planId === plan.planId &&
     approval.planVersion === plan.version &&
     approval.payloadHash === hashPlanPayload(plan)

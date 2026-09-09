@@ -16,7 +16,7 @@ export class InvalidOutcomeJobWiringError extends Error {
  * DEL-003 second bounded slice #4: projects ADMITTED OutcomeJobSpecs into
  * the existing AKI-BE-001 `OutcomeJob` runtime representation, preserving
  * exact tenant/project/plan/job lineage. `jobId` is deterministically
- * derived from `spec.specId` (itself `${planId}:v${version}:${requirementId}`,
+ * derived from `spec.specId` (itself `${projectId}:${planId}:v${version}:${requirementId}`,
  * see `outcome-job-spec.ts`) rather than freshly generated - this is what
  * makes wiring idempotent (T7/T8): calling this function again for the
  * exact same admitted specs always produces deep-equal `OutcomeJob`
