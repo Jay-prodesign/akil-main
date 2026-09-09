@@ -137,6 +137,60 @@ test("H7: revokePartnerCapabilityClaim transitions an ADMITTED claim to REVOKED"
   assert.equal(revoked.revokedAt, "2026-03-01T00:00:00.000Z");
 });
 
+test("Rev62 hardening: revokePartnerCapabilityClaim rejects a revokedAt that does not parse as a valid timestamp", () => {
+  const claim = createPartnerCapabilityClaim({
+    partnerCapabilityClaimId: "claim-7a",
+    partnerOrganization,
+    capabilityRef: "cap:seo-audit",
+  });
+  const admitted = admitPartnerCapabilityClaim({
+    claim,
+    admittingAuthorityId: "authority-ops-1",
+    evidenceRef: "evidence:x",
+    admittedAt: "2026-01-01T00:00:00.000Z",
+    reviewByAt: "2027-01-01T00:00:00.000Z",
+  });
+  assert.throws(() => {
+    revokePartnerCapabilityClaim({ claim: admitted, revokedAt: "not-a-timestamp" });
+  }, InvalidPartnerCapabilityClaimError);
+});
+
+test("Rev62 hardening: revokePartnerCapabilityClaim rejects a revokedAt strictly before the claim's own admittedAt", () => {
+  const claim = createPartnerCapabilityClaim({
+    partnerCapabilityClaimId: "claim-7b",
+    partnerOrganization,
+    capabilityRef: "cap:seo-audit",
+  });
+  const admitted = admitPartnerCapabilityClaim({
+    claim,
+    admittingAuthorityId: "authority-ops-1",
+    evidenceRef: "evidence:x",
+    admittedAt: "2026-01-01T00:00:00.000Z",
+    reviewByAt: "2027-01-01T00:00:00.000Z",
+  });
+  assert.throws(() => {
+    revokePartnerCapabilityClaim({ claim: admitted, revokedAt: "2025-12-31T00:00:00.000Z" });
+  }, InvalidPartnerCapabilityClaimError);
+});
+
+test("Rev62 hardening: revokePartnerCapabilityClaim accepts a revokedAt exactly equal to admittedAt (immediate revocation is not 'before')", () => {
+  const claim = createPartnerCapabilityClaim({
+    partnerCapabilityClaimId: "claim-7c",
+    partnerOrganization,
+    capabilityRef: "cap:seo-audit",
+  });
+  const admitted = admitPartnerCapabilityClaim({
+    claim,
+    admittingAuthorityId: "authority-ops-1",
+    evidenceRef: "evidence:x",
+    admittedAt: "2026-01-01T00:00:00.000Z",
+    reviewByAt: "2027-01-01T00:00:00.000Z",
+  });
+  const revoked = revokePartnerCapabilityClaim({ claim: admitted, revokedAt: "2026-01-01T00:00:00.000Z" });
+  assert.equal(revoked.status, "REVOKED");
+  assert.equal(revoked.revokedAt, "2026-01-01T00:00:00.000Z");
+});
+
 test("H8: revokePartnerCapabilityClaim rejects revoking a claim that was never admitted (UNVERIFIED)", () => {
   const claim = createPartnerCapabilityClaim({
     partnerCapabilityClaimId: "claim-8",
