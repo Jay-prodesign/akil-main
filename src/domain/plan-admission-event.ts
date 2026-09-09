@@ -1,7 +1,7 @@
 import type { TenantScope } from "./tenant-scope.js";
 import type { Project } from "./project.js";
 import type { ProjectPlanVersion } from "./project-plan.js";
-import type { PlanAdmissionResult } from "./plan-admission.js";
+import { validatePersistedPlanAdmissionResult, type PlanAdmissionResult } from "./plan-admission.js";
 
 export class InvalidPlanAdmissionEventError extends Error {
   constructor(reason: string) {
@@ -93,6 +93,67 @@ export function createEvaluationRecordedEvent(input: {
     result: input.result,
     recordedAt,
   };
+}
+
+/**
+ * AUD-DURABILITY-GAP: re-validates an already-persisted `PlanAdmissionEvent`
+ * line (e.g. read back from `FileDurablePlanAdmissionStore`) against this
+ * union's own shape, rather than trusting a blind `JSON.parse(...) as
+ * PlanAdmissionEvent` cast on replay. Discriminates on `type`, validates
+ * every field with the same non-empty/non-whitespace rule the constructors
+ * enforce, and - for `EVALUATION_RECORDED` - re-validates the nested
+ * `result` via `validatePersistedPlanAdmissionResult`. A corrupted or forged
+ * persisted line fails closed here instead of silently flowing into
+ * `reconstructPlanAdmissionState`.
+ */
+export function parsePersistedPlanAdmissionEvent(raw: unknown): PlanAdmissionEvent {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new InvalidPlanAdmissionEventError("persisted PlanAdmissionEvent must be an object");
+  }
+  const record = raw as Record<string, unknown>;
+  const eventId = requireNonEmptyString(record.eventId, "eventId") as PlanAdmissionEventId;
+  const tenantId = requireNonEmptyString(record.tenantId, "tenantId") as TenantScope["tenantId"];
+  const projectId = requireNonEmptyString(record.projectId, "projectId") as Project["projectId"];
+  const planId = requireNonEmptyString(record.planId, "planId") as ProjectPlanVersion["planId"];
+  if (
+    typeof record.planVersion !== "number" ||
+    !Number.isInteger(record.planVersion) ||
+    record.planVersion < 1
+  ) {
+    throw new InvalidPlanAdmissionEventError("planVersion must be a positive integer");
+  }
+  const planVersion = record.planVersion as ProjectPlanVersion["version"];
+  const recordedAt = requireNonEmptyString(record.recordedAt, "recordedAt");
+
+  if (record.type === "EVALUATION_RECORDED") {
+    const result = validatePersistedPlanAdmissionResult(record.result);
+    return {
+      type: "EVALUATION_RECORDED",
+      eventId,
+      tenantId,
+      projectId,
+      planId,
+      planVersion,
+      result,
+      recordedAt,
+    };
+  }
+  if (record.type === "ANSWER_RECORDED") {
+    const answeredEntity = requireNonEmptyString(record.answeredEntity, "answeredEntity");
+    return {
+      type: "ANSWER_RECORDED",
+      eventId,
+      tenantId,
+      projectId,
+      planId,
+      planVersion,
+      answeredEntity,
+      recordedAt,
+    };
+  }
+  throw new InvalidPlanAdmissionEventError(
+    `type must be one of "EVALUATION_RECORDED", "ANSWER_RECORDED" (got ${JSON.stringify(record.type)})`,
+  );
 }
 
 export function createAnswerRecordedEvent(input: {

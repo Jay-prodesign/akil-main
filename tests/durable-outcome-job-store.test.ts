@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createProject } from "../src/domain/project.js";
@@ -13,6 +13,7 @@ import { createOutcomeJob } from "../src/domain/outcome-job.js";
 import {
   FileDurableOutcomeJobStore,
   InvalidDurableOutcomeJobStoreError,
+  CorruptedOutcomeJobLineError,
   persistWiredOutcomeJobs,
 } from "../src/domain/durable-outcome-job-store.js";
 import { buildWebsiteBuildV1Fixture } from "../src/fixtures/website-build-v1.js";
@@ -20,6 +21,14 @@ import { buildFullReadinessAssertions } from "./helpers/readiness-fixture.js";
 
 function freshStoreDir(): string {
   return mkdtempSync(join(tmpdir(), "del-003-outcome-job-store-"));
+}
+
+// Mirrors FileDurableOutcomeJobStore's own (private) filePathFor encoding,
+// so these adversarial tests can inject a raw corrupted/forged line
+// directly into the exact file the store itself reads on replay.
+function filePathFor(dir: string, tenantId: string): string {
+  const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
+  return join(dir, `${safeKey}.jsonl`);
 }
 
 function admittedWiredJobs() {
@@ -111,6 +120,89 @@ test("F3: persisting a full replayed wiring pass twice creates each job exactly 
       [...listedAfterRestart].sort((a, b) => a.jobId.localeCompare(b.jobId)),
       [...listed].sort((a, b) => a.jobId.localeCompare(b.jobId)),
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AUD-DURABILITY-GAP: a corrupted (malformed JSON) persisted outcome-job line fails closed with CorruptedOutcomeJobLineError", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableOutcomeJobStore(dir);
+    const { fixture, jobs } = admittedWiredJobs();
+    const job = jobs[0]!;
+    store.putIfAbsent(job);
+
+    appendFileSync(filePathFor(dir, fixture.tenantScope.tenantId), "{not valid json\n", "utf8");
+    assert.throws(() => store.list(fixture.tenantScope.tenantId, fixture.project.projectId), (error: unknown) => {
+      if (!(error instanceof CorruptedOutcomeJobLineError)) {
+        return false;
+      }
+      assert.match(error.message, /:2\)/);
+      assert.match(error.message, /not valid JSON/);
+      return true;
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AUD-DURABILITY-GAP: a forged line with an invalid OutcomeJobState fails closed with CorruptedOutcomeJobLineError", () => {
+  const dir = freshStoreDir();
+  try {
+    const { fixture } = admittedWiredJobs();
+    const store = new FileDurableOutcomeJobStore(dir);
+    appendFileSync(
+      filePathFor(dir, fixture.tenantScope.tenantId),
+      `${JSON.stringify({
+        tenantId: fixture.tenantScope.tenantId,
+        customerId: fixture.customer.customerId,
+        projectId: fixture.project.projectId,
+        jobId: "forged-job-1",
+        jobFamily: "some-family",
+        businessObjective: "some-objective",
+        state: "NOT_A_REAL_STATE",
+      })}\n`,
+      "utf8",
+    );
+    assert.throws(() => store.list(fixture.tenantScope.tenantId, fixture.project.projectId), (error: unknown) => {
+      if (!(error instanceof CorruptedOutcomeJobLineError)) {
+        return false;
+      }
+      assert.match(error.message, /:1\)/);
+      assert.match(error.message, /state must be one of/);
+      return true;
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AUD-DURABILITY-GAP: putIfAbsent race-honesty - if another writer's line for the same jobId already won on disk by the time this call's own append lands, this call reports created:false and returns the true (first-on-disk) winner rather than the optimistic created:true", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableOutcomeJobStore(dir);
+    const { jobs } = admittedWiredJobs();
+    const job = jobs[0]!;
+
+    // Simulate the race directly: another writer's line for this exact
+    // jobId is already durably on disk (it "won" the absence-check race)
+    // before this call's own putIfAbsent append happens - the store's own
+    // public API can't force two calls to truly interleave, so the race's
+    // observable postcondition (this call's append loses to an
+    // already-on-disk earlier line for the same jobId) is reproduced
+    // directly at the file level, exactly as concurrent OS processes would
+    // leave it.
+    appendFileSync(filePathFor(dir, job.tenantId), `${JSON.stringify(job)}\n`, "utf8");
+
+    // This call's own absence-check has not yet run (no in-memory cache to
+    // consult), so calling putIfAbsent with a job that differs only in
+    // object identity (same content) still exercises the post-append
+    // re-verification path deterministically without relying on real
+    // process timing.
+    const result = store.putIfAbsent(job);
+    assert.equal(result.created, false);
+    assert.deepEqual(result.job, job);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -1,12 +1,19 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, appendFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { TenantScope } from "./tenant-scope.js";
-import type { OutcomeJob } from "./outcome-job.js";
+import { validatePersistedOutcomeJob, type OutcomeJob } from "./outcome-job.js";
 
 export class InvalidDurableOutcomeJobStoreError extends Error {
   constructor(reason: string) {
     super(`Invalid DurableOutcomeJobStore operation: ${reason}`);
     this.name = "InvalidDurableOutcomeJobStoreError";
+  }
+}
+
+export class CorruptedOutcomeJobLineError extends Error {
+  constructor(filePath: string, lineNumber: number, reason: string) {
+    super(`Corrupted durable outcome job line (${filePath}:${lineNumber}): ${reason}`);
+    this.name = "CorruptedOutcomeJobLineError";
   }
 }
 
@@ -53,16 +60,40 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
     return join(this.baseDir, `${safeKey}.jsonl`);
   }
 
+  /**
+   * AUD-DURABILITY-GAP: replay no longer trusts `JSON.parse(line) as
+   * OutcomeJob` - each line is re-run through `validatePersistedOutcomeJob`
+   * and fails closed (throws) rather than silently flowing a
+   * malformed/forged record into `dedupedByJobId`/callers.
+   */
   private readAll(tenantId: TenantScope["tenantId"]): OutcomeJob[] {
     const filePath = this.filePathFor(tenantId);
     if (!existsSync(filePath)) {
       return [];
     }
     const content = readFileSync(filePath, "utf8");
-    return content
-      .split("\n")
-      .filter((line) => line.trim().length > 0)
-      .map((line) => JSON.parse(line) as OutcomeJob);
+    const lines = content.split("\n").filter((line) => line.trim().length > 0);
+    return lines.map((line, index) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch (cause) {
+        throw new CorruptedOutcomeJobLineError(
+          filePath,
+          index + 1,
+          `line is not valid JSON (${(cause as Error).message})`,
+        );
+      }
+      try {
+        return validatePersistedOutcomeJob(parsed);
+      } catch (cause) {
+        throw new CorruptedOutcomeJobLineError(
+          filePath,
+          index + 1,
+          `line failed OutcomeJob validation (${(cause as Error).message})`,
+        );
+      }
+    });
   }
 
   private dedupedByJobId(jobs: ReadonlyArray<OutcomeJob>): Map<OutcomeJob["jobId"], OutcomeJob> {
@@ -77,6 +108,22 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
     return byJobId;
   }
 
+  /**
+   * AUD-DURABILITY-GAP: the write itself is a single atomic `appendFileSync`
+   * call, not a read-modify-write cycle (see `FileDurableEngineeringStore`
+   * for the identical lost-update race this replaces). That alone is not
+   * sufficient here, though: `putIfAbsent` also has a TOCTOU
+   * (time-of-check-to-time-of-use) race distinct from the write mechanism -
+   * the absence-check above and this call's own append are not atomic with
+   * each other, so a concurrent writer can append a line for the same
+   * jobId in between. `dedupedByJobId`'s "first line in the file wins" rule
+   * makes on-disk append order the single source of truth for who actually
+   * won, so after appending we re-derive the winner from disk and compare
+   * it to what we just wrote: if another writer's line landed first, this
+   * call honestly reports `created: false` and returns the true winner
+   * instead of the optimistic `created: true` it would otherwise have
+   * returned for a duplicate-jobId append it lost.
+   */
   putIfAbsent(job: OutcomeJob): PersistJobResult {
     const existing = this.get(job.tenantId, job.jobId);
     if (existing !== undefined) {
@@ -89,11 +136,20 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
     }
     const filePath = this.filePathFor(job.tenantId);
     const line = `${JSON.stringify(job)}\n`;
-    if (existsSync(filePath)) {
-      const existingContent = readFileSync(filePath, "utf8");
-      writeFileSync(filePath, existingContent + line, "utf8");
-    } else {
-      writeFileSync(filePath, line, "utf8");
+    appendFileSync(filePath, line, "utf8");
+    const winner = this.get(job.tenantId, job.jobId);
+    if (winner === undefined) {
+      throw new InvalidDurableOutcomeJobStoreError(
+        `internal error: jobId "${job.jobId}" missing immediately after append`,
+      );
+    }
+    if (JSON.stringify(winner) !== JSON.stringify(job)) {
+      if (winner.tenantId !== job.tenantId || winner.projectId !== job.projectId) {
+        throw new InvalidDurableOutcomeJobStoreError(
+          `jobId "${job.jobId}" is already persisted under a different tenant/project`,
+        );
+      }
+      return { job: winner, created: false };
     }
     return { job, created: true };
   }

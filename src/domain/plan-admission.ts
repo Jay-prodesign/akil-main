@@ -45,6 +45,78 @@ export interface PlanAdmissionResult {
   readonly evaluatedApprovalId?: ApprovalReference["approvalId"];
 }
 
+const ADMISSION_STATUSES: ReadonlySet<string> = new Set<AdmissionStatus>([
+  "ADMITTED",
+  "BLOCKED",
+  "WAITING",
+]);
+
+function requireNonEmptyStringField(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new InvalidPlanAdmissionError(`${field} must be a non-empty string`);
+  }
+  return value;
+}
+
+/**
+ * AUD-DURABILITY-GAP: re-validates an already-persisted `PlanAdmissionResult`
+ * (e.g. read back from the durable plan-admission store) against this
+ * type's own shape, rather than trusting a blind `JSON.parse(...) as
+ * PlanAdmissionResult` cast on replay. `admitPlan` itself has no "reconstruct
+ * from raw JSON" mode (it recomputes a fresh result from live plan/blueprint
+ * inputs), so this is the ingress-validation counterpart for durable replay:
+ * a corrupted or forged persisted record fails closed here instead of
+ * silently flowing into the plan-admission reducer.
+ */
+export function validatePersistedPlanAdmissionResult(raw: unknown): PlanAdmissionResult {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new InvalidPlanAdmissionError("persisted PlanAdmissionResult must be an object");
+  }
+  const record = raw as Record<string, unknown>;
+  const tenantId = requireNonEmptyStringField(record.tenantId, "tenantId");
+  const projectId = requireNonEmptyStringField(record.projectId, "projectId");
+  const planId = requireNonEmptyStringField(record.planId, "planId");
+  if (typeof record.planVersion !== "number" || !Number.isInteger(record.planVersion) || record.planVersion < 1) {
+    throw new InvalidPlanAdmissionError("planVersion must be a positive integer");
+  }
+  if (typeof record.status !== "string" || !ADMISSION_STATUSES.has(record.status)) {
+    throw new InvalidPlanAdmissionError('status must be one of "ADMITTED", "BLOCKED", "WAITING"');
+  }
+  if (!Array.isArray(record.blockedReasons)) {
+    throw new InvalidPlanAdmissionError("blockedReasons must be an array");
+  }
+  const blockedReasons = record.blockedReasons.map((reason, index) =>
+    requireNonEmptyStringField(reason, `blockedReasons[${index}]`),
+  );
+  let awaiting: AdmissionAwaiting | undefined;
+  if (record.awaiting !== undefined) {
+    if (typeof record.awaiting !== "object" || record.awaiting === null) {
+      throw new InvalidPlanAdmissionError("awaiting must be an object when present");
+    }
+    const awaitingRecord = record.awaiting as Record<string, unknown>;
+    awaiting = {
+      entity: requireNonEmptyStringField(awaitingRecord.entity, "awaiting.entity"),
+      reason: requireNonEmptyStringField(awaitingRecord.reason, "awaiting.reason"),
+    };
+  }
+  const evaluatedApprovalId =
+    record.evaluatedApprovalId !== undefined
+      ? requireNonEmptyStringField(record.evaluatedApprovalId, "evaluatedApprovalId")
+      : undefined;
+  return {
+    tenantId: tenantId as PlanAdmissionResult["tenantId"],
+    projectId: projectId as PlanAdmissionResult["projectId"],
+    planId: planId as PlanAdmissionResult["planId"],
+    planVersion: record.planVersion as PlanAdmissionResult["planVersion"],
+    status: record.status as AdmissionStatus,
+    blockedReasons,
+    ...(awaiting !== undefined ? { awaiting } : {}),
+    ...(evaluatedApprovalId !== undefined
+      ? { evaluatedApprovalId: evaluatedApprovalId as ApprovalReference["approvalId"] }
+      : {}),
+  };
+}
+
 function planIdentity(
   plan: ProjectPlanVersion,
 ): Pick<PlanAdmissionResult, "tenantId" | "projectId" | "planId" | "planVersion"> {

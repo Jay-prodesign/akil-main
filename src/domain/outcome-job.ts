@@ -69,6 +69,58 @@ function requireNonEmptyString(value: unknown, field: string): string {
   return value;
 }
 
+const OUTCOME_JOB_STATES: ReadonlySet<string> = new Set<OutcomeJobState>([
+  "DRAFT",
+  "QUALIFIED",
+  "READY",
+  "EXECUTING",
+  "VERIFYING",
+  "VERIFIED",
+  "CLOSED",
+  "BLOCKED",
+  "RECOVERING",
+  "ESCALATED",
+  "STOPPED",
+]);
+
+/**
+ * AUD-DURABILITY-GAP: re-validates an already-persisted `OutcomeJob` (e.g.
+ * read back from `FileDurableOutcomeJobStore`) against this type's own
+ * shape, rather than trusting a blind `JSON.parse(...) as OutcomeJob` cast
+ * on replay. Deliberately not a reuse of `createOutcomeJob`: that
+ * constructor only ever produces a fresh DRAFT job from live
+ * tenant/customer/project inputs and cannot reconstruct a job already
+ * advanced to any other lifecycle state, so this validator independently
+ * checks all seven persisted fields, including that `state` is one of the
+ * eleven known `OutcomeJobState` literals.
+ */
+export function validatePersistedOutcomeJob(raw: unknown): OutcomeJob {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new InvalidOutcomeJobError("persisted OutcomeJob must be an object");
+  }
+  const record = raw as Record<string, unknown>;
+  const tenantId = requireNonEmptyString(record.tenantId, "tenantId");
+  const customerId = requireNonEmptyString(record.customerId, "customerId");
+  const projectId = requireNonEmptyString(record.projectId, "projectId");
+  const jobId = requireNonEmptyString(record.jobId, "jobId");
+  const jobFamily = requireNonEmptyString(record.jobFamily, "jobFamily");
+  const businessObjective = requireNonEmptyString(record.businessObjective, "businessObjective");
+  if (typeof record.state !== "string" || !OUTCOME_JOB_STATES.has(record.state)) {
+    throw new InvalidOutcomeJobError(
+      `state must be one of ${[...OUTCOME_JOB_STATES].join(", ")}`,
+    );
+  }
+  return {
+    tenantId: tenantId as OutcomeJob["tenantId"],
+    customerId: customerId as OutcomeJob["customerId"],
+    projectId: projectId as OutcomeJob["projectId"],
+    jobId: jobId as JobId,
+    jobFamily,
+    businessObjective,
+    state: record.state as OutcomeJobState,
+  };
+}
+
 export function createOutcomeJob(input: {
   tenantScope: TenantScope;
   customer: Customer;
