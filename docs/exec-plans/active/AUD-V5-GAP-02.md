@@ -29,9 +29,18 @@ Continuing the same corridor loop immediately (same "smallest likely next conver
 - `src/fixtures/website-build-v1-commercial-order.ts` extended with `buildWebsiteBuildV1ColdStartFixture()`: proves the full chain end to end from one zero-history order — order → resolution → intake-compiled `SoldScope` (fail-closed bound to the resolved blueprint) → `compilePlan` → `validatePlan` returning `COMPLETE` ("Brief Completeness / Readiness" — the audit's `PARTIAL end-to-end` finding). Project creation is deliberately direct (not bootstrap-template-driven — `project-bootstrap-template.ts`/V5-BOOT-001 stays a separate, untouched concern) to isolate this chain from bootstrap-template composition, which remains future work.
 - `tests/commercial-order-intake.test.ts` (new): 9 tests — positive intake, field forwarding, `UNRESOLVED_SERVICE` rejection, blueprint-identity mismatch rejection, blueprint-version mismatch rejection, tenant-mismatch delegation, and three fixture-level end-to-end proofs (chain succeeds, plan independently re-validates `COMPLETE`, catalog/blueprint version consistency).
 
+## Extension 2: Required Approval → ADMITTED plan → wired DRAFT OutcomeJobs (same branch, same checkpoint)
+
+Continuing the same loop again immediately (per the corridor's own rule that a pending Brain review does not justify idling while another safe path exists): closes the audit's *"Required Approval: PRESENT primitive / PARTIAL end-to-end"* finding, and begins (without completing) *"Delivery Closure."*
+
+- `tests/commercial-order-cold-start-admission.test.ts` (new): composes only existing, separately-tested primitives — `createApprovalReference`, `buildFullReadinessAssertions` (the existing test helper already used by `tests/outcome-job-wiring.test.ts`'s own T1), `admitPlan`, `deriveOutcomeJobSpecs`, `admitJobs`, `wireAdmittedOutcomeJobs` — on top of the same zero-history `buildWebsiteBuildV1ColdStartFixture()`'s `plan`. Proves: given a valid `ApprovalReference` bound to the exact compiled plan and full readiness evidence for every `REQUIRED` node, the plan admits `ADMITTED`, every derived job admits `ADMITTED`, and `wireAdmittedOutcomeJobs` produces one `DRAFT` `OutcomeJob` per spec, correctly tenant/project/customer-scoped. A second test proves the negative: with no approval supplied, the same chain stays `WAITING` and wires zero jobs.
+- No new production source file — this extension is proof-by-composition only, using primitives already shipped and tested elsewhere in the corridor (`plan-admission.ts`, `outcome-job-spec.ts`, `outcome-job-wiring.ts`, `approval-reference.ts`). Nothing about their behavior is changed.
+- Deliberately stops at `DRAFT` `OutcomeJob`s: actual execution, worker routing invocation, QA/evidence capture, and handover/verification ("Delivery Closure" proper) all require real worker/effect capability this repository does not have — same restraint already applied to V4 Workstreams C-H. This is **not** claimed as closing "Delivery Closure"; only as proving the chain reaches a genuinely admitted, job-wired state from a zero-history order.
+
 ## Explicitly deferred (not invented)
 
-- **Evidence-based admission readiness** (`evaluateReadiness`/`admitPlan`, which require caller-supplied `CustomerEvidenceItem`s) remains out of scope — this checkpoint proves the compiled plan is structurally `COMPLETE`, not that it is `ADMITTED`. No customer evidence is fabricated to force an admission result.
+- **Evidence-based admission readiness** is now proven reachable (Extension 2 above) — but the readiness evidence itself remains caller-supplied test fixture data, not a real customer-evidence-capture system. No customer evidence is fabricated as if it came from a real customer interaction.
+- **Actual job execution / worker routing invocation / QA-evidence capture / handover / verification** ("Delivery Closure" proper, and "Authorized Execution") remain out of scope — no real provider/effect/worker capability exists in this repository (same restraint as V4 Workstreams C-H). Jobs are proven to reach `DRAFT`, never further.
 - **Project/repository bootstrap from a resolved order** is not wired here — `project-bootstrap-template.ts` (V5-BOOT-001) remains a separate, already-tested concern; composing them is future work, not fabricated in this checkpoint.
 - No real commerce/payment/checkout/order-management system, no numeric/currency field, no discount/commission/payout value — none exists anywhere in this repository (DEC-146/153).
 - No real service/product catalog persistence or lookup service — the catalog is a plain caller-supplied array, matching every other domain module's "no persistence/network/filesystem coupling" pattern.
@@ -72,8 +81,8 @@ All in `tests/commercial-order.test.ts`:
 ## Evidence
 
 - `rm -rf dist && npx tsc -p tsconfig.json`: exit 0, strict mode, zero errors, clean rebuild.
-- `node --test dist/tests/*.test.js`: **727/727 pass** (705 pre-existing on this base + 13 resolution tests + 9 intake tests), 0 fail/cancelled/skipped/todo.
-- `git diff --stat origin/main -- src/ tests/`: exactly 5 new files (`src/domain/commercial-order.ts`, `src/domain/commercial-order-intake.ts`, `src/fixtures/website-build-v1-commercial-order.ts`, `tests/commercial-order.test.ts`, `tests/commercial-order-intake.test.ts`), 0 deletions/modifications to any existing file.
+- `node --test dist/tests/*.test.js`: **729/729 pass** (705 pre-existing on this base + 13 resolution tests + 9 intake tests + 2 admission-chain tests), 0 fail/cancelled/skipped/todo.
+- `git diff --stat origin/main -- src/ tests/`: exactly 6 new files (`src/domain/commercial-order.ts`, `src/domain/commercial-order-intake.ts`, `src/fixtures/website-build-v1-commercial-order.ts`, `tests/commercial-order.test.ts`, `tests/commercial-order-intake.test.ts`, `tests/commercial-order-cold-start-admission.test.ts`), 825 insertions, 0 deletions/modifications to any existing file.
 - `git diff origin/main -- package.json package-lock.json`: empty — zero new dependency introduced.
 
 ## Status
