@@ -339,3 +339,61 @@ test("A32 (Rev52 F1): reviewer selection also enforces required tool/policy/auth
   );
   assert.equal(decision.status, "REJECTED");
 });
+
+test("A33 (Rev60 F1): a candidate with a malformed/unknown runtime authorityLevel cannot be selected for a STANDARD-authority route", () => {
+  const malformed = worker({
+    workerId: "malformed-authority",
+    // @ts-expect-error deliberately invalid runtime value for the test - simulates untyped/external input bypassing the compile-time union
+    authorityLevel: "SUPREME",
+  });
+  const decision = resolveWorkerRoute(
+    request({ requiredAuthorityLevel: "STANDARD", executorCandidates: [malformed] }),
+  );
+  assert.equal(decision.status, "REJECTED");
+});
+
+test("A34 (Rev60 F1): a candidate with a malformed/unknown runtime authorityLevel cannot be selected for an ELEVATED-authority route", () => {
+  const malformed = worker({
+    workerId: "malformed-authority",
+    // @ts-expect-error deliberately invalid runtime value for the test - simulates untyped/external input bypassing the compile-time union
+    authorityLevel: "SUPREME",
+  });
+  const decision = resolveWorkerRoute(
+    request({ requiredAuthorityLevel: "ELEVATED", executorCandidates: [malformed] }),
+  );
+  assert.equal(decision.status, "REJECTED");
+});
+
+test("A35 (Rev60 F1): a malformed-authority fallback is skipped, and routing still succeeds on a later, fully eligible worker - fallback never weakens the authority requirement", () => {
+  const malformedFallback = worker({
+    workerId: "malformed-fallback",
+    // @ts-expect-error deliberately invalid runtime value for the test
+    authorityLevel: "SUPREME",
+  });
+  const fullyEligible = worker({ workerId: "fully-eligible", authorityLevel: "ELEVATED" });
+  const decision = resolveWorkerRoute(
+    request({
+      requiredAuthorityLevel: "ELEVATED",
+      executorCandidates: [malformedFallback, fullyEligible],
+    }),
+  );
+  assert.equal(decision.status, "ROUTED");
+  assert.equal(decision.executorWorkerId, "fully-eligible");
+});
+
+test("A36 (Rev60 F1): a malformed-authority reviewer candidate cannot be selected as an independent reviewer", () => {
+  const executor = worker({ workerId: "executor" });
+  const malformedReviewer = worker({
+    workerId: "malformed-reviewer",
+    // @ts-expect-error deliberately invalid runtime value for the test
+    authorityLevel: "SUPREME",
+  });
+  const decision = resolveWorkerRoute(
+    request({
+      requiresIndependentReview: true,
+      executorCandidates: [executor],
+      reviewerCandidates: [malformedReviewer],
+    }),
+  );
+  assert.equal(decision.status, "REJECTED");
+});
