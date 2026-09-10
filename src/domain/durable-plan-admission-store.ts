@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, appendFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { TenantScope } from "./tenant-scope.js";
 import type { Project } from "./project.js";
@@ -7,6 +7,7 @@ import type { PlanAdmissionResult } from "./plan-admission.js";
 import {
   createAnswerRecordedEvent,
   createEvaluationRecordedEvent,
+  parsePersistedPlanAdmissionEvent,
   type PlanAdmissionEvent,
 } from "./plan-admission-event.js";
 import {
@@ -18,6 +19,13 @@ export class InvalidPlanAdmissionAnswerError extends Error {
   constructor(reason: string) {
     super(`Invalid plan admission answer: ${reason}`);
     this.name = "InvalidPlanAdmissionAnswerError";
+  }
+}
+
+export class CorruptedPlanAdmissionEventLineError extends Error {
+  constructor(filePath: string, lineNumber: number, reason: string) {
+    super(`Corrupted durable plan admission event line (${filePath}:${lineNumber}): ${reason}`);
+    this.name = "CorruptedPlanAdmissionEventLineError";
   }
 }
 
@@ -75,17 +83,25 @@ export class FileDurablePlanAdmissionStore implements DurablePlanAdmissionStore 
     return join(this.baseDir, `${safeKey}.jsonl`);
   }
 
+  /**
+   * AUD-DURABILITY-GAP: appends via a single OS-level `appendFileSync` call
+   * (`O_APPEND`) rather than a read-full-file-then-rewrite-full-file cycle -
+   * see `FileDurableEngineeringStore.appendEvent` for the identical
+   * lost-update race this replaces.
+   */
   appendEvent(event: PlanAdmissionEvent): void {
     const filePath = this.filePathFor(event.tenantId, event.projectId, event.planId);
     const line = `${JSON.stringify(event)}\n`;
-    if (existsSync(filePath)) {
-      const existing = readFileSync(filePath, "utf8");
-      writeFileSync(filePath, existing + line, "utf8");
-    } else {
-      writeFileSync(filePath, line, "utf8");
-    }
+    appendFileSync(filePath, line, "utf8");
   }
 
+  /**
+   * AUD-DURABILITY-GAP: replay no longer trusts `JSON.parse(line) as
+   * PlanAdmissionEvent` - each line is re-run through
+   * `parsePersistedPlanAdmissionEvent`'s own ingress validation and fails
+   * closed (throws) rather than silently flowing a malformed/forged record
+   * into `reconstructPlanAdmissionState`.
+   */
   getEvents(
     tenantId: TenantScope["tenantId"],
     projectId: Project["projectId"],
@@ -96,10 +112,28 @@ export class FileDurablePlanAdmissionStore implements DurablePlanAdmissionStore 
       return [];
     }
     const content = readFileSync(filePath, "utf8");
-    return content
-      .split("\n")
-      .filter((line) => line.trim().length > 0)
-      .map((line) => JSON.parse(line) as PlanAdmissionEvent);
+    const lines = content.split("\n").filter((line) => line.trim().length > 0);
+    return lines.map((line, index) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch (cause) {
+        throw new CorruptedPlanAdmissionEventLineError(
+          filePath,
+          index + 1,
+          `line is not valid JSON (${(cause as Error).message})`,
+        );
+      }
+      try {
+        return parsePersistedPlanAdmissionEvent(parsed);
+      } catch (cause) {
+        throw new CorruptedPlanAdmissionEventLineError(
+          filePath,
+          index + 1,
+          `line failed event validation (${(cause as Error).message})`,
+        );
+      }
+    });
   }
 
   getState(
