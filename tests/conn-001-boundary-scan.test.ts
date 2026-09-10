@@ -7,7 +7,10 @@ import { fileURLToPath } from "node:url";
 // This file lives at <repo-root>/tests/conn-001-boundary-scan.test.ts.
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-const CONN_001_FILES = ["src/domain/integration-connector-catalog.ts"];
+const CONN_001_FILES = [
+  "src/domain/integration-connector-catalog.ts",
+  "src/domain/durable-connector-connection-store.ts",
+];
 
 /**
  * Unlike `V2-CDO-004`'s boundary scan, this task's own spec explicitly

@@ -79,6 +79,26 @@ Fix: `reconnectConnectorConnection` now fail-closed rejects whenever the reconne
 - Zero new npm dependency. Same import surface as slice 1 (no new imports needed for this fix).
 - No filesystem/network/child_process/HTTP coupling; pure functions only.
 
+## Slice 2: persistence interface (durable connector-connection store)
+
+Per Rev93's own next-action instruction, after the F1 correction above, the corridor continues automatically into CONN-001's next progressive-elaboration step: "persistence/secret-ref boundary." New module: `src/domain/durable-connector-connection-store.ts`.
+
+- `DurableConnectorConnectionStore`: `save(instance, expectedVersion?)`, `get(tenantId, connectionBindingId)`, `list(tenantId)`.
+- Unlike `durable-outcome-job-store.ts`'s `putIfAbsent`-only, never-mutated record (an `OutcomeJob` is written once and never changes), a `ConnectorConnectionInstance`'s whole point is to change state over its lifecycle - so this store supports genuine updates, gated by **optimistic concurrency** rather than blind overwrite. Contract (reusing this session's own artifact-database `if_version` idiom): no record + no `expectedVersion` -> create at version 1; no record + `expectedVersion` supplied -> fail-closed conflict; a record exists + `expectedVersion` matches -> update, version+1; a record exists + `expectedVersion` missing/stale -> fail-closed conflict (`ConnectorConnectionVersionConflictError`). This prevents a lost update between two concurrent lifecycle operations on the same binding (e.g. a health-check-driven `DEGRADED` transition racing a `rotateConnectorSecret` call).
+- `FileDurableConnectorConnectionStore`: reference/local implementation using only `node:fs`/`node:path` (zero new runtime dependency), one JSON file per tenant keyed by `connectionBindingId`, mirroring `FileDurableOutcomeJobStore`/`FileDurablePlanAdmissionStore`'s existing "read the full file, no separate in-memory index that could diverge" discipline. Cross-tenant isolation is structural, not a runtime check: a connection can only ever be looked up under the exact tenant file its own `binding.ownership.tenantId` was saved under.
+- The persisted record includes the instance's `secretRef` field verbatim - but that field, per `connection-authority.ts`'s own `SecretRef` contract, structurally can never hold anything but an opaque reference id (a single branded string), never real secret material. Persisting the full instance therefore never persists a real credential - the masked/write-only secret-handling contract holds transitively through this store without any extra redaction logic needed.
+- Admin read-model surface, generic/prebuilt adapters, and the OpenAPI import accelerator remain deferred to later slices, per Rev90's own progressive-elaboration sequencing.
+
+### Test coverage (slice 2)
+
+`tests/durable-connector-connection-store.test.ts`, 7 tests (M1-M7): create-at-version-1, fail-closed rejection of an `expectedVersion` on a not-yet-existing record, correct-version update incrementing by exactly 1, **adversarial lost-update prevention** (a missing or stale `expectedVersion` against an existing record is rejected and the stored record is provably untouched), unknown-id/cross-tenant `get()` isolation, cross-tenant `list()` isolation, and restart-safety (a fresh store instance over the same directory reconstructs the identical record, version included).
+
+### Evidence (slice 2)
+
+- Build: `npm run test` -> clean `tsc` build (strict, `exactOptionalPropertyTypes: true`), full regression **742/742 pass** (708 true pre-existing + 34 new: 22 K-tests + 7 M-tests + 5 boundary-scan tests, the boundary-scan file list now also covering the new store module).
+- Zero new npm dependency (`node:fs`/`node:path` only, matching every other durable store in this repository).
+- No network/child_process/HTTP coupling.
+
 ## Status
 
-**IMPLEMENTED / SELF-VALIDATED (Rev93-corrected)** (slice 1 of CONN-001). Pending Brain independent exact-head re-review. `MERGE_DISPOSITION: HOLD_MERGE` (no `MAIN` mutation). Per Rev93's own explicit next-action instruction, after this correction is pushed the corridor continues automatically into CONN-001 slice 2 and, at the first dependency-safe integration point, the Rev91/92/93 SALE-TO-CLOSE E2E acceptance floor (P0 adversarial tests only - duplicate/replay/crash convergence, tenant isolation, revoked/wrong connection fail-closed, temporary provider recovery, cancellation/refund/chargeback governed disposition, verification-gated CLOSED), without a further Brain dispatch.
+**IMPLEMENTED / SELF-VALIDATED (slice 2 added)** (slices 1-2 of CONN-001). Pending Brain independent exact-head re-review. `MERGE_DISPOSITION: HOLD_MERGE` (no `MAIN` mutation). Next dependency-safe steps per Rev90/93's own sequencing: admin read-model surface, then generic/prebuilt adapters, then the Rev91/92/93 SALE-TO-CLOSE E2E acceptance floor (P0 adversarial tests only - duplicate/replay/crash convergence, tenant isolation, revoked/wrong connection fail-closed, temporary provider recovery, cancellation/refund/chargeback governed disposition, verification-gated CLOSED), without a further Brain dispatch.
