@@ -45,17 +45,26 @@ New pure domain module: `src/domain/governed-evaluation-loop.ts`.
 - Automatic evidence collection/evaluation/diagnosis (the loop's first three steps) — this floor accepts caller-supplied `evalEvidenceRef`/`evalVersionRef` only, matching this repository's existing "declared, not yet producible" discipline (e.g. `V5-LAB-001`'s caller-supplied observations, `V5-INT-001`'s caller-supplied insights).
 - Any wiring of this loop's outcomes into a real routing-policy/prompt/reusable-capability mutation — `changeRef` remains an opaque, uninterpreted pointer; this module does not itself apply the change it governs.
 
+## Rev90 correction (Brain CHANGES_REQUIRED — BOUNDED, exact head `a5ad616534afc78a7cff15fbdea1024b894f5ba1`)
+
+Brain's exact-head review found (F1): the module mapped §13's rule "change to protected policy/scope requires proper decision authority" onto `reviewProposal`'s self-review prevention alone. An independent reviewer identity proves the review was not self-certified — it does not prove the *adopting* caller holds actual authority over a protected policy/scope change. As written, `adoptChange` could adopt a `MATERIAL` proposal after review + rollback with no protected-decision-authority check at all.
+
+Fix: `adoptChange` now takes an optional `authority?: AuthorityContext` field and, for a `MATERIAL` proposal, requires it to be supplied with `canPerformProtectedActions === true` — reusing this repository's existing `src/domain/authority.ts` protected-action contract (`AuthorityContext`/`requireProtectedActionAuthorization`) rather than fabricating a new identity/authorization concept. If no `AuthorityContext` is supplied at all, adoption fails closed (`InvalidGovernedChangeProposalError`); if one is supplied but `canPerformProtectedActions` is not `true`, adoption fails closed via the existing `ProtectedActionNotAuthorizedError`. This check is structurally separate from, and additional to, `reviewProposal`'s self-review prevention — a `MATERIAL` proposal now needs both a distinct reviewer *and* a caller with genuine protected-action authority; neither substitutes for the other. `SAFE` proposals are unaffected and still require no `AuthorityContext`. Three new adversarial tests added: I18 (no `AuthorityContext` supplied → rejected), I19 (`AuthorityContext` supplied but `canPerformProtectedActions: false` → rejected), I20 (`SAFE` adoption requires no `AuthorityContext` at all); I14 and I17 updated to supply a granted `AuthorityContext`.
+
+## Also corrected in this round: test-count evidence integrity (self-identified)
+
+Same session-wide defect already disclosed and fixed on `V5-LAB-001` (see that exec-plan for the full root-cause writeup): stale compiled test files from sibling branches accumulated in the gitignored `dist/` directory across this session's repeated branch checkouts and were executed alongside each branch's real tests, inflating every regression-count claim. This repository's true `main` baseline (at `3226c76fa338e425e553638e5f5f48924182a1c0`) is **708**, not the 750/767 previously reported below. `package.json`'s `build` script now runs `clean` (`rm -rf dist`) first on this branch too, eliminating this class of error going forward. The tests genuinely passed with zero failures in both cases — this was a miscounted-by-stale-artifacts defect, not a hidden regression.
+
 ## Test coverage
 
-`tests/governed-evaluation-loop.test.ts`, 17 tests (I1–I17): construction validation, per-status transition guards, regression/safety-gated adoption (both positive and negative), self-review prevention, MATERIAL-vs-SAFE rollback-plan requirement, rejection from every non-terminal status, terminal-state immutability, and evidence/version provenance preservation across the full lifecycle.
+`tests/governed-evaluation-loop.test.ts`, 20 tests (I1–I20): construction validation, per-status transition guards, regression/safety-gated adoption (both positive and negative), self-review prevention, MATERIAL-vs-SAFE rollback-plan requirement, protected-decision-authority enforcement for MATERIAL adoption (both missing-authority and insufficient-authority negative cases, plus a granted-authority positive case), rejection from every non-terminal status, terminal-state immutability, and evidence/version provenance preservation across the full lifecycle.
 
-## Evidence
+## Evidence (Rev90 correction)
 
-- Branch: `claude/v5-eval-001-governed-evaluation-loop`, cut fresh from `main` at `3226c76fa338e425e553638e5f5f48924182a1c0`.
-- Build: `npm run test` → clean `tsc` build (strict, `exactOptionalPropertyTypes: true`), full regression **767/767 pass** (750 pre-existing + 17 new).
-- Zero new dependency. Zero imports (fully self-contained, unlike `V5-LAB-001`'s one type-only `TenantScope` import — this floor does not need tenant isolation since it governs process/policy proposals, not customer-scoped data).
+- Build: `npm run test` (now self-cleaning) → clean `tsc` build (strict, `exactOptionalPropertyTypes: true`), full regression **728/728 pass** (708 true pre-existing + 20: I1–I20).
+- One new import: `AuthorityContext`/`requireProtectedActionAuthorization`/`ProtectedActionNotAuthorizedError` from the existing `src/domain/authority.ts` (no new dependency — reuse of an already-existing repository module).
 - No filesystem/network/child_process coupling; pure functions only.
 
 ## Status
 
-**IMPLEMENTED / SELF-VALIDATED.** Not yet reviewed by Brain. `MERGE_DISPOSITION: HOLD_MERGE` (no `MAIN` mutation per the Rev89 authorization's own explicit prohibition list).
+**IMPLEMENTED / SELF-VALIDATED (Rev90-corrected).** Pending Brain independent exact-head re-review. `MERGE_DISPOSITION: HOLD_MERGE` (no `MAIN` mutation per the Rev89 authorization's own explicit prohibition list).

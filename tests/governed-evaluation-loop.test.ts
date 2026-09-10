@@ -10,6 +10,12 @@ import {
   InvalidGovernedChangeProposalError,
   type GovernedChangeProposal,
 } from "../src/domain/governed-evaluation-loop.js";
+import {
+  createAuthorityContext,
+  ProtectedActionNotAuthorizedError,
+  type AuthorityContext,
+} from "../src/domain/authority.js";
+import { createTenantScope } from "../src/domain/tenant-scope.js";
 
 function freshProposal(): GovernedChangeProposal {
   return proposeChange({
@@ -18,6 +24,14 @@ function freshProposal(): GovernedChangeProposal {
     proposedByWorkerId: "claude",
     evalEvidenceRef: "evidence:eval-run-42",
     evalVersionRef: "eval-suite-v3",
+  });
+}
+
+function authorityWith(canPerformProtectedActions: boolean): AuthorityContext {
+  return createAuthorityContext({
+    tenantScope: createTenantScope("tenant-akilta"),
+    permissions: ["READ", "WRITE", "EXECUTE"],
+    canPerformProtectedActions,
   });
 }
 
@@ -178,7 +192,7 @@ test("I13: adoptChange rejects a MATERIAL, REVIEWED proposal with no rollbackPla
   assert.throws(() => adoptChange({ proposal: reviewed }), InvalidGovernedChangeProposalError);
 });
 
-test("I14: adoptChange succeeds for a MATERIAL, REVIEWED, clean-tested proposal with a rollback plan", () => {
+test("I14: adoptChange succeeds for a MATERIAL, REVIEWED, clean-tested proposal with a rollback plan and granted protected-action authority", () => {
   const classified = classifyChangeImpact({ proposal: freshProposal(), impactClassification: "MATERIAL" });
   const tested = recordBoundedEnvironmentTest({
     proposal: classified,
@@ -186,10 +200,58 @@ test("I14: adoptChange succeeds for a MATERIAL, REVIEWED, clean-tested proposal 
     safetyRegression: false,
   });
   const reviewed = reviewProposal({ proposal: tested, reviewedByWorkerId: "codex" });
-  const adopted = adoptChange({ proposal: reviewed, rollbackPlanRef: "rollback:revert-to-v2" });
+  const adopted = adoptChange({
+    proposal: reviewed,
+    rollbackPlanRef: "rollback:revert-to-v2",
+    authority: authorityWith(true),
+  });
   assert.equal(adopted.status, "ADOPTED");
   assert.equal(adopted.rollbackPlanRef, "rollback:revert-to-v2");
   assert.equal(adopted.reviewedByWorkerId, "codex");
+});
+
+test("I18: adoptChange fail-closed rejects a MATERIAL, REVIEWED proposal with no AuthorityContext supplied at all", () => {
+  const classified = classifyChangeImpact({ proposal: freshProposal(), impactClassification: "MATERIAL" });
+  const tested = recordBoundedEnvironmentTest({
+    proposal: classified,
+    regressionOnCriticalBoundary: false,
+    safetyRegression: false,
+  });
+  const reviewed = reviewProposal({ proposal: tested, reviewedByWorkerId: "codex" });
+  assert.throws(
+    () => adoptChange({ proposal: reviewed, rollbackPlanRef: "rollback:revert-to-v2" }),
+    InvalidGovernedChangeProposalError,
+  );
+});
+
+test("I19: adoptChange fail-closed rejects a MATERIAL, REVIEWED proposal whose supplied AuthorityContext lacks canPerformProtectedActions - independent review alone is not decision authority", () => {
+  const classified = classifyChangeImpact({ proposal: freshProposal(), impactClassification: "MATERIAL" });
+  const tested = recordBoundedEnvironmentTest({
+    proposal: classified,
+    regressionOnCriticalBoundary: false,
+    safetyRegression: false,
+  });
+  const reviewed = reviewProposal({ proposal: tested, reviewedByWorkerId: "codex" });
+  assert.throws(
+    () =>
+      adoptChange({
+        proposal: reviewed,
+        rollbackPlanRef: "rollback:revert-to-v2",
+        authority: authorityWith(false),
+      }),
+    ProtectedActionNotAuthorizedError,
+  );
+});
+
+test("I20: a SAFE proposal's adoption does not require any AuthorityContext at all", () => {
+  const classified = classifyChangeImpact({ proposal: freshProposal(), impactClassification: "SAFE" });
+  const tested = recordBoundedEnvironmentTest({
+    proposal: classified,
+    regressionOnCriticalBoundary: false,
+    safetyRegression: false,
+  });
+  const adopted = adoptChange({ proposal: tested });
+  assert.equal(adopted.status, "ADOPTED");
 });
 
 test("I15: rejectChange works from PROPOSED, CLASSIFIED, TESTED, and REVIEWED, and refuses an empty rejectionReason", () => {
@@ -233,7 +295,11 @@ test("I17: evalEvidenceRef/evalVersionRef are preserved verbatim through every l
     safetyRegression: false,
   });
   const reviewed = reviewProposal({ proposal: tested, reviewedByWorkerId: "codex" });
-  const adopted = adoptChange({ proposal: reviewed, rollbackPlanRef: "rollback:revert-to-v2" });
+  const adopted = adoptChange({
+    proposal: reviewed,
+    rollbackPlanRef: "rollback:revert-to-v2",
+    authority: authorityWith(true),
+  });
   for (const stage of [classified, tested, reviewed, adopted]) {
     assert.equal(stage.evalEvidenceRef, "evidence:eval-run-42");
     assert.equal(stage.evalVersionRef, "eval-suite-v3");

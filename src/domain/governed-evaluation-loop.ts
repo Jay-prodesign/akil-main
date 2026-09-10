@@ -1,3 +1,6 @@
+import type { AuthorityContext } from "./authority.js";
+import { requireProtectedActionAuthorization } from "./authority.js";
+
 export class InvalidGovernedChangeProposalError extends Error {
   constructor(reason: string) {
     super(`Invalid GovernedChangeProposal: ${reason}`);
@@ -203,10 +206,25 @@ export function reviewProposal(input: {
  * - "rollback path exists for material routing/prompt/process change" - a
  *   `MATERIAL` proposal requires a non-empty `rollbackPlanRef`; a `SAFE`
  *   proposal does not require one.
+ *
+ * `reviewProposal`'s independent-reviewer check and this function's
+ * protected-decision-authority check are deliberately two separate gates:
+ * a distinct reviewer identity proves the review was not self-certified,
+ * it does not prove the *adopting* caller actually holds authority over a
+ * protected policy/scope change. For a `MATERIAL` proposal, adoption
+ * additionally requires a caller-supplied `AuthorityContext` with
+ * `canPerformProtectedActions === true` (reusing this repository's
+ * existing protected-action authority contract from `./authority.js`,
+ * per the same T9 rule applied elsewhere: "a protected action cannot be
+ * silently treated as an ordinary low-risk write/execute"). No identity is
+ * fabricated here - if the caller supplies no `AuthorityContext` at all,
+ * adoption fails closed rather than inferring authority from the reviewer
+ * being a different worker.
  */
 export function adoptChange(input: {
   proposal: GovernedChangeProposal;
   rollbackPlanRef?: unknown;
+  authority?: AuthorityContext;
 }): GovernedChangeProposal {
   const proposal = input.proposal;
   if (proposal.regressionOnCriticalBoundary === true) {
@@ -225,6 +243,12 @@ export function adoptChange(input: {
         `a MATERIAL proposal requires independent review before adoption (current status: ${proposal.status})`,
       );
     }
+    if (input.authority === undefined) {
+      throw new InvalidGovernedChangeProposalError(
+        "a MATERIAL proposal cannot be adopted without a supplied AuthorityContext - independent review alone is not protected-decision authority (fail-closed)",
+      );
+    }
+    requireProtectedActionAuthorization(input.authority, "adoptChange:MATERIAL");
     const rollbackPlanRef = requireNonEmptyString(input.rollbackPlanRef, "rollbackPlanRef");
     return { ...proposal, status: "ADOPTED", rollbackPlanRef };
   }
