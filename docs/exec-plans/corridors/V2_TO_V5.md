@@ -211,6 +211,15 @@ Version names are capability/release checkpoints, not engineering permission sto
 - `MERGE_DISPOSITION: HOLD_MERGE` — normal task-scoped PR against `main`; Status: `IMPLEMENTED / SELF-VALIDATED`, pending Brain independent exact-head review; Claude's authority ends here per `AGENTS.md` §10.
 - `DOWNSTREAM`: independent of `V5-LAB-001`/`V5-EVAL-001`/`V5-CMD-001` and PR #30/#32/#33/#34 (disjoint files); may be reviewed/merged in any order. Per Rev90's own instruction, the next dependency-safe elaboration step (persistence interface and/or admin-UI scaffolding) continues without a further Brain dispatch.
 
+### Rev93 correction on `CONN-001` slice 1 (exact head `b525f6f7f1d2da08041f142e3896337963a60e55`)
+
+- Brain's exact-head review returned bounded `CHANGES_REQUIRED` (F1): `reconnectConnectorConnection` checked `REVOKED` status, matching requirement/ownership, and a genuinely new binding id, but never checked that the reconnect `connectorDescriptor.connectorKind` matched `previousInstance.connectorKind` - two descriptors sharing a declared capability could let a revoked provider-A connection be silently "reconnected" as provider-B.
+- Fixed: fail-closed rejection on connector-identity mismatch, checked before any other reconnect work. One new adversarial test (K22).
+- In the same revision, Brain also independently PASSed PR #37's `V5-CMD-001` fix (head `391b964d0fdb56540d7e39cde19317c4b2ea608f`) - Rev90/92's F1 finding is confirmed resolved there; no further action.
+- Corrected full regression: **735/735 pass** (708 true pre-existing + 27: 22 K-tests + 5 boundary-scan), strict typecheck clean, zero new dependency.
+- Status: **IMPLEMENTED / SELF-VALIDATED (Rev93-corrected)**, pending Brain independent exact-head re-review. `MERGE_DISPOSITION: HOLD_MERGE` unchanged.
+- `ENGINEERING NEXT ACTION` per Rev93: push this correction, then continue automatically through the CONN-001 progressive sequence (slice 2) and, at the first dependency-safe integration point, implement the Rev91/92/93 SALE-TO-CLOSE E2E acceptance floor (P0 adversarial tests only), without a further Brain dispatch.
+
 ## Claude's role inside the corridor (condensed — see Drive packet §5/§6/§12 for full text)
 
 Claude is the delegated Engineering Brain + Primary Engineer inside the corridor: fresh-read and reconcile live repo truth before mutating; reuse existing patterns; choose the next dependency-safe work unit from the corridor-admitted graph (not roadmap prose at large); make reversible technical/architecture-within-envelope decisions; implement/test/self-review/fix/evidence/update state; continue across task and version boundaries when entry predicates are satisfied — without a routine per-task Brain/Founder start ceremony. Claude must not self-expand product scope, cross a material architecture envelope silently, or use implementation convenience to bypass a protected gate. Brain retains company/product strategy, canonical scope/version authority, material architecture-envelope decisions outside the delegated bounds, protected-gate classification, and independent/final verification.

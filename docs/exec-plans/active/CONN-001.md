@@ -62,13 +62,23 @@ New pure domain module: `src/domain/integration-connector-catalog.ts`.
 
 `tests/conn-001-boundary-scan.test.ts`, 5 tests: no secret material or commerce-platform coupling; no real OAuth/HTTP-client runtime dependency; exactly one runtime (value) import from `connection-authority.ts`, reusing its existing exported functions only; no new `package.json` dependency; no re-declaration of any of `connection-authority.ts`'s own exported symbols (confirming it is reused, not duplicated or forked).
 
-## Evidence
+## Rev93 correction (Brain CHANGES_REQUIRED — BOUNDED, exact head `b525f6f7f1d2da08041f142e3896337963a60e55`)
+
+Brain's exact-head review found (F1): `reconnectConnectorConnection` verified `previousInstance` was `REVOKED`, matched the same requirement id and ownership, and used a new binding id - but never checked `previousInstance.connectorKind === connectorDescriptor.connectorKind`. Two descriptors declaring the same `requiredCapabilityRef` could therefore let a revoked provider-A connection be silently "reconnected" as provider-B, weakening provider lineage and making reconnect semantics non-deterministic.
+
+Fix: `reconnectConnectorConnection` now fail-closed rejects whenever the reconnect `connectorDescriptor`'s `connectorKind` differs from `previousInstance.connectorKind`, before any other work happens. Genuine provider switching, if ever needed, remains a separate, explicit rebinding/new-connection operation - never hidden inside reconnect. One new adversarial test, K22: two connector descriptors (`GITHUB`, `GOOGLE_DRIVE`) deliberately declaring the identical capability ref prove a cross-connector "reconnect" is rejected, while a same-connector reconnect still succeeds.
+
+## Test coverage (Rev93-corrected)
+
+`tests/integration-connector-catalog.test.ts`, 22 tests (K1-K22, adding K22's cross-connector reconnect rejection to the K1-K21 set described above).
+
+## Evidence (Rev93 correction)
 
 - Branch: `claude/conn-001-integration-control-plane`, cut fresh from `main` at `3226c76fa338e425e553638e5f5f48924182a1c0`.
-- Build: `npm run test` (self-cleaning `dist/` build, per this session's own established tooling fix) -> clean `tsc` build (strict, `exactOptionalPropertyTypes: true`), full regression **734/734 pass** (708 true pre-existing + 26 new: 21 K-tests + 5 boundary-scan tests).
-- Zero new npm dependency. Exactly one runtime import (`connection-authority.ts`'s existing `createConnectionBinding`/`transitionConnectionBinding`/`verifyConnectionBinding`) plus two type-only imports (`RequirementId` from `offer-blueprint.ts`; `ConnectionRequirement`/`ConnectionBinding`/`ConnectionState`/`SecretRef` from `connection-authority.ts`).
+- Build: `npm run test` (self-cleaning `dist/` build) -> clean `tsc` build (strict, `exactOptionalPropertyTypes: true`), full regression **735/735 pass** (708 true pre-existing + 27 new: 22 K-tests + 5 boundary-scan tests).
+- Zero new npm dependency. Same import surface as slice 1 (no new imports needed for this fix).
 - No filesystem/network/child_process/HTTP coupling; pure functions only.
 
 ## Status
 
-**IMPLEMENTED / SELF-VALIDATED** (slice 1 of CONN-001). Not yet reviewed by Brain. `MERGE_DISPOSITION: HOLD_MERGE` (no `MAIN` mutation). Per Rev90's own "progressively elaborate... avoid speculative provider breadth" instruction, the next dependency-safe elaboration step is the persistence interface (a durable connector-instance store mirroring `durable-outcome-job-store.ts`'s pattern) and/or the admin-UI scaffolding, continuing without a further Brain dispatch per Rev90's explicit sequencing.
+**IMPLEMENTED / SELF-VALIDATED (Rev93-corrected)** (slice 1 of CONN-001). Pending Brain independent exact-head re-review. `MERGE_DISPOSITION: HOLD_MERGE` (no `MAIN` mutation). Per Rev93's own explicit next-action instruction, after this correction is pushed the corridor continues automatically into CONN-001 slice 2 and, at the first dependency-safe integration point, the Rev91/92/93 SALE-TO-CLOSE E2E acceptance floor (P0 adversarial tests only - duplicate/replay/crash convergence, tenant isolation, revoked/wrong connection fail-closed, temporary provider recovery, cancellation/refund/chargeback governed disposition, verification-gated CLOSED), without a further Brain dispatch.

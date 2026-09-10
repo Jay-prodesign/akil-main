@@ -344,6 +344,17 @@ export interface ConnectorHealthCheckRecord {
  * transition table structurally has no edge out of `REVOKED` at all, so
  * reconnecting can only ever mean constructing a brand-new binding, never
  * reviving the old one.
+ *
+ * Rev93 correction: "reconnect" must preserve the same connector identity
+ * as the connection it replaces - `reconnectConnectorConnection` fail-
+ * closed rejects a `connectorDescriptor` whose `connectorKind` differs
+ * from `previousInstance.connectorKind`, even when both connectors declare
+ * the same capability. Without this check, a revoked GitHub connection
+ * (say) could be silently "reconnected" as an OpenAI connection sharing
+ * the same `requiredCapabilityRef`, making reconnect semantics non-
+ * deterministic and weakening provider lineage. Genuine provider
+ * switching, if ever needed, must be a separate, explicit rebinding/new-
+ * connection operation - never hidden inside `reconnectConnectorConnection`.
  */
 export interface ConnectorReconnection {
   readonly instance: ConnectorConnectionInstance;
@@ -537,6 +548,11 @@ export function reconnectConnectorConnection(input: {
   if (previousBinding.connectionRequirementId !== input.requirement.connectionRequirementId) {
     throw new InvalidConnectorConnectionError(
       "previousInstance was not bound to the given requirement - cannot reconnect against a different requirement",
+    );
+  }
+  if (input.previousInstance.connectorKind !== input.connectorDescriptor.connectorKind) {
+    throw new InvalidConnectorConnectionError(
+      `reconnection must preserve the same connector identity - previousInstance is ${input.previousInstance.connectorKind}, connectorDescriptor is ${input.connectorDescriptor.connectorKind}; provider switching requires a separate, explicit rebinding operation`,
     );
   }
   if (

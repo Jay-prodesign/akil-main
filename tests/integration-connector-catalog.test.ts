@@ -65,6 +65,20 @@ function genericApiDescriptor(): ConnectorDescriptor {
   });
 }
 
+function googleDriveDescriptorSharingGithubCapability(): ConnectorDescriptor {
+  // Rev93 F1: a different connector kind that (contrivedly, for the test)
+  // declares the *same* capabilityRef as GitHub, to prove reconnect cannot
+  // be used to silently swap the underlying provider identity.
+  return createConnectorDescriptor({
+    connectorKind: "GOOGLE_DRIVE",
+    displayName: "Google Drive",
+    supportedAuthModes: ["OAUTH2"],
+    capabilityRefs: ["cap:repo-access"],
+    isAiModelProvider: false,
+    requiresOAuthRedirect: true,
+  });
+}
+
 function genericOAuthDescriptor(): ConnectorDescriptor {
   return createConnectorDescriptor({
     connectorKind: "GENERIC_CUSTOM_OAUTH",
@@ -604,4 +618,54 @@ test("K21 (multi-instance isolation): two ConnectorConnectionInstances for the s
   assert.equal(instanceB.binding.connectionState, "REQUESTED");
   assert.equal(instanceB.binding.secretRef, "secret-b");
   assert.notEqual(instanceA.binding.ownership.tenantId, instanceB.binding.ownership.tenantId);
+});
+
+test("K22 (Rev93 F1, adversarial): reconnectConnectorConnection fail-closed rejects a connectorDescriptor whose connectorKind differs from the previous instance's own connectorKind, even when both declare the same capability - reconnect can never silently swap the underlying provider", () => {
+  const githubDesc = githubDescriptor();
+  const driveDescSharingCapability = googleDriveDescriptorSharingGithubCapability();
+  assert.deepEqual(githubDesc.capabilityRefs, driveDescSharingCapability.capabilityRefs);
+
+  const requirement = requirementFor(githubDesc, ownership());
+  let instance = requestConnectorConnection({
+    requirement,
+    connectorDescriptor: githubDesc,
+    connectionBindingId: "bind-1",
+    workspaceRef: "workspace-1",
+    integrationInstanceRef: "instance-1",
+    delegatedScope: [],
+    authMode: "OAUTH2",
+  });
+  instance = transitionConnectorConnection(instance, "CONNECTED_UNVERIFIED");
+  const revoked = transitionConnectorConnection(instance, "REVOKED");
+
+  // attempting to "reconnect" under a different connector kind is rejected outright
+  assert.throws(
+    () =>
+      reconnectConnectorConnection({
+        requirement,
+        connectorDescriptor: driveDescSharingCapability,
+        previousInstance: revoked,
+        ownershipContext: ownership(),
+        connectionBindingId: "bind-2",
+        workspaceRef: "workspace-1",
+        integrationInstanceRef: "instance-1",
+        delegatedScope: [],
+        authMode: "OAUTH2",
+      }),
+    InvalidConnectorConnectionError,
+  );
+
+  // reconnecting with the SAME connector kind still succeeds
+  const reconnection = reconnectConnectorConnection({
+    requirement,
+    connectorDescriptor: githubDesc,
+    previousInstance: revoked,
+    ownershipContext: ownership(),
+    connectionBindingId: "bind-2",
+    workspaceRef: "workspace-1",
+    integrationInstanceRef: "instance-1",
+    delegatedScope: [],
+    authMode: "OAUTH2",
+  });
+  assert.equal(reconnection.instance.connectorKind, "GITHUB");
 });
