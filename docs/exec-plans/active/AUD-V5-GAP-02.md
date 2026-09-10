@@ -87,4 +87,32 @@ All in `tests/commercial-order.test.ts`:
 
 ## Status
 
-**IMPLEMENTED / SELF-VALIDATED** — pending Brain independent exact-head review. Not yet `VERIFIED`/`PASS`/`CLOSED`; Claude's authority ends at this status per `AGENTS.md` §10. `MERGE_DISPOSITION: HOLD_MERGE` — normal task-scoped PR against `main`; merge requires a separately granted protected owner-gate, never inferred from any prior PR's grant.
+**SUPERSEDED by the Rev74 correction below.** Original submission (exact head `d2cd161e6c41bfed884fdd9feb894383ebd49271`) was `IMPLEMENTED / SELF-VALIDATED`, pending Brain independent exact-head review.
+
+## Rev74 correction (Brain CHANGES_REQUIRED, exact head `d2cd161e6c41bfed884fdd9feb894383ebd49271`)
+
+Brain independently reviewed the exact head above and returned `CHANGES_REQUIRED` on the Commercial Order → Canonical Service Resolution slice:
+
+- **F1 BLOCKING** (verbatim): *"resolveCanonicalServiceFromOrder accepts caller-supplied ServiceCatalogEntry[] without admission/provenance/authority binding. A caller can fabricate serviceRef → blueprint/version/recipe and obtain RESOLVED. This is deterministic caller-supplied lookup, not canonical resolution."*
+- **Acceptance** (verbatim): *"bind resolution to an existing admitted/trusted repository-native catalog authority/provenance boundary and add a forged/unadmitted mapping negative test; OR narrow the claim honestly to deterministic caller-supplied lookup and leave the canonical-resolution audit gap OPEN. Do not create a second catalog/orchestration system."*
+
+**Which acceptance path, and why**: a repository-wide search was run before choosing (`grep -rl` for `OfferBlueprintVersion`/`DeliveryRecipe` usage, and separately for any `ServiceCatalog`/catalog-admission naming anywhere in `src/`). No admitted/trusted catalog authority or provenance primitive exists anywhere in this codebase. The closest candidates — `OfferBlueprintVersion` (`src/domain/offer-blueprint.ts`) and `DeliveryRecipe` (`src/domain/delivery-recipe.ts`) — are validated-*construction* domain objects (their factory functions reject dangling/inconsistent references at creation time) with no admission, review, or trust-provenance concept layered on top; there is nothing resembling `partner-capability-admission.ts`'s `admitPartnerCapabilityClaim` for service catalog entries. Building one here to satisfy the "bind to an admitted/trusted boundary" path would itself be the "second catalog/orchestration system" the acceptance explicitly forbids. The honest-narrowing path was therefore selected.
+
+**Fix**: `commercial-order.ts`'s doc comments on `ServiceCatalogEntry`, `CanonicalServiceResolution`, and `resolveCanonicalServiceFromOrder` were rewritten to state plainly that `RESOLVED` proves only that the caller's own catalog declares exactly one entry for the order's `serviceRef` — it is **not** proof of canonical/trusted resolution, since nothing checks the entry against any admitted source. The real canonical-resolution audit gap (binding catalog entries to a trusted, repository-native provenance boundary) is recorded as **explicitly OPEN**, not silently closed. A new test in `tests/commercial-order.test.ts` ("Rev74 F1 (honest boundary disclosure)") demonstrates the disclosed boundary directly: a caller-fabricated catalog entry (a `serviceRef` never admitted anywhere, paired with arbitrary forged `blueprintId`/`blueprintVersion`/`recipeId` strings) resolves `RESOLVED` exactly as a real entry would — proving the limitation is real and documented by a passing test, not just prose.
+
+No production behavior changed (the resolver's logic was already exactly what the doc comments now honestly describe) — this is a claim-boundary correction, not a behavior fix, consistent with Brain's own "narrow the claim" acceptance option.
+
+### New exact head
+
+New head (this branch, `claude/v5-cold-start-commercial-order-resolution`, post-merge-with-`main` + F1 doc/test correction): see `git log -1` at time of push. Base is now `main` at `3226c76fa338e425e553638e5f5f48924182a1c0` (post-PR#31-merge), reachable via the merge commit's second parent.
+
+## Evidence (Rev74 correction)
+
+- `rm -rf dist && npx tsc -p tsconfig.json`: exit 0, strict mode, zero errors, clean rebuild.
+- `node --test dist/tests/*.test.js`: **733/733 pass** (708 pre-existing on the new `main` base + 24 pre-existing AUD-V5-GAP-02 tests + 1 new disclosure test), 0 fail/cancelled/skipped/todo.
+- `git diff --stat origin/main -- src/ tests/` (against the new `main`, post-PR#31-merge): 6 files touched (all new, unchanged file list from the original submission), 890 insertions, 0 deletions.
+- `git diff origin/main -- package.json package-lock.json`: empty — zero new dependency introduced.
+
+## Status
+
+**IMPLEMENTED / SELF-VALIDATED** — pending Brain independent exact-head review of the new head. Not yet `VERIFIED`/`PASS`/`CLOSED`; Claude's authority ends at this status per `AGENTS.md` §10. `MERGE_DISPOSITION: HOLD_MERGE` — normal task-scoped PR against `main`; merge requires a separately granted protected owner-gate, never inferred from any prior PR's grant.

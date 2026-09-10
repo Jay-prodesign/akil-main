@@ -41,6 +41,23 @@ export interface CommercialOrder {
  * none - just the minimum reusable pointer a resolver needs, reusing the
  * existing blueprintId/version/recipeId identifiers verbatim rather than
  * inventing a parallel "product" concept.
+ *
+ * Rev74 F1 claim-boundary correction (Brain CHANGES_REQUIRED): this catalog
+ * carries no admission, provenance, or authority binding of its own - it is
+ * whatever `ReadonlyArray<ServiceCatalogEntry>` the caller passes to
+ * `resolveCanonicalServiceFromOrder`. Nothing in this module verifies that
+ * a given entry was ever admitted through a trusted, repository-native
+ * boundary; a caller can construct an arbitrary entry (any `serviceRef`
+ * paired with any `blueprintId`/`blueprintVersion`/`recipeId`) and it
+ * resolves identically to one that reflects a real, admitted service
+ * offering. A repository-wide search found no existing admitted/trusted
+ * catalog authority/provenance primitive to bind this to (the closest
+ * candidates, `OfferBlueprintVersion`/`DeliveryRecipe`, are validated
+ * *construction* domain objects, not an admission/provenance system), and
+ * building one here would be exactly the "second catalog/orchestration
+ * system" Brain's own acceptance forbids. This module therefore does not
+ * claim canonical/trusted resolution - see `resolveCanonicalServiceFromOrder`
+ * below for the precise, honest scope.
  */
 export interface ServiceCatalogEntry {
   readonly serviceRef: string;
@@ -52,8 +69,10 @@ export interface ServiceCatalogEntry {
 /**
  * `UNRESOLVED_SERVICE` is a first-class, honest disposition - never a
  * thrown error and never a fabricated "closest match" - for the ordinary
- * case where a customer's requested `serviceRef` has no admitted catalog
- * entry yet.
+ * case where a customer's requested `serviceRef` has no matching catalog
+ * entry yet. Neither disposition is proof that the matched entry (if any)
+ * came from an admitted, trusted source - see the Rev74 correction note on
+ * `ServiceCatalogEntry` and `resolveCanonicalServiceFromOrder`.
  */
 export type CanonicalServiceResolution =
   | {
@@ -110,7 +129,7 @@ export function createCommercialOrder(input: {
 }
 
 /**
- * Pure, deterministic resolution of a CommercialOrder's opaque `serviceRef`
+ * Deterministic, pure lookup of a CommercialOrder's opaque `serviceRef`
  * against a caller-supplied catalog (Rev62 AUD-V5-GAP-02, "Commercial
  * Order -> Canonical Service Resolution"). Fails closed - never guesses a
  * "closest" match:
@@ -119,6 +138,21 @@ export function createCommercialOrder(input: {
  *   error (ambiguous catalog is a caller/data-integrity defect, not a
  *   normal runtime disposition - same "throw rather than guess" discipline
  *   already used by `resolveCurrentOwner`, V3-OWN-001).
+ *
+ * Rev74 F1 claim-boundary correction (Brain CHANGES_REQUIRED): despite this
+ * function's name, `RESOLVED` is **not** proof of canonical/trusted
+ * resolution - it only proves the caller's own catalog contains exactly one
+ * entry for the order's `serviceRef`. There is no admission, provenance, or
+ * authority check anywhere in this call: a caller-fabricated catalog entry
+ * (a `serviceRef` paired with an arbitrary `blueprintId`/`blueprintVersion`/
+ * `recipeId` that was never admitted anywhere) resolves exactly as a real,
+ * admitted one would. This is honestly scoped as **deterministic
+ * caller-supplied lookup only**. Closing the real canonical-resolution
+ * audit gap - binding catalog entries to an admitted/trusted
+ * repository-native provenance boundary before trusting their resolution -
+ * remains an explicitly OPEN gap; this repository has no such boundary to
+ * bind to yet, and inventing one here would itself be the "second
+ * catalog/orchestration system" out of scope for this checkpoint.
  */
 export function resolveCanonicalServiceFromOrder(
   order: CommercialOrder,

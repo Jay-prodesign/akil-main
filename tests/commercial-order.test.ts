@@ -14,6 +14,8 @@ import {
 } from "../src/fixtures/website-build-v1-commercial-order.js";
 import { WEBSITE_BUILD_V1_BLUEPRINT } from "../src/fixtures/website-build-v1.js";
 import { WEBSITE_BUILD_V1_RECIPE } from "../src/fixtures/website-build-v1-recipe.js";
+import type { OfferBlueprintVersion } from "../src/domain/offer-blueprint.js";
+import type { DeliveryRecipe } from "../src/domain/delivery-recipe.js";
 
 const tenantScope = createTenantScope("tenant-a");
 const customer = createCustomer({ tenantScope, customerId: "cust-1", displayName: "Acme" });
@@ -195,6 +197,35 @@ test("resolveCanonicalServiceFromOrder never substitutes a different serviceRef'
   ];
   const resolution = resolveCanonicalServiceFromOrder(order, catalog);
   assert.equal(resolution.status, "UNRESOLVED_SERVICE");
+});
+
+test("Rev74 F1 (honest boundary disclosure): resolveCanonicalServiceFromOrder has no admission/provenance/authority binding - a caller-fabricated catalog entry for a serviceRef resolves exactly like a real, admitted one, so canonical-resolution provenance remains an explicitly OPEN audit gap, not something this function proves", () => {
+  const order = createCommercialOrder({
+    tenantScope,
+    customer,
+    orderId: "order-forged-catalog",
+    serviceRef: "service:never-admitted-anywhere",
+    placedAt: "2026-01-01T00:00:00.000Z",
+  });
+  // A caller can construct any serviceRef -> blueprint/version/recipe
+  // mapping it likes - nothing in this module checks it against any
+  // admitted/trusted source, because this repository has no such source.
+  const forgedCatalog: ServiceCatalogEntry[] = [
+    {
+      serviceRef: "service:never-admitted-anywhere",
+      blueprintId: "forged-blueprint-id" as OfferBlueprintVersion["blueprintId"],
+      blueprintVersion: "forged-version" as OfferBlueprintVersion["version"],
+      recipeId: "forged-recipe-id" as DeliveryRecipe["recipeId"],
+    },
+  ];
+  const resolution = resolveCanonicalServiceFromOrder(order, forgedCatalog);
+  // This is the honestly-disclosed boundary, not a defect this test is
+  // asserting should be fixed here: RESOLVED proves only that the caller's
+  // own catalog declares exactly one entry for this serviceRef.
+  assert.equal(resolution.status, "RESOLVED");
+  if (resolution.status === "RESOLVED") {
+    assert.equal(resolution.blueprintId, "forged-blueprint-id");
+  }
 });
 
 test("WEBSITE_BUILD_v1 zero-history commercial order fixture resolves RESOLVED against the canonical blueprint/recipe", () => {
