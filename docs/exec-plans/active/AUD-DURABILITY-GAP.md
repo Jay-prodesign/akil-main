@@ -104,4 +104,39 @@ New head (this branch, `claude/aud-durability-gap-correction`, post-merge-with-`
 
 ## Status
 
+**SUPERSEDED by the Rev77 correction below.** Rev74-corrected submission (exact head `9508ca9aa623285f16927e1dad0592709ee3be6f`) was `IMPLEMENTED / SELF-VALIDATED`, pending Brain independent exact-head review.
+
+## Rev77 correction (Brain CHANGES_REQUIRED, exact head `9508ca9aa623285f16927e1dad0592709ee3be6f`)
+
+Brain independently reviewed the Rev74-corrected head and returned `CHANGES_REQUIRED`: the concurrency/race correction (F1/F2 above) is materially valid, but persisted `PlanAdmission` replay is **not fully fail-closed** in `FileDurablePlanAdmissionStore`/`plan-admission-event.ts`/`plan-admission.ts`. Three distinct gaps, verbatim:
+
+1. **Enclosing event identity is not correlated to nested result identity.** `parsePersistedPlanAdmissionEvent` validated an `EVALUATION_RECORDED` event's own top-level `tenantId`/`projectId`/`planId`/`planVersion` and separately validated its nested `result` via `validatePersistedPlanAdmissionResult` — but never checked that the two identities actually matched each other. Confirmed against source: `applyPlanAdmissionEvent` (`plan-admission-run-state.ts`) checks the *event's* identity against the run's identity before applying it, then folds in `event.result` (the *nested* value) as `latestResult` without ever comparing the nested result's own identity fields to the outer event's. A forged/corrupted line could carry a legitimate-looking outer identity while smuggling a `result` for a different tenant/project/plan/version, silently corrupting the reconstructed run state.
+2. **Deterministic evaluation eventId is not revalidated.** `createEvaluationRecordedEvent` always derives `eventId` from `evaluationEventId(result)` (a pure function of `planId`+`planVersion`) — it is not a caller-supplied idempotency key the way `ANSWER_RECORDED`'s is. Replay previously trusted whatever `eventId` string a persisted line carried without recomputing and comparing it, so a forged line could carry an `eventId` mismatched from its own `result`, breaking the "same plan version's evaluation always produces the same eventId" invariant `appliedEventIds` dedup depends on.
+3. **Impossible ADMITTED/BLOCKED/WAITING result-shape combinations can pass replay validation.** `admitPlan` never produces a status/field combination outside a fixed shape (see its three return branches in `plan-admission.ts`): `ADMITTED` always carries an `evaluatedApprovalId` and never `blockedReasons`/`awaiting`; `BLOCKED` always carries non-empty `blockedReasons` and never `awaiting`/`evaluatedApprovalId`; `WAITING` always carries `awaiting` and never `blockedReasons`/`evaluatedApprovalId`. `validatePersistedPlanAdmissionResult` validated each field's own shape independently but never enforced this cross-field invariant, so a corrupted/forged line with an impossible combination (e.g. `ADMITTED` with populated `blockedReasons`) passed replay validation and would flow into the reducer as an internally-inconsistent result.
+
+**Fixes**:
+
+- `plan-admission.ts`: new `requireConsistentAdmissionShape(result)` enforces exactly the three legal status/field combinations above; `validatePersistedPlanAdmissionResult` now calls it before returning. Closes gap 3.
+- `plan-admission-event.ts`: `parsePersistedPlanAdmissionEvent`, for `EVALUATION_RECORDED`, now (a) throws unless `result.tenantId`/`result.projectId`/`result.planId`/`result.planVersion` exactly match the event's own top-level fields — closes gap 1; and (b) recomputes `evaluationEventId(result)` and throws unless it exactly matches the persisted `eventId` — closes gap 2.
+
+**Adversarial test coverage** (7 new tests, all forging a raw persisted line and asserting fail-closed rejection or, for the positive case, successful round-trip):
+
+- `tests/durable-plan-admission.test.ts`: impossible ADMITTED-with-blockedReasons (gap 3), impossible BLOCKED-with-awaiting (gap 3), enclosing/nested identity mismatch (gap 1), eventId/result mismatch (gap 2) — each forged directly at the `FileDurablePlanAdmissionStore.getEvents` replay boundary, exactly as a corrupted/forged durable line would be encountered.
+- `tests/plan-admission.test.ts`: `validatePersistedPlanAdmissionResult` unit tests for ADMITTED-missing-evaluatedApprovalId and WAITING-with-evaluatedApprovalId (the two impossible combinations not already covered via the durable-replay path above), plus a positive round-trip test proving all three of `admitPlan`'s own legal shapes still validate successfully through a JSON serialize/deserialize cycle (guards against the new invariant accidentally rejecting legitimate persisted data).
+
+No change to `admitPlan`'s own behavior or output shape — it already produced only the three legal combinations; this correction only closes the gap where *replay* failed to re-verify that invariant on data coming back off disk.
+
+### New exact head (Rev77 correction)
+
+New head (this branch, `claude/aud-durability-gap-correction`, post-Rev74-correction + Rev77 replay fail-closed fixes): see `git log -1` at time of push. Base remains `main` at `3226c76fa338e425e553638e5f5f48924182a1c0` (unchanged from the Rev74 correction — no further reconciliation needed).
+
+## Evidence (Rev77 correction)
+
+- `rm -rf dist && npx tsc -p tsconfig.json`: exit 0, strict mode, zero errors, clean rebuild.
+- `node --test dist/tests/*.test.js`: **727/727 pass** (720 pre-existing on the Rev74-corrected head + 7 new adversarial/positive tests), 0 fail/cancelled/skipped/todo.
+- `git diff --stat origin/main -- src/ tests/`: 14 files touched, 1381 insertions, 43 deletions.
+- `git diff origin/main -- package.json package-lock.json`: empty — zero new dependency introduced.
+
+## Status
+
 **IMPLEMENTED / SELF-VALIDATED** — pending Brain independent exact-head review of the new head. Not yet `VERIFIED`/`PASS`/`CLOSED`; Claude's authority ends at this status per `AGENTS.md` §10. `MERGE_DISPOSITION: HOLD_MERGE` — normal task-scoped PR against `main`; merge requires a separately granted protected owner-gate, never inferred from any prior PR's grant.

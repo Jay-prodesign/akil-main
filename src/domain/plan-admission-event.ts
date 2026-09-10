@@ -105,6 +105,28 @@ export function createEvaluationRecordedEvent(input: {
  * `result` via `validatePersistedPlanAdmissionResult`. A corrupted or forged
  * persisted line fails closed here instead of silently flowing into
  * `reconstructPlanAdmissionState`.
+ *
+ * Rev77 F1/F2 correction: two further invariants are now enforced for
+ * `EVALUATION_RECORDED`, neither of which the original validation checked:
+ *
+ * F1 (enclosing/nested identity correlation): the event's own top-level
+ * `tenantId`/`projectId`/`planId`/`planVersion` are what
+ * `applyPlanAdmissionEvent` checks against the run's identity before
+ * applying the event - but it then folds in `event.result` (the *nested*
+ * value) as `latestResult` without ever comparing the nested result's own
+ * identity fields to the outer ones. A forged/corrupted line could carry a
+ * legitimate-looking outer identity while smuggling a `result` for a
+ * different tenant/project/plan/version, silently corrupting the
+ * reconstructed run state. Both identities must now match exactly.
+ *
+ * F2 (deterministic eventId revalidation): `createEvaluationRecordedEvent`
+ * always derives `eventId` from `evaluationEventId(result)` - it is not a
+ * caller-supplied idempotency key the way `ANSWER_RECORDED`'s is. Replay
+ * previously trusted whatever `eventId` string a persisted line carried
+ * without recomputing and comparing it, so a forged line could carry an
+ * `eventId` that does not match its own `result`, breaking the "same plan
+ * version's evaluation always produces the same eventId" invariant
+ * `appliedEventIds` dedup depends on.
  */
 export function parsePersistedPlanAdmissionEvent(raw: unknown): PlanAdmissionEvent {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
@@ -127,6 +149,22 @@ export function parsePersistedPlanAdmissionEvent(raw: unknown): PlanAdmissionEve
 
   if (record.type === "EVALUATION_RECORDED") {
     const result = validatePersistedPlanAdmissionResult(record.result);
+    if (
+      result.tenantId !== tenantId ||
+      result.projectId !== projectId ||
+      result.planId !== planId ||
+      result.planVersion !== planVersion
+    ) {
+      throw new InvalidPlanAdmissionEventError(
+        "EVALUATION_RECORDED event's tenantId/projectId/planId/planVersion must match its own nested result's identity exactly",
+      );
+    }
+    const expectedEventId = evaluationEventId(result);
+    if (eventId !== expectedEventId) {
+      throw new InvalidPlanAdmissionEventError(
+        `EVALUATION_RECORDED eventId "${eventId}" does not match the deterministic eventId "${expectedEventId}" derived from its own result`,
+      );
+    }
     return {
       type: "EVALUATION_RECORDED",
       eventId,

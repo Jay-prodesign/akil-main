@@ -59,6 +59,54 @@ function requireNonEmptyStringField(value: unknown, field: string): string {
 }
 
 /**
+ * Rev77 F3 correction: `admitPlan` itself never produces a status/field
+ * combination outside this fixed shape - each `AdmissionStatus` has exactly
+ * one legal combination of `blockedReasons`/`awaiting`/`evaluatedApprovalId`
+ * (see `admitPlan`'s three return branches). Without enforcing that same
+ * invariant on replay, a corrupted or forged persisted line could carry an
+ * impossible combination (e.g. `status: "ADMITTED"` with a populated
+ * `blockedReasons`, or `"BLOCKED"` with an `awaiting` entity) and still pass
+ * per-field shape validation, silently handing an internally-inconsistent
+ * result to `reconstructPlanAdmissionState`/`recordAnswer`.
+ */
+function requireConsistentAdmissionShape(result: PlanAdmissionResult): void {
+  if (result.status === "ADMITTED") {
+    if (result.blockedReasons.length > 0) {
+      throw new InvalidPlanAdmissionError('status "ADMITTED" must not carry any blockedReasons');
+    }
+    if (result.awaiting !== undefined) {
+      throw new InvalidPlanAdmissionError('status "ADMITTED" must not carry an awaiting entity');
+    }
+    if (result.evaluatedApprovalId === undefined) {
+      throw new InvalidPlanAdmissionError('status "ADMITTED" must carry an evaluatedApprovalId');
+    }
+    return;
+  }
+  if (result.status === "BLOCKED") {
+    if (result.blockedReasons.length === 0) {
+      throw new InvalidPlanAdmissionError('status "BLOCKED" must carry at least one blockedReason');
+    }
+    if (result.awaiting !== undefined) {
+      throw new InvalidPlanAdmissionError('status "BLOCKED" must not carry an awaiting entity');
+    }
+    if (result.evaluatedApprovalId !== undefined) {
+      throw new InvalidPlanAdmissionError('status "BLOCKED" must not carry an evaluatedApprovalId');
+    }
+    return;
+  }
+  // WAITING
+  if (result.blockedReasons.length > 0) {
+    throw new InvalidPlanAdmissionError('status "WAITING" must not carry any blockedReasons');
+  }
+  if (result.awaiting === undefined) {
+    throw new InvalidPlanAdmissionError('status "WAITING" must carry an awaiting entity');
+  }
+  if (result.evaluatedApprovalId !== undefined) {
+    throw new InvalidPlanAdmissionError('status "WAITING" must not carry an evaluatedApprovalId');
+  }
+}
+
+/**
  * AUD-DURABILITY-GAP: re-validates an already-persisted `PlanAdmissionResult`
  * (e.g. read back from the durable plan-admission store) against this
  * type's own shape, rather than trusting a blind `JSON.parse(...) as
@@ -67,6 +115,10 @@ function requireNonEmptyStringField(value: unknown, field: string): string {
  * inputs), so this is the ingress-validation counterpart for durable replay:
  * a corrupted or forged persisted record fails closed here instead of
  * silently flowing into the plan-admission reducer.
+ *
+ * Rev77 F3 correction: also enforces `requireConsistentAdmissionShape` below
+ * - per-field shape validation alone let an impossible ADMITTED/BLOCKED/
+ * WAITING combination (see that function) pass replay validation.
  */
 export function validatePersistedPlanAdmissionResult(raw: unknown): PlanAdmissionResult {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
@@ -103,7 +155,7 @@ export function validatePersistedPlanAdmissionResult(raw: unknown): PlanAdmissio
     record.evaluatedApprovalId !== undefined
       ? requireNonEmptyStringField(record.evaluatedApprovalId, "evaluatedApprovalId")
       : undefined;
-  return {
+  const result: PlanAdmissionResult = {
     tenantId: tenantId as PlanAdmissionResult["tenantId"],
     projectId: projectId as PlanAdmissionResult["projectId"],
     planId: planId as PlanAdmissionResult["planId"],
@@ -115,6 +167,8 @@ export function validatePersistedPlanAdmissionResult(raw: unknown): PlanAdmissio
       ? { evaluatedApprovalId: evaluatedApprovalId as ApprovalReference["approvalId"] }
       : {}),
   };
+  requireConsistentAdmissionShape(result);
+  return result;
 }
 
 function planIdentity(
