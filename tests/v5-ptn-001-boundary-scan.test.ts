@@ -35,10 +35,17 @@ test("V5-PTN-001: partner-capability-admission.ts contains no secret material or
   assert.deepEqual(violations, []);
 });
 
-test("V5-PTN-001: partner-capability-admission.ts imports only the partner-organization sibling module (type-only) - no filesystem, network, or child_process coupling", () => {
+test("V5-PTN-001: partner-capability-admission.ts imports only the partner-organization and authority sibling modules - no filesystem, network, or child_process coupling", () => {
   const content = readFileSync(join(REPO_ROOT, V5_PTN_001_FILE), "utf8");
   const importLines = content.split("\n").filter((line) => /^\s*import\b/.test(line));
-  assert.deepEqual(importLines, ['import type { PartnerOrganization } from "./partner-organization.js";']);
+  // Rev62 "full-system authority ingress" hardening added a value import of
+  // authority.ts's fail-closed guards (requireSameTenant/requirePermission/
+  // requireProtectedActionAuthorization) alongside its AuthorityContext
+  // type - a deliberate, disclosed addition, not silent scope creep.
+  assert.deepEqual(importLines, [
+    'import type { PartnerOrganization } from "./partner-organization.js";',
+    'import { requireSameTenant, requirePermission, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";',
+  ]);
 });
 
 test("V5-PTN-001: partner-capability-admission.ts never calls Date.now() - status resolution is bound to the caller-supplied asOf only", () => {
