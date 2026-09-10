@@ -1,0 +1,11 @@
+# Legal/IP-sensitive files require review by the repository owner.
+# This does not change repository settings, rulesets, or branch
+# protection — it only names required reviewers for these paths.
+
+/LICENSE @Jay-prodesign
+/NOTICE.md @Jay-prodesign
+/TRADEMARKS.md @Jay-prodesign
+/THIRD_PARTY_NOTICES.md @Jay-prodesign
+/CONTRIBUTING.md @Jay-prodesign
+/SECURITY.md @Jay-prodesign
+/docs/legal/ @Jay-prodesign

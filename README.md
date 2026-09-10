@@ -1,5 +1,17 @@
 # akil-main
 
+> ## ⚠️ Proprietary Software — Not Open Source
+>
+> This repository contains proprietary software owned by 7T Tekstil
+> Sanayi ve Ticaret Limited Şirketi. It is **not** open source. No
+> permission is granted to use, copy, modify, distribute, or otherwise
+> deal in this software without prior written authorization.
+>
+> See [`LICENSE`](./LICENSE), [`NOTICE.md`](./NOTICE.md),
+> [`TRADEMARKS.md`](./TRADEMARKS.md), and
+> [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) for the complete
+> terms.
+
 AKILTA main engineering repository.
 
 ## Status

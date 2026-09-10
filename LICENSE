@@ -1,0 +1,71 @@
+AKILTA PROPRIETARY SOFTWARE LICENSE
+
+Copyright (c) 2026 7T Tekstil Sanayi ve Ticaret Limited Şirketi. All rights reserved.
+
+THIS IS NOT AN OPEN SOURCE LICENSE.
+
+1. Ownership
+
+This repository and all software, source code, object code, documentation,
+specifications, architecture descriptions, workflows, business-logic
+expression, and other materials contained in it (collectively, the
+"Software") are the proprietary property of 7T Tekstil Sanayi ve Ticaret
+Limited Şirketi ("7T"). The Software is protected by copyright law and
+other applicable intellectual property laws and treaties.
+
+This license does not apply to, and 7T does not claim ownership of, any
+third-party components, libraries, or dependencies used by the Software.
+Those components remain governed by their own respective licenses. See
+THIRD_PARTY_NOTICES.md for an inventory of third-party components used by
+this repository as of the date referenced therein.
+
+2. No Grant of Rights
+
+Unless you have received prior written permission from 7T, no right,
+license, or permission of any kind is granted to you with respect to the
+Software, including but not limited to any right to:
+
+  - use the Software;
+  - deploy or run the Software;
+  - reproduce or copy the Software;
+  - modify, adapt, or create derivative works based on the Software;
+  - distribute, publish, or make the Software available to any third
+    party;
+  - sublicense, sell, rent, lease, or otherwise transfer any interest in
+    the Software;
+  - incorporate the Software, in whole or in part, into any other product
+    or service;
+  - commercially exploit the Software in any manner; or
+  - remove, obscure, or alter any copyright, trademark, or other
+    proprietary rights notices contained in the Software.
+
+Mere access to this repository (for example, because it is hosted on a
+platform you are able to view) does not constitute permission to do any of
+the above.
+
+3. Platform Terms of Service Carve-Out
+
+Nothing in this license is intended to limit, restrict, or override any
+rights that a hosting platform's own Terms of Service necessarily grant to
+that platform (or to other users of that platform) as a condition of
+hosting this repository (for example, the minimum technical rights a
+source-hosting provider requires to store, display, and transmit hosted
+repository content in the ordinary operation of its service). Such
+platform-required rights, if any, exist solely to the extent legally
+necessary for the platform's ordinary operation and do not expand any
+right granted under Section 2 above.
+
+4. No Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS," WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL
+7T OR ITS AFFILIATES BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY
+ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+
+5. Requesting Permission
+
+If you wish to obtain rights to use, license, or otherwise deal in the
+Software, contact 7T Tekstil Sanayi ve Ticaret Limited Şirketi directly to
+request prior written permission.
