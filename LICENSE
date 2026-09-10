@@ -1,0 +1,167 @@
+AKILTA PROPRIETARY SOFTWARE LICENSE
+AKILTA TESCİLLİ (MÜLKİYETİ SAKLI) YAZILIM LİSANSI
+
+Copyright (c) 2026 7T Tekstil Sanayi ve Ticaret Limited Şirketi. All rights reserved.
+Telif Hakkı (c) 2026 7T Tekstil Sanayi ve Ticaret Limited Şirketi. Tüm hakları saklıdır.
+
+THIS IS NOT AN OPEN SOURCE LICENSE.
+BU BİR AÇIK KAYNAK LİSANSI DEĞİLDİR.
+
+The English text below is the drafting basis for this license; the
+Turkish text is a materially equivalent translation. Neither version
+grants broader rights, omits a restriction present in the other, or
+weakens 7T's ownership. If a genuine conflict is ever identified between
+the two, it must be resolved in favor of the more restrictive reading
+consistent with Section 2 (No Grant of Rights) of both versions, and
+reported for correction rather than relied upon as a gap.
+
+Aşağıdaki İngilizce metin bu lisansın hazırlanış esasıdır; Türkçe metin
+buna maddi olarak eşdeğer bir çeviridir. Hiçbir sürüm diğerinden daha
+geniş bir hak vermez, diğerinde bulunan bir kısıtlamayı atlamaz veya
+7T'nin mülkiyetini zayıflatmaz. İki sürüm arasında gerçek bir çelişki
+tespit edilirse, bu çelişki her iki sürümün de 2. Maddesi (Hak
+Verilmemesi) ile tutarlı biçimde daha kısıtlayıcı yorum lehine
+çözülmeli ve bir boşluk olarak kullanılmak yerine düzeltilmek üzere
+bildirilmelidir.
+
+================================================================
+ENGLISH
+================================================================
+
+1. Ownership
+
+This repository and all software, source code, object code, documentation,
+specifications, architecture descriptions, workflows, business-logic
+expression, and other materials contained in it (collectively, the
+"Software") are the proprietary property of 7T Tekstil Sanayi ve Ticaret
+Limited Şirketi ("7T"). The Software is protected by copyright law and
+other applicable intellectual property laws and treaties.
+
+This license does not apply to, and 7T does not claim ownership of, any
+third-party components, libraries, or dependencies used by the Software.
+Those components remain governed by their own respective licenses. See
+THIRD_PARTY_NOTICES.md for an inventory of third-party components used by
+this repository as of the date referenced therein.
+
+2. No Grant of Rights
+
+Unless you have received prior written permission from 7T, no right,
+license, or permission of any kind is granted to you with respect to the
+Software, including but not limited to any right to:
+
+  - use the Software;
+  - deploy or run the Software;
+  - reproduce or copy the Software;
+  - modify, adapt, or create derivative works based on the Software;
+  - distribute, publish, or make the Software available to any third
+    party;
+  - sublicense, sell, rent, lease, or otherwise transfer any interest in
+    the Software;
+  - incorporate the Software, in whole or in part, into any other product
+    or service;
+  - commercially exploit the Software in any manner; or
+  - remove, obscure, or alter any copyright, trademark, or other
+    proprietary rights notices contained in the Software.
+
+Mere access to this repository (for example, because it is hosted on a
+platform you are able to view) does not constitute permission to do any of
+the above.
+
+3. Platform Terms of Service Carve-Out
+
+Nothing in this license is intended to limit, restrict, or override any
+rights that a hosting platform's own Terms of Service necessarily grant to
+that platform (or to other users of that platform) as a condition of
+hosting this repository (for example, the minimum technical rights a
+source-hosting provider requires to store, display, and transmit hosted
+repository content in the ordinary operation of its service). Such
+platform-required rights, if any, exist solely to the extent legally
+necessary for the platform's ordinary operation and do not expand any
+right granted under Section 2 above.
+
+4. No Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS," WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL
+7T OR ITS AFFILIATES BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY
+ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+
+5. Requesting Permission
+
+If you wish to obtain rights to use, license, or otherwise deal in the
+Software, contact 7T Tekstil Sanayi ve Ticaret Limited Şirketi directly to
+request prior written permission.
+
+================================================================
+TÜRKÇE
+================================================================
+
+1. Mülkiyet
+
+Bu depo (repository) ve içerdiği tüm yazılım, kaynak kod, nesne kodu,
+dokümantasyon, teknik şartnameler, mimari açıklamalar, iş akışları, iş
+mantığının ifadesi ve diğer materyaller (topluca "Yazılım") 7T Tekstil
+Sanayi ve Ticaret Limited Şirketi'nin ("7T") mülkiyetindeki tescilli
+(proprietary) varlıklardır. Yazılım, telif hakkı kanunu ve diğer geçerli
+fikri mülkiyet kanunları ve antlaşmaları ile korunmaktadır.
+
+Bu lisans, Yazılım tarafından kullanılan hiçbir üçüncü taraf bileşenine,
+kütüphaneye veya bağımlılığa uygulanmaz ve 7T bunlar üzerinde mülkiyet
+iddia etmez. Bu bileşenler kendi lisanslarına tabi olmaya devam eder.
+Bu depoda kullanılan üçüncü taraf bileşenlerin, ilgili belgede belirtilen
+tarih itibarıyla bir dökümü için THIRD_PARTY_NOTICES.md dosyasına bakınız.
+
+2. Hak Verilmemesi
+
+7T'den önceden yazılı izin almadığınız sürece, Yazılım ile ilgili olarak
+size hiçbir hak, lisans veya izin verilmemektedir; buna aşağıdakiler
+dahil ancak bunlarla sınırlı olmamak üzere hiçbir hak dahildir:
+
+  - Yazılımı kullanmak;
+  - Yazılımı devreye almak veya çalıştırmak;
+  - Yazılımı çoğaltmak veya kopyalamak;
+  - Yazılımı değiştirmek, uyarlamak veya Yazılıma dayalı türev eserler
+    oluşturmak;
+  - Yazılımı dağıtmak, yayınlamak veya herhangi bir üçüncü tarafın
+    erişimine sunmak;
+  - Yazılım üzerindeki herhangi bir menfaati alt lisanslamak, satmak,
+    kiralamak veya başka bir şekilde devretmek;
+  - Yazılımın tamamını veya bir kısmını başka bir ürün veya hizmete dahil
+    etmek;
+  - Yazılımı herhangi bir şekilde ticari olarak istismar etmek; veya
+  - Yazılımda yer alan herhangi bir telif hakkı, marka veya diğer
+    mülkiyet hakları bildirimini kaldırmak, gizlemek veya değiştirmek.
+
+Bu depoya yalnızca erişebiliyor olmak (örneğin bir platform üzerinden
+görüntüleyebiliyor olmanız nedeniyle) yukarıdakilerden herhangi birini
+yapma izni anlamına gelmez.
+
+3. Platform Hizmet Şartları İstisnası
+
+Bu lisanstaki hiçbir hüküm, bir barındırma platformunun kendi Hizmet
+Şartlarının, bu depoyu barındırma koşulu olarak söz konusu platforma (veya
+platformun diğer kullanıcılarına) zorunlu olarak tanıdığı hakları
+sınırlamak, kısıtlamak veya geçersiz kılmak amacı taşımaz (örneğin, bir
+kaynak kodu barındırma sağlayıcısının, barındırdığı depo içeriğini olağan
+hizmet işleyişinde depolamak, görüntülemek ve iletmek için gerek duyduğu
+asgari teknik haklar). Bu tür platform kaynaklı haklar, varsa, yalnızca
+platformun olağan işleyişi için hukuken zorunlu olduğu ölçüde var olur ve
+yukarıdaki 2. Madde kapsamında verilen hiçbir hakkı genişletmez.
+
+4. Garanti Verilmemesi
+
+YAZILIM, AÇIK VEYA ZIMNİ HİÇBİR GARANTİ OLMAKSIZIN, TİCARİ ELVERİŞLİLİK,
+BELİRLİ BİR AMACA UYGUNLUK VE HAK İHLALİ BULUNMAMASI GARANTİLERİ DAHİL
+ANCAK BUNLARLA SINIRLI OLMAKSIZIN, "OLDUĞU GİBİ" SUNULMAKTADIR. 7T VEYA
+BAĞLI ŞİRKETLERİ, YAZILIMDAN VEYA YAZILIMIN KULLANIMINDAN VEYA YAZILIMLA
+İLGİLİ DİĞER İŞLEMLERDEN KAYNAKLANAN HİÇBİR TALEP, ZARAR VEYA DİĞER
+SORUMLULUKTAN HİÇBİR KOŞULDA SORUMLU TUTULAMAZ.
+
+5. İzin Talebi
+
+Yazılımı kullanma, lisanslama veya Yazılım ile ilgili başka bir işlem
+yapma hakkı elde etmek isterseniz, önceden yazılı izin talep etmek için
+doğrudan 7T Tekstil Sanayi ve Ticaret Limited Şirketi ile iletişime
+geçiniz.
