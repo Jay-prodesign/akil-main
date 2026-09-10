@@ -1,4 +1,6 @@
-# AUD-V5-GAP-02 — Commercial Order → Canonical Service/Recipe Resolution (Cold-Start floor)
+# AUD-V5-GAP-02 — Commercial Order → Declared Service/Recipe Lookup (Cold-Start floor)
+
+> **Rev79 terminology note**: this task's original title/Goal/Scope/invariant wording (below) predates the Rev77 API rename and used "canonical" language throughout, matching the identifiers that existed at the time. The code was renamed under Rev77 (`CanonicalServiceResolution` → `DeclaredServiceLookupResult`, `resolveCanonicalServiceFromOrder` → `resolveDeclaredServiceFromOrder`); this Rev79 pass brings the surrounding current task-record wording into line with that rename so the *current* framing is provenance-honest throughout, not just the identifiers. Quoted historical text below (Brain's own Rev62/Rev74/Rev77 verbatim findings, in quotation marks) is preserved unchanged as history — only this document's own non-quoted, current-tense description is reworded.
 
 ## Provenance
 
@@ -10,7 +12,7 @@
 
 ## Goal
 
-Provide the missing first edge of the V5 Cold-Start First Customer chain: a pure, deterministic resolver from a customer's zero-history `CommercialOrder` (no `Project`, `SoldScope`, or evidence exists yet) to the canonical `OfferBlueprintVersion` + `DeliveryRecipe` that fulfills it — without fabricating a real commerce/payment/pricing system, and without duplicating or bypassing any existing plan-compilation/readiness machinery.
+Provide the missing first edge of the V5 Cold-Start First Customer chain: a pure, deterministic lookup from a customer's zero-history `CommercialOrder` (no `Project`, `SoldScope`, or evidence exists yet) to the specific `OfferBlueprintVersion` + `DeliveryRecipe` a caller-supplied catalog declares for it — without fabricating a real commerce/payment/pricing system, and without duplicating or bypassing any existing plan-compilation/readiness machinery. This is a **declared/caller-supplied lookup**, not canonical/trusted resolution — see "Explicitly deferred" below for the open canonical-resolution provenance gap this checkpoint does not close.
 
 ## Scope (this checkpoint)
 
@@ -18,8 +20,8 @@ Provide the missing first edge of the V5 Cold-Start First Customer chain: a pure
   - `CommercialOrder` — `tenantId` + `customerId` + `orderId` + opaque `serviceRef` + `placedAt`. Deliberately has **no** `projectId` field: a project does not exist yet at order time — this is the genuine zero-history starting point Brain's audit found missing. No price/discount/payout/commission field exists on the type (DEC-146/153 discipline, same restraint already applied to `commercial-authority.ts`).
   - `createCommercialOrder(input)` — fail-closed construction (non-empty `orderId`/`serviceRef`/`placedAt`; `customer.tenantId` must match the given `tenantScope`, same T2/RG-01 pattern as `createProject`/`createSoldScope`).
   - `ServiceCatalogEntry` — a caller-declared `{ serviceRef, blueprintId, blueprintVersion, recipeId }` mapping. Not a real service/product/SKU system (none exists in this repository) — reuses the existing `OfferBlueprintVersion`/`DeliveryRecipe` identifiers verbatim rather than inventing a parallel concept.
-  - `resolveCanonicalServiceFromOrder(order, catalog)` — pure function. Returns `{ status: "RESOLVED", blueprintId, blueprintVersion, recipeId }` when exactly one catalog entry declares the order's `serviceRef`; returns `{ status: "UNRESOLVED_SERVICE", reason }` (never a fabricated "closest" match) when none does; throws `InvalidCommercialOrderError` when more than one catalog entry declares the same `serviceRef` (ambiguous catalog is a caller/data-integrity defect — same "throw rather than guess" discipline as `resolveCurrentOwner`, V3-OWN-001).
-- `src/fixtures/website-build-v1-commercial-order.ts`: `WEBSITE_BUILD_V1_SERVICE_CATALOG` (one entry, reusing `WEBSITE_BUILD_V1_BLUEPRINT`/`WEBSITE_BUILD_V1_RECIPE` verbatim) + `buildWebsiteBuildV1CommercialOrderFixture()`, a genuine zero-history fixture: only a `TenantScope`, `Customer`, `CommercialOrder`, and its `CanonicalServiceResolution` — no `Project`/`SoldScope`/evidence constructed alongside it, proving this edge does not require or presuppose downstream state.
+  - `resolveDeclaredServiceFromOrder(order, catalog)` — pure function. Returns `{ status: "RESOLVED", blueprintId, blueprintVersion, recipeId }` when exactly one catalog entry declares the order's `serviceRef`; returns `{ status: "UNRESOLVED_SERVICE", reason }` (never a fabricated "closest" match) when none does; throws `InvalidCommercialOrderError` when more than one catalog entry declares the same `serviceRef` (ambiguous catalog is a caller/data-integrity defect — same "throw rather than guess" discipline as `resolveCurrentOwner`, V3-OWN-001). `RESOLVED` proves only that the caller's own catalog declares exactly one entry for the `serviceRef` — not that the entry is admitted/trusted (see "Explicitly deferred" below).
+- `src/fixtures/website-build-v1-commercial-order.ts`: `WEBSITE_BUILD_V1_SERVICE_CATALOG` (one entry, reusing `WEBSITE_BUILD_V1_BLUEPRINT`/`WEBSITE_BUILD_V1_RECIPE` verbatim) + `buildWebsiteBuildV1CommercialOrderFixture()`, a genuine zero-history fixture: only a `TenantScope`, `Customer`, `CommercialOrder`, and its `DeclaredServiceLookupResult` — no `Project`/`SoldScope`/evidence constructed alongside it, proving this edge does not require or presuppose downstream state.
 
 ## Extension: Conditional Intake + compiled-plan Readiness (same branch, same checkpoint)
 
@@ -44,15 +46,17 @@ Continuing the same loop again immediately (per the corridor's own rule that a p
 - **Project/repository bootstrap from a resolved order** is not wired here — `project-bootstrap-template.ts` (V5-BOOT-001) remains a separate, already-tested concern; composing them is future work, not fabricated in this checkpoint.
 - No real commerce/payment/checkout/order-management system, no numeric/currency field, no discount/commission/payout value — none exists anywhere in this repository (DEC-146/153).
 - No real service/product catalog persistence or lookup service — the catalog is a plain caller-supplied array, matching every other domain module's "no persistence/network/filesystem coupling" pattern.
+- **Canonical/trusted service-resolution provenance** (Rev74/Rev77): `resolveDeclaredServiceFromOrder` proves only that a caller-supplied catalog declares exactly one entry for the order's `serviceRef` — it does not prove that entry was ever admitted through a trusted, repository-native boundary. No admitted/trusted catalog authority primitive exists anywhere in this repository to bind to; inventing one would be exactly the "second catalog/orchestration system" Brain's own acceptance forbids. This gap remains **explicitly OPEN**, not closed by this checkpoint or its corrections.
 
 ## Architecture / semantic invariants (verified by test)
 
 - A `CommercialOrder` cannot be constructed with a customer from a different tenant than the given `tenantScope` (fail-closed, same T2/RG-01 pattern already proven elsewhere).
 - A `CommercialOrder` carries exactly five fields (`tenantId`, `customerId`, `orderId`, `serviceRef`, `placedAt`) — no price/discount/payout/commission field can exist on it, verified by an explicit key-set assertion.
-- `resolveCanonicalServiceFromOrder` never substitutes a different `serviceRef`'s catalog entry for an unmatched order (no silent nearest-match fallback).
+- `resolveDeclaredServiceFromOrder` never substitutes a different `serviceRef`'s catalog entry for an unmatched order (no silent nearest-match fallback).
 - An empty catalog, or a catalog with no matching `serviceRef`, resolves the honest `UNRESOLVED_SERVICE` disposition — never an error, never a guess.
 - A catalog with more than one entry declaring the same `serviceRef` throws rather than picking either nondeterministically.
-- The `WEBSITE_BUILD_v1` order fixture is a genuine zero-history object graph (`tenantScope`, `customer`, `order`, `resolution` only — no `Project`/`SoldScope` field exists on it) that still resolves `RESOLVED` against the canonical blueprint/recipe identifiers.
+- A caller-fabricated catalog entry (never admitted anywhere) resolves `RESOLVED` exactly like a real one — this is the disclosed declared/caller-supplied lookup boundary, not a defect (see "Explicitly deferred").
+- The `WEBSITE_BUILD_v1` order fixture is a genuine zero-history object graph (`tenantScope`, `customer`, `order`, `resolution` only — no `Project`/`SoldScope` field exists on it) that still resolves `RESOLVED` against the declared blueprint/recipe identifiers.
 
 ## Hard Non-Scope
 
@@ -74,9 +78,9 @@ All in `tests/commercial-order.test.ts`:
 | Returns `UNRESOLVED_SERVICE` against an empty catalog | fail-closed, honest disposition |
 | Throws (never guesses) on an ambiguous catalog with a duplicate `serviceRef` | "throw rather than guess" discipline |
 | Never substitutes a different `serviceRef`'s catalog entry | cross-service substitution rejected |
-| `WEBSITE_BUILD_v1` zero-history order fixture resolves `RESOLVED` against the canonical blueprint/recipe | end-to-end reference proof |
+| `WEBSITE_BUILD_v1` zero-history order fixture resolves `RESOLVED` against the declared blueprint/recipe | end-to-end reference proof |
 | `WEBSITE_BUILD_v1` order fixture carries no Project/SoldScope — a genuine zero-history order | proves the Cold-Start starting point is real, not presupposed |
-| `WEBSITE_BUILD_V1_SERVICE_CATALOG` declares exactly one entry, reusing canonical identifiers verbatim | no parallel product/SKU concept invented |
+| `WEBSITE_BUILD_V1_SERVICE_CATALOG` declares exactly one entry, reusing the existing blueprint/recipe identifiers verbatim | no parallel product/SKU concept invented |
 
 ## Evidence
 
@@ -141,6 +145,37 @@ New head (this branch, `claude/v5-cold-start-commercial-order-resolution`, post-
 - `git diff --stat origin/main -- src/ tests/`: 6 files touched (unchanged file list), 901 insertions, 0 deletions.
 - `git diff origin/main -- package.json package-lock.json`: empty — zero new dependency introduced.
 - `grep -rn "CanonicalServiceResolution\|resolveCanonicalServiceFromOrder" src/ tests/`: zero matches (confirmed no stray reference to the old names remains anywhere in source or tests).
+
+## Status
+
+**SUPERSEDED by the Rev79 correction below.** Rev77-corrected submission (exact head `829c56d69f3a4f2d96896753fcf9cf17d04f0156`) was `IMPLEMENTED / SELF-VALIDATED`, pending Brain independent exact-head review.
+
+## Rev79 correction (Brain CHANGES_REQUIRED — NARROW SEMANTIC CLEANUP ONLY, exact head `829c56d69f3a4f2d96896753fcf9cf17d04f0156`)
+
+Brain independently reviewed the Rev77-corrected head and returned `CHANGES_REQUIRED`, verbatim: *"The TypeScript public API correction is accepted: CanonicalServiceResolution was renamed to DeclaredServiceLookupResult and resolveCanonicalServiceFromOrder to resolveDeclaredServiceFromOrder, with zero intended behavior change and canonical/trusted provenance still OPEN. Remaining blocker: the active repo task record docs/exec-plans/active/AUD-V5-GAP-02.md still presents its current title/Goal/Scope/invariants/test wording as 'Canonical Service/Recipe Resolution' and still names the old API in current sections; the live PR title/current framing also still carries 'Canonical Resolution'. REQUIRED CORRECTION: make the current task/PR framing provenance-honest Declared Service/Recipe Lookup terminology, update current non-historical old-identifier mentions, and preserve historical quoted/superseded findings as history."*
+
+**Confirmed**: the Rev77 code/API rename itself was already accepted — no further source or test change is needed or was made. The gap was purely in this document's own top-level framing (title, Goal, Scope, Architecture/semantic invariants, Test Coverage table), which predated the Rev77 rename and had never been updated to match it, plus the live PR's own title/summary.
+
+**Fix (docs/framing-only, zero behavior change)**:
+- This document's title, Goal, Scope, and Architecture/semantic invariants sections reworded from "canonical resolution" framing to "declared/caller-supplied lookup" framing, and updated to reference `resolveDeclaredServiceFromOrder`/`DeclaredServiceLookupResult` instead of the old identifiers.
+- The "Explicitly deferred" section now explicitly names the canonical/trusted service-resolution provenance gap as OPEN (it previously only implied this via the general "no real service/product catalog" bullet).
+- The Test Coverage table's two remaining "canonical" mentions (describing the blueprint/recipe fixture, not the resolution's trustworthiness) reworded to "declared"/"existing" respectively.
+- Historical quoted text — Brain's own Rev62/Rev74/Rev77 verbatim findings, and the "Rev74/Rev77 correction" section headers themselves — preserved unchanged, per Brain's own instruction that clearly-labeled historical/superseded quotations may retain old names.
+- PR #32's title and description on GitHub updated to match (see PR itself for current text).
+
+No production behavior changed — this is the second half of the Rev77 rename's own completeness (code was renamed; the surrounding task-record prose is now renamed to match). Canonical/trusted service-resolution provenance remains recorded as explicitly OPEN, unchanged from Rev74/Rev77.
+
+### New exact head
+
+New head (this branch, `claude/v5-cold-start-commercial-order-resolution`, post-Rev77-rename + Rev79 doc/framing correction): see `git log -1` at time of push. Base remains `main` at `3226c76fa338e425e553638e5f5f48924182a1c0` (unchanged — no further reconciliation needed).
+
+## Evidence (Rev79 correction)
+
+- `rm -rf dist && npx tsc -p tsconfig.json`: exit 0, strict mode, zero errors, clean rebuild.
+- `node --test dist/tests/*.test.js`: **733/733 pass** (unchanged — docs-only correction, zero behavior change, zero new/removed test), 0 fail/cancelled/skipped/todo.
+- `git diff --stat origin/main -- src/ tests/`: unchanged from the Rev77-corrected head (this correction touches only `docs/exec-plans/active/AUD-V5-GAP-02.md` and the PR's own title/description on GitHub, neither of which is `src/`/`tests/`).
+- `git diff origin/main -- package.json package-lock.json`: empty — zero new dependency introduced.
+- Confirmed current (non-historical) task-record wording is provenance-honest: every non-quoted mention of "canonical" in this document's title/Goal/Scope/Architecture/Test-Coverage sections has been reworded; the only remaining "canonical"/old-identifier mentions in this file are inside explicitly historical, quoted, or clearly-labeled-superseded sections (Provenance's direct Handoff quotes, the "Rev74 correction"/"Rev77 correction" section headers and their own historical prose).
 
 ## Status
 
