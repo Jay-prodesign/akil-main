@@ -209,7 +209,7 @@ test("J5: partner status tally reflects computed EXPIRED (never a stored status)
   assert.equal(admitted.status, "ADMITTED");
 });
 
-test("J6: this function adds no independent judgment - the returned items/claims arrays are the exact input references, never re-derived", () => {
+test("J6: this function adds no independent judgment - the returned attention items and each wrapped partner claim are the exact input references, never re-derived", () => {
   const items = [buildAttentionItem({ tenantSuffix: "c", jobId: "job-c" })];
   const claims = [unverifiedClaim("claim-5", "org-5")];
   const projection = buildInternalCommandCenterProjection({
@@ -219,5 +219,67 @@ test("J6: this function adds no independent judgment - the returned items/claims
     asOf: "2026-09-10T00:00:00.000Z",
   });
   assert.equal(projection.companyPortfolioAttention.items, items);
-  assert.equal(projection.partners.claims, claims);
+  assert.equal(projection.partners.items.length, claims.length);
+  assert.equal(projection.partners.items[0]?.claim, claims[0]);
+});
+
+test("J7 (Rev90 F1): a claim stored ADMITTED but past its reviewByAt is exposed with its raw status untouched AND a distinct, current effectiveStatus - a downstream reader is never left to mistake the stale raw status for current", () => {
+  const admitted = admitPartnerCapabilityClaim({
+    claim: unverifiedClaim("claim-6", "org-6"),
+    admittingAuthorityId: "authority-1",
+    evidenceRef: "evidence:portfolio-review-4",
+    admittedAt: "2026-01-01T00:00:00.000Z",
+    reviewByAt: "2026-06-01T00:00:00.000Z",
+  });
+
+  const projection = buildInternalCommandCenterProjection({
+    attentionItems: [],
+    partnerClaims: [admitted],
+    generatedAt: "2026-09-10T00:00:00.000Z",
+    asOf: "2026-09-10T00:00:00.000Z",
+  });
+
+  const item = projection.partners.items[0];
+  assert.ok(item !== undefined);
+  assert.equal(item.claim.status, "ADMITTED");
+  assert.equal(item.effectiveStatus, "EXPIRED");
+  assert.notEqual(item.claim.status, item.effectiveStatus);
+  assert.equal(projection.partners.statusTally.EXPIRED, 1);
+  assert.equal(projection.partners.statusTally.ADMITTED, 0);
+});
+
+test("J8 (Rev90 F1): partners.items and partners.statusTally always agree - every item's effectiveStatus is counted exactly once in the tally", () => {
+  const unverified = unverifiedClaim("claim-7", "org-7");
+  const admittedCurrent = admitPartnerCapabilityClaim({
+    claim: unverifiedClaim("claim-8", "org-8"),
+    admittingAuthorityId: "authority-1",
+    evidenceRef: "evidence:portfolio-review-5",
+    admittedAt: "2026-01-01T00:00:00.000Z",
+    reviewByAt: "2026-12-01T00:00:00.000Z",
+  });
+  const admittedExpired = admitPartnerCapabilityClaim({
+    claim: unverifiedClaim("claim-9", "org-9"),
+    admittingAuthorityId: "authority-1",
+    evidenceRef: "evidence:portfolio-review-6",
+    admittedAt: "2026-01-01T00:00:00.000Z",
+    reviewByAt: "2026-06-01T00:00:00.000Z",
+  });
+
+  const projection = buildInternalCommandCenterProjection({
+    attentionItems: [],
+    partnerClaims: [unverified, admittedCurrent, admittedExpired],
+    generatedAt: "2026-09-10T00:00:00.000Z",
+    asOf: "2026-09-10T00:00:00.000Z",
+  });
+
+  const recomputedTally: Record<"UNVERIFIED" | "ADMITTED" | "EXPIRED" | "REVOKED", number> = {
+    UNVERIFIED: 0,
+    ADMITTED: 0,
+    EXPIRED: 0,
+    REVOKED: 0,
+  };
+  for (const item of projection.partners.items) {
+    recomputedTally[item.effectiveStatus] += 1;
+  }
+  assert.deepEqual(recomputedTally, projection.partners.statusTally);
 });

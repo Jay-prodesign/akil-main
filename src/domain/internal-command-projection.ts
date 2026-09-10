@@ -42,6 +42,24 @@ export class InvalidInternalCommandProjectionError extends Error {
  * authentication remain explicitly open dependencies (§14: "live route
  * names resolved later"), not fabricated here.
  */
+/**
+ * Rev90 F1 correction: pairs a raw stored claim with its *effective*
+ * status as of the same `asOf` the projection was built with
+ * (`resolvePartnerCapabilityClaimStatus`). Exposing the raw
+ * `PartnerCapabilityClaim[]` alone, alongside a separately-computed
+ * `statusTally`, let the two silently disagree - a claim stored `ADMITTED`
+ * but past its `reviewByAt` counts as `EXPIRED` in the tally while its own
+ * `status` field still reads `ADMITTED`, so a downstream reader consulting
+ * `claim.status` directly (instead of the tally) could present stale
+ * authorization as current. Wrapping every claim with its `effectiveStatus`
+ * at the same read gives callers a single, always-current field to key any
+ * per-item decision on, without hiding or mutating the raw claim.
+ */
+export interface PartnerCapabilityClaimWithEffectiveStatus {
+  readonly claim: PartnerCapabilityClaim;
+  readonly effectiveStatus: PartnerCapabilityClaimStatus;
+}
+
 export interface InternalCommandCenterProjection {
   readonly generatedAt: string;
   readonly companyPortfolioAttention: {
@@ -50,7 +68,7 @@ export interface InternalCommandCenterProjection {
     readonly levelTally: Readonly<Record<InternalAttentionLevel, number>>;
   };
   readonly partners: {
-    readonly claims: ReadonlyArray<PartnerCapabilityClaim>;
+    readonly items: ReadonlyArray<PartnerCapabilityClaimWithEffectiveStatus>;
     readonly statusTally: Readonly<Record<PartnerCapabilityClaimStatus, number>>;
   };
 }
@@ -107,9 +125,11 @@ export function buildInternalCommandCenterProjection(input: {
     EXPIRED: 0,
     REVOKED: 0,
   };
+  const partnerItems: PartnerCapabilityClaimWithEffectiveStatus[] = [];
   for (const claim of input.partnerClaims) {
     const effectiveStatus = resolvePartnerCapabilityClaimStatus({ claim, asOf });
     statusTally[effectiveStatus] += 1;
+    partnerItems.push({ claim, effectiveStatus });
   }
 
   return {
@@ -120,7 +140,7 @@ export function buildInternalCommandCenterProjection(input: {
       levelTally,
     },
     partners: {
-      claims: input.partnerClaims,
+      items: partnerItems,
       statusTally,
     },
   };
