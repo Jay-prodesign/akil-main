@@ -195,6 +195,7 @@ test("G13: promoteToReusable rejects a CANDIDATE that was never evaluated", () =
     () =>
       promoteToReusable({
         candidate,
+        reusableAssetRef: "asset:seo-checklist-v1",
         licenseOrIpNote: "first-party, no third-party content",
         reusableAssetVersion: "1.0.0",
       }),
@@ -213,6 +214,7 @@ test("G14: promoteToReusable rejects an EVALUATED candidate whose outcome is NOT
     () =>
       promoteToReusable({
         candidate: evaluated,
+        reusableAssetRef: "asset:seo-checklist-v1",
         licenseOrIpNote: "first-party, no third-party content",
         reusableAssetVersion: "1.0.0",
       }),
@@ -231,6 +233,7 @@ test("G15: promoteToReusable rejects an empty licenseOrIpNote or reusableAssetVe
     () =>
       promoteToReusable({
         candidate: evaluated,
+        reusableAssetRef: "asset:seo-checklist-v1",
         licenseOrIpNote: "",
         reusableAssetVersion: "1.0.0",
       }),
@@ -240,6 +243,7 @@ test("G15: promoteToReusable rejects an empty licenseOrIpNote or reusableAssetVe
     () =>
       promoteToReusable({
         candidate: evaluated,
+        reusableAssetRef: "asset:seo-checklist-v1",
         licenseOrIpNote: "first-party, no third-party content",
         reusableAssetVersion: "  ",
       }),
@@ -247,7 +251,7 @@ test("G15: promoteToReusable rejects an empty licenseOrIpNote or reusableAssetVe
   );
 });
 
-test("G16: promoteToReusable succeeds on a REUSABLE-evaluated candidate and strips observationRefs (customer/tenant provenance)", () => {
+test("G16: promoteToReusable succeeds on a REUSABLE-evaluated candidate, strips observationRefs (customer/tenant provenance), and carries a distinct reusableAssetRef instead of the raw patternRef", () => {
   const candidate = twoTenantCandidate();
   const evaluated = evaluateCandidate({
     candidate,
@@ -256,18 +260,64 @@ test("G16: promoteToReusable succeeds on a REUSABLE-evaluated candidate and stri
   });
   const approved = promoteToReusable({
     candidate: evaluated,
+    reusableAssetRef: "asset:seo-checklist-v1",
     licenseOrIpNote: "first-party, no third-party content",
     reusableAssetVersion: "1.0.0",
   });
   assert.equal(approved.status, "APPROVED_REUSABLE");
   assert.equal(approved.licenseOrIpNote, "first-party, no third-party content");
   assert.equal(approved.reusableAssetVersion, "1.0.0");
+  assert.equal(approved.reusableAssetRef, "asset:seo-checklist-v1");
   assert.equal(approved.observationRefs, undefined);
   // provenance-independent fields are preserved
   assert.equal(approved.capabilityCandidateId, "cap-1");
-  assert.equal(approved.patternRef, "pattern:website-build-seo-checklist");
   assert.equal(approved.evalEvidenceRef, "evidence:eval-1");
   assert.equal(approved.evaluationOutcome, "REUSABLE");
+});
+
+test("G18: promoteToReusable rejects an empty reusableAssetRef", () => {
+  const candidate = twoTenantCandidate();
+  const evaluated = evaluateCandidate({
+    candidate,
+    evalEvidenceRef: "evidence:eval-1",
+    outcome: "REUSABLE",
+  });
+  assert.throws(
+    () =>
+      promoteToReusable({
+        candidate: evaluated,
+        reusableAssetRef: "",
+        licenseOrIpNote: "first-party, no third-party content",
+        reusableAssetVersion: "1.0.0",
+      }),
+    InvalidReusableCapabilityCandidateError,
+  );
+});
+
+test("G19 (Rev90 F1): promoteToReusable fail-closed rejects a reusableAssetRef identical to the candidate's own patternRef - the raw source pattern reference cannot be smuggled through under a new field name, and the approved result never carries patternRef at all", () => {
+  const candidate = twoTenantCandidate();
+  const evaluated = evaluateCandidate({
+    candidate,
+    evalEvidenceRef: "evidence:eval-1",
+    outcome: "REUSABLE",
+  });
+  assert.throws(
+    () =>
+      promoteToReusable({
+        candidate: evaluated,
+        reusableAssetRef: "pattern:website-build-seo-checklist",
+        licenseOrIpNote: "first-party, no third-party content",
+        reusableAssetVersion: "1.0.0",
+      }),
+    InvalidReusableCapabilityCandidateError,
+  );
+  const approved = promoteToReusable({
+    candidate: evaluated,
+    reusableAssetRef: "asset:seo-checklist-v1",
+    licenseOrIpNote: "first-party, no third-party content",
+    reusableAssetVersion: "1.0.0",
+  });
+  assert.equal("patternRef" in approved, false);
 });
 
 test("G17: the full lifecycle round-trip is deterministic and produces no intermediate mutation of prior objects", () => {
@@ -286,6 +336,7 @@ test("G17: the full lifecycle round-trip is deterministic and produces no interm
   });
   const approved = promoteToReusable({
     candidate: evaluated,
+    reusableAssetRef: "asset:seo-checklist-v1",
     licenseOrIpNote: "first-party",
     reusableAssetVersion: "1.0.0",
   });

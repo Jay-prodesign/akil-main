@@ -53,9 +53,14 @@ export interface CapabilityObservationRef {
 
 /**
  * `patternRef` is an opaque pointer to whatever pattern/component/prompt
- * description this candidate represents - this module never reads or
- * interprets its content, only carries it, matching every other
+ * description this candidate represents while it is still pre-approval
+ * (`OBSERVED_PATTERN`/`CANDIDATE`/`EVALUATED`) - this module never reads
+ * or interprets its content, only carries it, matching every other
  * `src/domain/` module's isolation from what a ref actually points to.
+ * Because `patternRef` may itself be, or point to, raw customer-specific
+ * prompt/data/confidential context (this module cannot know), it is never
+ * present once a candidate reaches `APPROVED_REUSABLE` - see
+ * `reusableAssetRef` and `promoteToReusable` below.
  *
  * `observationRefs` is present only while a candidate carries customer/
  * tenant-specific provenance (`OBSERVED_PATTERN`/`CANDIDATE`/`EVALUATED`).
@@ -64,16 +69,29 @@ export interface CapabilityObservationRef {
  * produce `APPROVED_REUSABLE`, and it always omits `observationRefs` from
  * the object it returns - an approved-reusable candidate structurally
  * cannot carry forward which tenant/project it was originally observed in.
+ *
+ * `reusableAssetRef` is present only once `APPROVED_REUSABLE`. Rev90 Brain
+ * correction: omitting `observationRefs` alone does not prove the reusable
+ * asset itself is free of raw customer-bound content, because the prior
+ * design carried `patternRef` - the same potentially-raw pointer supplied
+ * at `OBSERVED_PATTERN` - straight through into the approved result.
+ * `reusableAssetRef` is a distinct, separately-supplied pointer to the
+ * sanitized/reusable asset (never the original `patternRef` itself -
+ * `promoteToReusable` fail-closed rejects a `reusableAssetRef` identical
+ * to the candidate's own `patternRef`), and `patternRef` is never included
+ * on an `APPROVED_REUSABLE` object at all - the raw source pattern
+ * reference cannot leak into the reusable asset the module reports.
  */
 export interface ReusableCapabilityCandidate {
   readonly capabilityCandidateId: ReusableCapabilityCandidateId;
-  readonly patternRef: string;
+  readonly patternRef?: string;
   readonly status: ReusableCapabilityCandidateStatus;
   readonly observationRefs?: ReadonlyArray<CapabilityObservationRef>;
   readonly evalEvidenceRef?: string;
   readonly evaluationOutcome?: CapabilityEvaluationOutcome;
   readonly licenseOrIpNote?: string;
   readonly reusableAssetVersion?: string;
+  readonly reusableAssetRef?: string;
 }
 
 function requireNonEmptyString(value: unknown, field: string): string {
@@ -240,9 +258,23 @@ export function evaluateCandidate(input: {
  * context." The returned candidate's `observationRefs` is always
  * `undefined` - the tenant/project provenance that justified promotion is
  * not carried forward into the reusable asset itself.
+ *
+ * Rev90 Brain correction (F1): omitting `observationRefs` alone does not
+ * prove the promoted asset is free of raw customer-specific content,
+ * because the candidate's own `patternRef` may itself be (or point to) a
+ * raw customer prompt/data description. This function now requires a
+ * separately-supplied, non-empty `reusableAssetRef` naming the sanitized
+ * reusable asset - fail-closed rejected outright if it is identical to
+ * the candidate's own `patternRef` (a caller cannot simply pass the raw
+ * pattern reference through under a new field name). The returned
+ * `APPROVED_REUSABLE` object never includes `patternRef` at all: only
+ * `reusableAssetRef` plus the non-sensitive evaluation/license/version
+ * lineage (`evalEvidenceRef`, `evaluationOutcome`, `licenseOrIpNote`,
+ * `reusableAssetVersion`) needed to audit where the asset came from.
  */
 export function promoteToReusable(input: {
   candidate: ReusableCapabilityCandidate;
+  reusableAssetRef: unknown;
   licenseOrIpNote: unknown;
   reusableAssetVersion: unknown;
 }): ReusableCapabilityCandidate {
@@ -256,18 +288,25 @@ export function promoteToReusable(input: {
       `a candidate whose evaluationOutcome is not REUSABLE cannot be promoted (current evaluationOutcome: ${input.candidate.evaluationOutcome})`,
     );
   }
+  const reusableAssetRef = requireNonEmptyString(input.reusableAssetRef, "reusableAssetRef");
+  if (reusableAssetRef === input.candidate.patternRef) {
+    throw new InvalidReusableCapabilityCandidateError(
+      "reusableAssetRef must be a distinct, sanitized asset reference - it cannot be identical to the candidate's own (potentially raw) patternRef",
+    );
+  }
   const licenseOrIpNote = requireNonEmptyString(input.licenseOrIpNote, "licenseOrIpNote");
   const reusableAssetVersion = requireNonEmptyString(
     input.reusableAssetVersion,
     "reusableAssetVersion",
   );
-  // observationRefs is deliberately never set here - see doc comment above:
-  // an APPROVED_REUSABLE candidate structurally cannot carry forward the
-  // tenant/project provenance that justified its promotion.
+  // observationRefs and patternRef are deliberately never set here - see
+  // doc comment above: an APPROVED_REUSABLE candidate structurally cannot
+  // carry forward the tenant/project provenance or raw source pattern
+  // reference that justified its promotion.
   return {
     capabilityCandidateId: input.candidate.capabilityCandidateId,
-    patternRef: input.candidate.patternRef,
     status: "APPROVED_REUSABLE",
+    reusableAssetRef,
     licenseOrIpNote,
     reusableAssetVersion,
     ...(input.candidate.evalEvidenceRef !== undefined
