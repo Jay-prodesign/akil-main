@@ -76,4 +76,32 @@ No filesystem-mechanism replacement, no queue/broker/database dependency, no cha
 
 ## Status
 
-**IMPLEMENTED / SELF-VALIDATED** — pending Brain independent exact-head review of the full 40-character head SHA. Not yet `VERIFIED`/`PASS`/`CLOSED`; Claude's authority ends at this status per `AGENTS.md` §10. `MERGE_DISPOSITION: HOLD_MERGE` — normal task-scoped PR against `main`; merge requires a separately granted protected owner-gate, never inferred from any prior PR's grant.
+**SUPERSEDED by the Rev74 correction below.** Original submission (exact head `c0e8835b8bc26b375cfab4557b0949cdee368acd`) was `IMPLEMENTED / SELF-VALIDATED`, pending Brain independent exact-head review.
+
+## Rev74 correction (Brain CHANGES_REQUIRED, exact head `c0e8835b8bc26b375cfab4557b0949cdee368acd`)
+
+Brain independently reviewed the exact head above and returned `CHANGES_REQUIRED` with two findings:
+
+- **F1 BLOCKING** (verbatim): *"FileDurableOutcomeJobStore.putIfAbsent is not race-honest for concurrent same-jobId writers with identical payloads. Both writers can pass the absence check, append, observe the same first on-disk winner, and both report created=true because creator status is inferred from payload equality."*
+- **F2 EVIDENCE GAP** (verbatim): *"the current race-honesty test pre-populates the file before putIfAbsent, so it bypasses the post-append race path."*
+
+**F1 diagnosis, confirmed against source**: the original correction's re-verification step compared `JSON.stringify(winner)` against `JSON.stringify(job)` after appending, to decide whether this call actually won the race. When two writers submit an *identical* payload for the same jobId, both observe the same first-on-disk winner, and for both writers that winner's content is byte-identical to what they themselves submitted — content comparison structurally cannot distinguish "I am the winner" from "someone else already created an indistinguishable record" in that case. This is exactly the gap Brain names.
+
+**F1 fix**: creation is now arbitrated by an OS-atomic filesystem operation, not by any content comparison. `putIfAbsent` writes its job to a uniquely-named private temp file, then calls `linkSync` to publish it onto a new lock path scoped to `(tenantId, jobId)`. `linkSync` either creates the destination directory entry or fails with `EEXIST`, atomically, with no window in which a second caller could observe a half-created lock — so exactly one writer's `linkSync` can ever succeed for a given jobId, independent of whether the competing payloads are identical. A losing writer reads the winner's content from the lock file itself (not from the jsonl file, which may not even reflect it yet) and returns `created: false` with that content. See the updated doc comment on `putIfAbsent` in `src/domain/durable-outcome-job-store.ts` for the full reasoning, including a disclosed, bounded residual crash-window risk (a process killed between `linkSync` success and the following `appendFileSync` leaves the lock present but the jsonl file not yet updated — the same class of pre-existing risk any single synchronous local write already carried, not a new gap this correction introduces).
+
+**F2 fix**: the original race-honesty test pre-populated the *jsonl* file before calling `putIfAbsent`, which hits the early "already exists" fast path (`this.get(...)` finds it) and never reaches the real lock-arbitration code at all. Replaced with two tests that pre-populate the *lock* file instead (leaving the jsonl file empty), forcing execution through the actual `linkSync`/`EEXIST` branch: one proves the lock-arbitration path itself; the other proves it specifically for a byte-identical payload (the exact case Brain's F1 describes), using a structurally distinct but content-identical job object to rule out a reference-equality shortcut. A third, new dedicated test (`tests/durable-outcome-job-store-concurrency.test.ts`, mirroring the existing `durable-engineering-store-concurrency.test.ts` pattern) spawns 8 real, separate OS processes that all race `putIfAbsent` with the exact same jobId **and** the exact same payload, and asserts exactly one reports `created: true` — proving the fix under genuine OS-level concurrency, not merely in-process reasoning. Re-run 4 additional times to confirm it is not flaky.
+
+### New exact head
+
+New head (this branch, `claude/aud-durability-gap-correction`, post-merge-with-`main` + F1/F2 fixes): see `git log -1` at time of push. Base is now `main` at `3226c76fa338e425e553638e5f5f48924182a1c0` (post-PR#31-merge), reachable via the merge commit's second parent.
+
+## Evidence (Rev74 correction)
+
+- `rm -rf dist && npx tsc -p tsconfig.json`: exit 0, strict mode, zero errors, clean rebuild.
+- `node --test dist/tests/*.test.js`: **720/720 pass** (708 pre-existing on the new `main` base + 10 pre-existing AUD-DURABILITY-GAP tests + 2 new lock-arbitration tests), 0 fail/cancelled/skipped/todo. The new dedicated OS-process concurrency test independently re-run 4 additional times, all pass.
+- `git diff --stat origin/main -- src/ tests/` (against the new `main`, post-PR#31-merge): 13 files touched, 1010 insertions, 42 deletions.
+- `git diff origin/main -- package.json package-lock.json`: empty — zero new dependency introduced.
+
+## Status
+
+**IMPLEMENTED / SELF-VALIDATED** — pending Brain independent exact-head review of the new head. Not yet `VERIFIED`/`PASS`/`CLOSED`; Claude's authority ends at this status per `AGENTS.md` §10. `MERGE_DISPOSITION: HOLD_MERGE` — normal task-scoped PR against `main`; merge requires a separately granted protected owner-gate, never inferred from any prior PR's grant.

@@ -1,4 +1,5 @@
-import { mkdirSync, appendFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, appendFileSync, readFileSync, existsSync, writeFileSync, linkSync, unlinkSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { TenantScope } from "./tenant-scope.js";
 import { validatePersistedOutcomeJob, type OutcomeJob } from "./outcome-job.js";
@@ -53,11 +54,30 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
   constructor(baseDir: string) {
     this.baseDir = baseDir;
     mkdirSync(this.baseDir, { recursive: true });
+    mkdirSync(this.creationLockDir(), { recursive: true });
   }
 
   private filePathFor(tenantId: TenantScope["tenantId"]): string {
     const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
     return join(this.baseDir, `${safeKey}.jsonl`);
+  }
+
+  private creationLockDir(): string {
+    return join(this.baseDir, ".creation-locks");
+  }
+
+  /**
+   * AUD-DURABILITY-GAP Rev74 F1: one lock path per (tenantId, jobId) pair -
+   * this is the sole arbiter of "who actually created this jobId first",
+   * independent of `filePathFor`'s per-tenant jsonl sharding.
+   */
+  private creationLockPathFor(
+    tenantId: TenantScope["tenantId"],
+    jobId: OutcomeJob["jobId"],
+  ): string {
+    const tenantKey = Buffer.from(tenantId, "utf8").toString("base64url");
+    const jobKey = Buffer.from(jobId, "utf8").toString("base64url");
+    return join(this.creationLockDir(), `${tenantKey}.${jobKey}.lock`);
   }
 
   /**
@@ -111,18 +131,34 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
   /**
    * AUD-DURABILITY-GAP: the write itself is a single atomic `appendFileSync`
    * call, not a read-modify-write cycle (see `FileDurableEngineeringStore`
-   * for the identical lost-update race this replaces). That alone is not
-   * sufficient here, though: `putIfAbsent` also has a TOCTOU
-   * (time-of-check-to-time-of-use) race distinct from the write mechanism -
-   * the absence-check above and this call's own append are not atomic with
-   * each other, so a concurrent writer can append a line for the same
-   * jobId in between. `dedupedByJobId`'s "first line in the file wins" rule
-   * makes on-disk append order the single source of truth for who actually
-   * won, so after appending we re-derive the winner from disk and compare
-   * it to what we just wrote: if another writer's line landed first, this
-   * call honestly reports `created: false` and returns the true winner
-   * instead of the optimistic `created: true` it would otherwise have
-   * returned for a duplicate-jobId append it lost.
+   * for the identical lost-update race this replaces).
+   *
+   * Rev74 F1 correction: the original TOCTOU fix re-derived the winner from
+   * disk after appending and compared it (via `JSON.stringify`) to what
+   * this call submitted - but two writers racing with an *identical*
+   * payload for the same jobId cannot be disambiguated by content
+   * comparison at all: both observe the same first-on-disk winner, and
+   * both see it match their own submitted content byte-for-byte, so both
+   * concluded `created: true`. Creation is now arbitrated by a single
+   * OS-atomic operation instead of any content comparison: each writer
+   * first writes its own job to a uniquely-named temp file (private to
+   * this call - no other writer can observe or race it), then attempts
+   * `linkSync` of that temp file onto a jobId-scoped lock path
+   * (`creationLockPathFor`). `linkSync` either creates the destination
+   * directory entry or fails with `EEXIST`, atomically, with no window in
+   * which a second caller could observe a half-created lock - so exactly
+   * one writer's `linkSync` can ever succeed for a given jobId, regardless
+   * of whether the competing payloads are identical, and the outcome does
+   * not depend on comparing any content at all.
+   *
+   * Residual bounded risk (disclosed, not claimed closed): if this process
+   * is killed after `linkSync` succeeds but before the following
+   * `appendFileSync` completes, the lock exists but the jsonl file (read by
+   * `get`/`list`) does not yet reflect the job - a narrow crash window
+   * inherent to any single local synchronous write, same class of residual
+   * risk this store's "bounded local restart/replay" scope already
+   * accepted before this correction (not a new gap; a pre-existing one
+   * still bounded by "local" persistence, not distributed consensus).
    */
   putIfAbsent(job: OutcomeJob): PersistJobResult {
     const existing = this.get(job.tenantId, job.jobId);
@@ -134,16 +170,42 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
       }
       return { job: existing, created: false };
     }
-    const filePath = this.filePathFor(job.tenantId);
-    const line = `${JSON.stringify(job)}\n`;
-    appendFileSync(filePath, line, "utf8");
-    const winner = this.get(job.tenantId, job.jobId);
-    if (winner === undefined) {
-      throw new InvalidDurableOutcomeJobStoreError(
-        `internal error: jobId "${job.jobId}" missing immediately after append`,
-      );
+
+    const lockPath = this.creationLockPathFor(job.tenantId, job.jobId);
+    const tmpPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(tmpPath, JSON.stringify(job), "utf8");
+    let wonCreation: boolean;
+    try {
+      linkSync(tmpPath, lockPath);
+      wonCreation = true;
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw cause;
+      }
+      wonCreation = false;
+    } finally {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        // best-effort cleanup only - the published lock (via the hard link)
+        // already carries its own independent copy of the content, so a
+        // failure to remove the private temp file cannot corrupt it.
+      }
     }
-    if (JSON.stringify(winner) !== JSON.stringify(job)) {
+
+    if (!wonCreation) {
+      // Another writer's linkSync already claimed creation for this jobId -
+      // its content is authoritative, independent of what this call
+      // submitted (even if the payloads are byte-identical).
+      const winnerRaw = readFileSync(lockPath, "utf8");
+      let winner: OutcomeJob;
+      try {
+        winner = validatePersistedOutcomeJob(JSON.parse(winnerRaw));
+      } catch (cause) {
+        throw new InvalidDurableOutcomeJobStoreError(
+          `internal error: creation-lock content for jobId "${job.jobId}" is not a valid persisted OutcomeJob (${(cause as Error).message})`,
+        );
+      }
       if (winner.tenantId !== job.tenantId || winner.projectId !== job.projectId) {
         throw new InvalidDurableOutcomeJobStoreError(
           `jobId "${job.jobId}" is already persisted under a different tenant/project`,
@@ -151,6 +213,13 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
       }
       return { job: winner, created: false };
     }
+
+    // This call holds the creation lock - it is the true, sole creator for
+    // this jobId. No other writer can reach this point for the same jobId,
+    // so the append below is pure durability bookkeeping, not part of the
+    // race arbitration.
+    const filePath = this.filePathFor(job.tenantId);
+    appendFileSync(filePath, `${JSON.stringify(job)}\n`, "utf8");
     return { job, created: true };
   }
 

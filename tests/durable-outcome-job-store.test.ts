@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, appendFileSync } from "node:fs";
+import { mkdtempSync, rmSync, appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createProject } from "../src/domain/project.js";
@@ -29,6 +29,15 @@ function freshStoreDir(): string {
 function filePathFor(dir: string, tenantId: string): string {
   const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
   return join(dir, `${safeKey}.jsonl`);
+}
+
+// Mirrors FileDurableOutcomeJobStore's own (private) creationLockPathFor
+// encoding, so adversarial tests can inject a raw creation-lock file
+// directly at the exact path the store itself arbitrates on.
+function creationLockPathFor(dir: string, tenantId: string, jobId: string): string {
+  const tenantKey = Buffer.from(tenantId, "utf8").toString("base64url");
+  const jobKey = Buffer.from(jobId, "utf8").toString("base64url");
+  return join(dir, ".creation-locks", `${tenantKey}.${jobKey}.lock`);
 }
 
 function admittedWiredJobs() {
@@ -178,31 +187,58 @@ test("AUD-DURABILITY-GAP: a forged line with an invalid OutcomeJobState fails cl
   }
 });
 
-test("AUD-DURABILITY-GAP: putIfAbsent race-honesty - if another writer's line for the same jobId already won on disk by the time this call's own append lands, this call reports created:false and returns the true (first-on-disk) winner rather than the optimistic created:true", () => {
+test("AUD-DURABILITY-GAP Rev74 F2 correction: putIfAbsent race-honesty - if another writer's creation LOCK for the same jobId already exists (the jsonl file does not yet even reflect it), this call reports created:false and returns the lock-holder's content, exercising the real post-lock-attempt arbitration path rather than the pre-populated-jsonl fast path", () => {
   const dir = freshStoreDir();
   try {
     const store = new FileDurableOutcomeJobStore(dir);
     const { jobs } = admittedWiredJobs();
     const job = jobs[0]!;
 
-    // Simulate the race directly: another writer's line for this exact
-    // jobId is already durably on disk (it "won" the absence-check race)
-    // before this call's own putIfAbsent append happens - the store's own
-    // public API can't force two calls to truly interleave, so the race's
-    // observable postcondition (this call's append loses to an
-    // already-on-disk earlier line for the same jobId) is reproduced
-    // directly at the file level, exactly as concurrent OS processes would
-    // leave it.
-    appendFileSync(filePathFor(dir, job.tenantId), `${JSON.stringify(job)}\n`, "utf8");
+    // Simulate the real race directly at the lock layer, not the jsonl
+    // layer: another writer's linkSync already won for this exact jobId
+    // (its lock file exists), but its own appendFileSync to the jsonl file
+    // has not necessarily happened yet - this call's own absence-check
+    // (get(), which only reads the jsonl file) therefore still returns
+    // undefined, forcing execution into the real linkSync-attempt/EEXIST
+    // arbitration branch instead of the early "already exists in jsonl"
+    // fast path a naive pre-populated-file test would exercise instead.
+    const lockPath = creationLockPathFor(dir, job.tenantId, job.jobId);
+    mkdirSync(join(dir, ".creation-locks"), { recursive: true });
+    writeFileSync(lockPath, JSON.stringify(job), "utf8");
 
-    // This call's own absence-check has not yet run (no in-memory cache to
-    // consult), so calling putIfAbsent with a job that differs only in
-    // object identity (same content) still exercises the post-append
-    // re-verification path deterministically without relying on real
-    // process timing.
     const result = store.putIfAbsent(job);
     assert.equal(result.created, false);
     assert.deepEqual(result.job, job);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AUD-DURABILITY-GAP Rev74 F1 correction: putIfAbsent correctly reports created:false for a losing writer even when its submitted payload is byte-identical to the true winner's - creation is arbitrated by the OS-atomic lock, never by content comparison", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableOutcomeJobStore(dir);
+    const { jobs } = admittedWiredJobs();
+    const job = jobs[0]!;
+
+    // The exact case the original TOCTOU fix could not distinguish: another
+    // writer's lock already exists, and the content this call submits is
+    // byte-identical to the lock-holder's content (JSON.stringify equal).
+    // A comparison-based re-verification cannot tell "I am the winner" from
+    // "someone else already created an identical record" here - the lock
+    // itself must be the sole arbiter.
+    const lockPath = creationLockPathFor(dir, job.tenantId, job.jobId);
+    mkdirSync(join(dir, ".creation-locks"), { recursive: true });
+    writeFileSync(lockPath, JSON.stringify(job), "utf8");
+
+    // A structurally distinct (but content-identical) job object, proving
+    // this isn't a reference-equality shortcut either.
+    const identicalPayloadJob = JSON.parse(JSON.stringify(job)) as typeof job;
+    assert.notEqual(identicalPayloadJob, job);
+    assert.deepEqual(identicalPayloadJob, job);
+
+    const result = store.putIfAbsent(identicalPayloadJob);
+    assert.equal(result.created, false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
