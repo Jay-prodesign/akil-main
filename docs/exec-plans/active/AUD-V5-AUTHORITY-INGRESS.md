@@ -65,4 +65,32 @@ Plus `tests/v5-ptn-001-boundary-scan.test.ts`'s import-list assertion updated to
 
 ## Status
 
-**IMPLEMENTED / SELF-VALIDATED** — pending Brain independent exact-head review. Not yet `VERIFIED`/`PASS`/`CLOSED`; Claude's authority ends at this status per `AGENTS.md` §10. `MERGE_DISPOSITION: HOLD_MERGE` — normal task-scoped PR against `main`; merge requires a separately granted protected owner-gate, never inferred from any prior PR's grant. Known pending reconciliation with PR #31 before both can land (see "Known future reconciliation" above).
+**SUPERSEDED by the Rev74 correction below.** Original submission (exact head `7734820acd50a35af14df44baf851081bf8cc607`) was `IMPLEMENTED / SELF-VALIDATED`, pending Brain independent exact-head review.
+
+## Rev74 correction (Brain CHANGES_REQUIRED, exact head `7734820acd50a35af14df44baf851081bf8cc607`)
+
+Brain independently reviewed the exact head above and returned `CHANGES_REQUIRED` with two findings:
+
+- **F1 CLAIM BOUNDARY** (verbatim): *"AuthorityContext tenant/protected-action/WRITE gating is useful partial hardening but does not establish authenticated caller identity; admittingAuthorityId remains caller-asserted and AuthorityContext itself does not prove who is calling. This head cannot claim final trusted-authority-ingress / real non-self-certification closure unless a real trusted authenticated ingress is wired."*
+- **F2 ORDERING** (verbatim): *"claim.status/business checks occur before authority/tenant rejection, contrary to the stated authority-before-business fail-closed invariant and potentially disclose state to unauthorized/cross-tenant callers."*
+
+**Reconciliation with PR #31**: per Brain's acceptance ("first reconcile PR #31 after its merge"), PR #31 (`b0b748e3f85ebb80d2d3f4d6b682e7647d480ac9`) was fresh-verified live and merged (squash) into `main` at `3226c76fa338e425e553638e5f5f48924182a1c0` under the Rev57 routine-technical-merge policy Brain itself invoked. This branch was then merged with the resulting `main` (merge commit, not rebase — avoids a force-push, which this corridor requires explicit human permission for on each occasion) to bring in PR #31's `revokedAt` temporal-integrity hardening alongside this branch's authority gating. The merge conflict in `partner-capability-admission.ts` was resolved by combining both: `revokePartnerCapabilityClaim` now carries both the authority gate and the `revokedAt`/`admittedAt` ordering check.
+
+**F2 fix**: in both `admitPartnerCapabilityClaim` and `revokePartnerCapabilityClaim`, the three authority checks (`requireSameTenant`, `requireProtectedActionAuthorization`, `requirePermission`) now run *before* the claim-status business check, not after. An unauthorized or cross-tenant caller can no longer distinguish "wrong status" from "wrong authority" by which error is thrown — they always get the authority error first, regardless of the claim's actual state. Two new regression tests prove this directly: H28 (admission) and H29 (revocation) each construct a claim whose status is already invalid for the operation being attempted, pair it with a cross-tenant `AuthorityContext`, and assert `CrossTenantAuthorityError` (not the business-state error) is thrown.
+
+**F1 fix**: doc comments on both functions were rewritten to explicitly label this hardening "PARTIAL HARDENING" and state that binding the specific `admittingAuthorityId` string to a proven authenticated principal remains an **explicit, unclosed external/integration dependency** (real session/identity infrastructure this repository does not have), not a claim of final V5 non-self-certification closure. No code-level claim overreach existed beyond the doc comments — the "Explicitly NOT closed" section above already carried the same honest disclosure; the correction makes that boundary explicit at the point of the F2 ordering fix as well, so a reader of either function's doc comment sees the same disclosure Brain's F1 finding asks for.
+
+### New exact head
+
+New head (this branch, `claude/aud-v5-authority-ingress-binding`, post-merge-with-`main` + F1/F2 fixes): see `git log -1` at time of push. Base is now `main` at `3226c76fa338e425e553638e5f5f48924182a1c0` (post-PR#31-merge), reachable via the merge commit's second parent.
+
+## Evidence (Rev74 correction)
+
+- `rm -rf dist && npx tsc -p tsconfig.json`: exit 0, strict mode, zero errors, clean rebuild.
+- `node --test dist/tests/*.test.js`: **718/718 pass** (708 pre-existing on the new `main` base [705 + PR #31's 3 `revokedAt` tests] + 8 pre-existing H20-H27 + 2 new: H28, H29), 0 fail/cancelled/skipped/todo.
+- `git diff --stat origin/main -- src/ tests/` (against the new `main`, post-PR#31-merge): 3 files touched (`src/domain/partner-capability-admission.ts`, `tests/partner-capability-admission.test.ts`, `tests/v5-ptn-001-boundary-scan.test.ts`), 357 insertions, 18 deletions — no new file.
+- `git diff origin/main -- package.json package-lock.json`: empty — zero new dependency introduced.
+
+## Status
+
+**IMPLEMENTED / SELF-VALIDATED** — pending Brain independent exact-head review of the new head. Not yet `VERIFIED`/`PASS`/`CLOSED`; Claude's authority ends at this status per `AGENTS.md` §10. `MERGE_DISPOSITION: HOLD_MERGE` — normal task-scoped PR against `main`; merge requires a separately granted protected owner-gate, never inferred from any prior PR's grant. PR #31 reconciliation is now complete (merged first, then merged into this branch) — no further reconciliation pending.

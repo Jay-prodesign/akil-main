@@ -166,13 +166,14 @@ test("Rev62 hardening: revokePartnerCapabilityClaim rejects a revokedAt that doe
   });
   const admitted = admitPartnerCapabilityClaim({
     claim,
+    authority,
     admittingAuthorityId: "authority-ops-1",
     evidenceRef: "evidence:x",
     admittedAt: "2026-01-01T00:00:00.000Z",
     reviewByAt: "2027-01-01T00:00:00.000Z",
   });
   assert.throws(() => {
-    revokePartnerCapabilityClaim({ claim: admitted, revokedAt: "not-a-timestamp" });
+    revokePartnerCapabilityClaim({ claim: admitted, authority, revokedAt: "not-a-timestamp" });
   }, InvalidPartnerCapabilityClaimError);
 });
 
@@ -184,13 +185,14 @@ test("Rev62 hardening: revokePartnerCapabilityClaim rejects a revokedAt strictly
   });
   const admitted = admitPartnerCapabilityClaim({
     claim,
+    authority,
     admittingAuthorityId: "authority-ops-1",
     evidenceRef: "evidence:x",
     admittedAt: "2026-01-01T00:00:00.000Z",
     reviewByAt: "2027-01-01T00:00:00.000Z",
   });
   assert.throws(() => {
-    revokePartnerCapabilityClaim({ claim: admitted, revokedAt: "2025-12-31T00:00:00.000Z" });
+    revokePartnerCapabilityClaim({ claim: admitted, authority, revokedAt: "2025-12-31T00:00:00.000Z" });
   }, InvalidPartnerCapabilityClaimError);
 });
 
@@ -202,12 +204,13 @@ test("Rev62 hardening: revokePartnerCapabilityClaim accepts a revokedAt exactly 
   });
   const admitted = admitPartnerCapabilityClaim({
     claim,
+    authority,
     admittingAuthorityId: "authority-ops-1",
     evidenceRef: "evidence:x",
     admittedAt: "2026-01-01T00:00:00.000Z",
     reviewByAt: "2027-01-01T00:00:00.000Z",
   });
-  const revoked = revokePartnerCapabilityClaim({ claim: admitted, revokedAt: "2026-01-01T00:00:00.000Z" });
+  const revoked = revokePartnerCapabilityClaim({ claim: admitted, authority, revokedAt: "2026-01-01T00:00:00.000Z" });
   assert.equal(revoked.status, "REVOKED");
   assert.equal(revoked.revokedAt, "2026-01-01T00:00:00.000Z");
 });
@@ -605,6 +608,64 @@ test("H27 (Rev62 full-system authority ingress): the authority check happens bef
       evidenceRef: "evidence:x",
       admittedAt: "2026-01-01T00:00:00.000Z",
       reviewByAt: "2027-01-01T00:00:00.000Z",
+    });
+  }, CrossTenantAuthorityError);
+});
+
+test("H28 (Rev74 F2 ordering correction): admitPartnerCapabilityClaim rejects on cross-tenant authority even when the claim's own status is already invalid for admission - an unauthorized caller cannot discover the claim's current status", () => {
+  const claim = createPartnerCapabilityClaim({
+    partnerCapabilityClaimId: "claim-28",
+    partnerOrganization,
+    capabilityRef: "cap:seo-audit",
+  });
+  const admitted = admitPartnerCapabilityClaim({
+    claim,
+    authority,
+    admittingAuthorityId: "authority-ops-1",
+    evidenceRef: "evidence:x",
+    admittedAt: "2026-01-01T00:00:00.000Z",
+    reviewByAt: "2027-01-01T00:00:00.000Z",
+  });
+  const otherTenantAuthority = createAuthorityContext({
+    tenantScope: createTenantScope("tenant-other"),
+    permissions: ["WRITE"],
+    canPerformProtectedActions: true,
+  });
+  assert.throws(() => {
+    // admitted.status is already "ADMITTED" - re-admission is business-invalid
+    // regardless of authority. If this throws CrossTenantAuthorityError (not
+    // "only an UNVERIFIED claim can be admitted"), the authority gate ran
+    // first and the caller never learned the claim was already admitted.
+    admitPartnerCapabilityClaim({
+      claim: admitted,
+      authority: otherTenantAuthority,
+      admittingAuthorityId: "authority-ops-2",
+      evidenceRef: "evidence:y",
+      admittedAt: "2026-02-01T00:00:00.000Z",
+      reviewByAt: "2027-02-01T00:00:00.000Z",
+    });
+  }, CrossTenantAuthorityError);
+});
+
+test("H29 (Rev74 F2 ordering correction): revokePartnerCapabilityClaim rejects on cross-tenant authority even when the claim's own status is already invalid for revocation - an unauthorized caller cannot discover the claim's current status", () => {
+  const claim = createPartnerCapabilityClaim({
+    partnerCapabilityClaimId: "claim-29",
+    partnerOrganization,
+    capabilityRef: "cap:seo-audit",
+  });
+  const otherTenantAuthority = createAuthorityContext({
+    tenantScope: createTenantScope("tenant-other"),
+    permissions: ["WRITE"],
+    canPerformProtectedActions: true,
+  });
+  assert.throws(() => {
+    // claim.status is still "UNVERIFIED" - revocation is business-invalid
+    // regardless of authority. If this throws CrossTenantAuthorityError (not
+    // "only an ADMITTED claim can be revoked"), the authority gate ran first.
+    revokePartnerCapabilityClaim({
+      claim,
+      authority: otherTenantAuthority,
+      revokedAt: "2026-03-01T00:00:00.000Z",
     });
   }, CrossTenantAuthorityError);
 });
