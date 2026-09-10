@@ -189,6 +189,18 @@ Version names are capability/release checkpoints, not engineering permission sto
 - `MERGE_STATUS: NOT MERGED`. `OWNER_GATE: OPEN` — Brain states explicit Founder authorization is required before PR #21 may be merged; `NEXT_EXPECTED_ACTOR: FOUNDER`.
 - Consistent with this corridor's standing conduct rule (demonstrated on PR #18's Rev51 and PR #20's Rev54 merges): a document-recorded Brain PASS, even with an owner-gate note, is not itself a Founder authorization. Merging requires a separate, explicit Founder confirmation given directly in a live conversation turn in response to the specific exact-head merge question — never inferred from a document's claim alone. Live PR #21 GitHub state was independently re-verified to match the reviewed head/base exactly (draft, open, not merged, `mergeable_state: clean`) before surfacing this to the Founder. No merge has occurred as of this record; awaiting a live Founder decision.
 
+## V5-PTN-001 Rev62 non-blocking hardening: revokedAt temporal-integrity fix (self-selected, no Brain input required to begin)
+
+- Context: this branch (`claude/v5-ptn-001-revokedat-temporal-hardening`) was cut fresh from `main` at `fe2cbc02f20e800b309e127288cc32a72176c109`, the same base `AUD-DURABILITY-GAP` (PR #30) was cut from — the two corrections are independent and touch disjoint files.
+- With PR #30 open and awaiting Brain review, and no new Handoff revision yet available, a further scan of Brain's still-open Rev62 "NON-BLOCKING / HARDENING OBSERVATIONS" found a second actionable, dependency-safe item.
+- Brain's exact text (Rev62, verbatim): *"V5 partner capability `revokedAt` currently validates non-empty string but not timestamp/order relative to admission; retain as bounded temporal-integrity hardening unless a stronger canonical invariant promotes it."*
+- Independently verified against source: `revokePartnerCapabilityClaim` in `src/domain/partner-capability-admission.ts` validated `revokedAt` only via `requireNonEmptyString` (not the module's own `requireValidTimestamp` helper, already used by `admitPartnerCapabilityClaim`) — so a non-timestamp value, or a `revokedAt` predating the claim's own `admittedAt`, was silently accepted.
+- Fixed: `revokedAt` now validates via `requireValidTimestamp`, and is rejected if strictly before `admittedAt` (equal is accepted — an immediate revocation is not "before" its own admission). Three new adversarial/positive tests added.
+- 708/708 tests pass (705 pre-existing on this base + 3 new), strict typecheck clean, zero new dependency. See `docs/exec-plans/active/V5-PTN-001.md` "Rev62 non-blocking hardening" section for full detail.
+- `MERGE_DISPOSITION: HOLD_MERGE` — normal task-scoped PR against `main`; Status: `IMPLEMENTED / SELF-VALIDATED`, pending Brain independent exact-head review; Claude's authority ends here per `AGENTS.md` §10.
+- `DOWNSTREAM`: independent of `AUD-DURABILITY-GAP` (PR #30); both may be reviewed/merged in either order without conflict (disjoint file sets).
+- **Rev74 update:** Brain independently reviewed exact head `b0b748e3f85ebb80d2d3f4d6b682e7647d480ac9` and returned `PASS / MERGE AUTHORIZED UNDER STANDING REV57 ROUTINE-TECHNICAL POLICY`. Merged (squash) into `main` at `3226c76fa338e425e553638e5f5f48924182a1c0`. PR #31 is now `CLOSED/MERGED`.
+
 ## AUD-DURABILITY-GAP: self-selected correction of a Rev62 finding, no Brain input required to begin
 
 - Context: this corridor snapshot predates PR #26/#27/PR #25's later merge history (recorded on separate, still-unmerged docs-only branches); this branch was cut fresh from `main` at `fe2cbc02f20e800b309e127288cc32a72176c109` (the exact head this repo-native file's own "Repository identity" record in `CURRENT_STATE.md` names as PR #25's merge commit).
@@ -199,6 +211,7 @@ Version names are capability/release checkpoints, not engineering permission sto
 - 715/715 tests pass (705 pre-existing + 10 new), strict typecheck clean (`rm -rf dist && npx tsc -p .`, zero errors), zero new runtime/dev dependency. See `docs/exec-plans/active/AUD-DURABILITY-GAP.md` for full detail.
 - `MERGE_DISPOSITION: HOLD_MERGE` — normal task-scoped PR against `main`; Status: `IMPLEMENTED / SELF-VALIDATED`, pending Brain independent exact-head review; Claude's authority ends here per `AGENTS.md` §10.
 - `DOWNSTREAM`: this correction is independent of and does not block any pending PR; it addresses a standing Rev62 finding directly, ahead of (not instead of) whatever the next Handoff revision names as the controlling item for PR #25's successor work.
+- **Rev74 update:** Brain independently reviewed exact head `c0e8835b8bc26b375cfab4557b0949cdee368acd` and returned `CHANGES_REQUIRED`. F1: `FileDurableOutcomeJobStore.putIfAbsent` is not race-honest for concurrent same-jobId writers with identical payloads — both writers can pass the absence check, append, observe the same first on-disk winner, and both report `created=true` because creator status is inferred from payload equality. F2: the existing race-honesty test pre-populates the file before `putIfAbsent`, bypassing the real post-append race path. See the correction entry below for the fix.
 
 ## Claude's role inside the corridor (condensed — see Drive packet §5/§6/§12 for full text)
 

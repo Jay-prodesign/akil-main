@@ -166,6 +166,15 @@ export function admitPartnerCapabilityClaim(input: {
  * (computed, never stored - see `resolvePartnerCapabilityClaimStatus`)
  * claim is rejected, so a caller cannot manufacture a `REVOKED` record for
  * a claim that was never actually admitted.
+ *
+ * Rev62 non-blocking hardening observation: `revokedAt` previously validated
+ * only as a non-empty string, with no timestamp/order check relative to
+ * admission - a caller could pass a non-timestamp value, or a `revokedAt`
+ * that predates the claim's own `admittedAt` (revoking a claim before it was
+ * ever admitted). Both are now fail-closed: `revokedAt` must parse as a
+ * valid timestamp, and it must not be strictly before `admittedAt` (a
+ * claim's own admission timestamp - always present once `ADMITTED`, per
+ * `admitPartnerCapabilityClaim`).
  */
 export function revokePartnerCapabilityClaim(input: {
   claim: PartnerCapabilityClaim;
@@ -176,8 +185,12 @@ export function revokePartnerCapabilityClaim(input: {
       `only an ADMITTED claim can be revoked (current status: ${input.claim.status})`,
     );
   }
-  const revokedAt = requireNonEmptyString(input.revokedAt, "revokedAt");
-  return { ...input.claim, status: "REVOKED", revokedAt };
+  const revokedAt = requireValidTimestamp(input.revokedAt, "revokedAt");
+  const admittedAt = requireValidTimestamp(input.claim.admittedAt, "claim.admittedAt");
+  if (revokedAt.ms < admittedAt.ms) {
+    throw new InvalidPartnerCapabilityClaimError("revokedAt must not be before the claim's own admittedAt");
+  }
+  return { ...input.claim, status: "REVOKED", revokedAt: revokedAt.raw };
 }
 
 /**
