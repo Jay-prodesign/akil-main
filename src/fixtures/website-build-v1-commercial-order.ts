@@ -7,10 +7,10 @@ import { compilePlan } from "../domain/project-plan.js";
 import { validatePlan, type PlanValidationResult } from "../domain/project-plan-validation.js";
 import {
   createCommercialOrder,
-  resolveCanonicalServiceFromOrder,
+  resolveDeclaredServiceFromOrder,
   type CommercialOrder,
   type ServiceCatalogEntry,
-  type CanonicalServiceResolution,
+  type DeclaredServiceLookupResult,
 } from "../domain/commercial-order.js";
 import { intakeSoldScopeFromResolution } from "../domain/commercial-order-intake.js";
 import { WEBSITE_BUILD_V1_BLUEPRINT } from "./website-build-v1.js";
@@ -34,7 +34,7 @@ export interface WebsiteBuildV1CommercialOrderFixture {
   readonly tenantScope: TenantScope;
   readonly customer: Customer;
   readonly order: CommercialOrder;
-  readonly resolution: CanonicalServiceResolution;
+  readonly resolution: DeclaredServiceLookupResult;
 }
 
 /**
@@ -61,7 +61,7 @@ export function buildWebsiteBuildV1CommercialOrderFixture(): WebsiteBuildV1Comme
     serviceRef: "service:website-build",
     placedAt: "2026-09-09T00:00:00.000Z",
   });
-  const resolution = resolveCanonicalServiceFromOrder(order, WEBSITE_BUILD_V1_SERVICE_CATALOG);
+  const resolution = resolveDeclaredServiceFromOrder(order, WEBSITE_BUILD_V1_SERVICE_CATALOG);
   return { tenantScope, customer, order, resolution };
 }
 
@@ -69,7 +69,7 @@ export interface WebsiteBuildV1ColdStartFixture {
   readonly tenantScope: TenantScope;
   readonly customer: Customer;
   readonly order: CommercialOrder;
-  readonly resolution: CanonicalServiceResolution;
+  readonly resolution: DeclaredServiceLookupResult;
   readonly project: Project;
   readonly soldScope: SoldScope;
   readonly plan: ProjectPlanVersion;
@@ -106,7 +106,7 @@ export function buildWebsiteBuildV1ColdStartFixture(): WebsiteBuildV1ColdStartFi
     serviceRef: "service:website-build",
     placedAt: "2026-09-09T00:00:00.000Z",
   });
-  const resolution = resolveCanonicalServiceFromOrder(order, WEBSITE_BUILD_V1_SERVICE_CATALOG);
+  const resolution = resolveDeclaredServiceFromOrder(order, WEBSITE_BUILD_V1_SERVICE_CATALOG);
   const project = createProject({
     tenantScope,
     customer,

@@ -4,7 +4,7 @@ import { createTenantScope } from "../src/domain/tenant-scope.js";
 import { createCustomer } from "../src/domain/customer.js";
 import {
   createCommercialOrder,
-  resolveCanonicalServiceFromOrder,
+  resolveDeclaredServiceFromOrder,
   InvalidCommercialOrderError,
   type ServiceCatalogEntry,
 } from "../src/domain/commercial-order.js";
@@ -90,7 +90,7 @@ test("rejects an empty serviceRef", () => {
   );
 });
 
-test("resolveCanonicalServiceFromOrder resolves a serviceRef present in the catalog", () => {
+test("resolveDeclaredServiceFromOrder resolves a serviceRef present in the catalog", () => {
   const order = createCommercialOrder({
     tenantScope,
     customer,
@@ -106,7 +106,7 @@ test("resolveCanonicalServiceFromOrder resolves a serviceRef present in the cata
       recipeId: WEBSITE_BUILD_V1_RECIPE.recipeId,
     },
   ];
-  const resolution = resolveCanonicalServiceFromOrder(order, catalog);
+  const resolution = resolveDeclaredServiceFromOrder(order, catalog);
   assert.equal(resolution.status, "RESOLVED");
   assert.deepEqual(resolution, {
     status: "RESOLVED",
@@ -116,7 +116,7 @@ test("resolveCanonicalServiceFromOrder resolves a serviceRef present in the cata
   });
 });
 
-test("resolveCanonicalServiceFromOrder returns UNRESOLVED_SERVICE, never a fabricated closest match, for an unknown serviceRef", () => {
+test("resolveDeclaredServiceFromOrder returns UNRESOLVED_SERVICE, never a fabricated closest match, for an unknown serviceRef", () => {
   const order = createCommercialOrder({
     tenantScope,
     customer,
@@ -132,14 +132,14 @@ test("resolveCanonicalServiceFromOrder returns UNRESOLVED_SERVICE, never a fabri
       recipeId: WEBSITE_BUILD_V1_RECIPE.recipeId,
     },
   ];
-  const resolution = resolveCanonicalServiceFromOrder(order, catalog);
+  const resolution = resolveDeclaredServiceFromOrder(order, catalog);
   assert.equal(resolution.status, "UNRESOLVED_SERVICE");
   if (resolution.status === "UNRESOLVED_SERVICE") {
     assert.match(resolution.reason, /service:unknown/);
   }
 });
 
-test("resolveCanonicalServiceFromOrder returns UNRESOLVED_SERVICE against an empty catalog", () => {
+test("resolveDeclaredServiceFromOrder returns UNRESOLVED_SERVICE against an empty catalog", () => {
   const order = createCommercialOrder({
     tenantScope,
     customer,
@@ -147,11 +147,11 @@ test("resolveCanonicalServiceFromOrder returns UNRESOLVED_SERVICE against an emp
     serviceRef: "service:x",
     placedAt: "2026-01-01T00:00:00.000Z",
   });
-  const resolution = resolveCanonicalServiceFromOrder(order, []);
+  const resolution = resolveDeclaredServiceFromOrder(order, []);
   assert.equal(resolution.status, "UNRESOLVED_SERVICE");
 });
 
-test("resolveCanonicalServiceFromOrder throws (never guesses) on an ambiguous catalog with a duplicate serviceRef", () => {
+test("resolveDeclaredServiceFromOrder throws (never guesses) on an ambiguous catalog with a duplicate serviceRef", () => {
   const order = createCommercialOrder({
     tenantScope,
     customer,
@@ -174,12 +174,12 @@ test("resolveCanonicalServiceFromOrder throws (never guesses) on an ambiguous ca
     },
   ];
   assert.throws(
-    () => resolveCanonicalServiceFromOrder(order, catalog),
+    () => resolveDeclaredServiceFromOrder(order, catalog),
     InvalidCommercialOrderError,
   );
 });
 
-test("resolveCanonicalServiceFromOrder never substitutes a different serviceRef's catalog entry", () => {
+test("resolveDeclaredServiceFromOrder never substitutes a different serviceRef's catalog entry", () => {
   const order = createCommercialOrder({
     tenantScope,
     customer,
@@ -195,11 +195,11 @@ test("resolveCanonicalServiceFromOrder never substitutes a different serviceRef'
       recipeId: WEBSITE_BUILD_V1_RECIPE.recipeId,
     },
   ];
-  const resolution = resolveCanonicalServiceFromOrder(order, catalog);
+  const resolution = resolveDeclaredServiceFromOrder(order, catalog);
   assert.equal(resolution.status, "UNRESOLVED_SERVICE");
 });
 
-test("Rev74 F1 (honest boundary disclosure): resolveCanonicalServiceFromOrder has no admission/provenance/authority binding - a caller-fabricated catalog entry for a serviceRef resolves exactly like a real, admitted one, so canonical-resolution provenance remains an explicitly OPEN audit gap, not something this function proves", () => {
+test("Rev74 F1 (honest boundary disclosure): resolveDeclaredServiceFromOrder has no admission/provenance/authority binding - a caller-fabricated catalog entry for a serviceRef resolves exactly like a real, admitted one, so canonical-resolution provenance remains an explicitly OPEN audit gap, not something this function proves", () => {
   const order = createCommercialOrder({
     tenantScope,
     customer,
@@ -218,7 +218,7 @@ test("Rev74 F1 (honest boundary disclosure): resolveCanonicalServiceFromOrder ha
       recipeId: "forged-recipe-id" as DeliveryRecipe["recipeId"],
     },
   ];
-  const resolution = resolveCanonicalServiceFromOrder(order, forgedCatalog);
+  const resolution = resolveDeclaredServiceFromOrder(order, forgedCatalog);
   // This is the honestly-disclosed boundary, not a defect this test is
   // asserting should be fixed here: RESOLVED proves only that the caller's
   // own catalog declares exactly one entry for this serviceRef.

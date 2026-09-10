@@ -115,4 +115,33 @@ New head (this branch, `claude/v5-cold-start-commercial-order-resolution`, post-
 
 ## Status
 
+**SUPERSEDED by the Rev77 correction below.** Rev74-corrected submission (exact head `07968abbff73127d223f2eccfbe4bd7c15712cc1`) was `IMPLEMENTED / SELF-VALIDATED`, pending Brain independent exact-head review.
+
+## Rev77 correction (Brain CHANGES_REQUIRED, exact head `07968abbff73127d223f2eccfbe4bd7c15712cc1`)
+
+Brain independently reviewed the Rev74-corrected head and returned `CHANGES_REQUIRED`, verbatim: *"Behavioral narrowing is honest, but the new public contract still embeds the disproven canonical claim in names such as `CanonicalServiceResolution` and `resolveCanonicalServiceFromOrder` while explicitly admitting the lookup is caller-supplied and untrusted. REQUIRED CORRECTION: rename the public API and task wording to provenance-honest declared/caller-catalog lookup semantics; retain canonical-resolution provenance as explicitly OPEN. No new catalog/orchestration system required."*
+
+**Diagnosis, confirmed against source**: the Rev74 correction fixed the *claim* (doc comments honestly stated `RESOLVED` proves only caller-supplied lookup, not canonical resolution) but left the *identifiers themselves* unchanged. A reader importing `CanonicalServiceResolution` or calling `resolveCanonicalServiceFromOrder` sees "canonical" in the type signature at every call site, regardless of what the doc comment beside the declaration says — the name itself keeps making the disproven claim independent of the prose.
+
+**Fix**: renamed the public API, naming-only, no behavior change:
+
+- `CanonicalServiceResolution` → `DeclaredServiceLookupResult`
+- `resolveCanonicalServiceFromOrder` → `resolveDeclaredServiceFromOrder`
+
+Applied consistently across `src/domain/commercial-order.ts`, `src/domain/commercial-order-intake.ts`, `src/fixtures/website-build-v1-commercial-order.ts`, `tests/commercial-order.test.ts`, `tests/commercial-order-intake.test.ts`. The `ServiceCatalogEntry` doc comment's stray use of "canonical" to describe the blueprint/recipe pointer (not the resolution's trustworthiness) was also softened to "specific" to avoid any residual ambiguity. The `"RESOLVED"`/`"UNRESOLVED_SERVICE"` status literals were left unchanged — Brain's finding named the two specific identifiers above, and those literals carry no canonical/trust claim of their own. The canonical-resolution audit gap remains recorded as explicitly OPEN, exactly as the Rev74 correction left it — this correction only fixes the naming, not the underlying scope.
+
+### New exact head
+
+New head (this branch, `claude/v5-cold-start-commercial-order-resolution`, post-Rev74-correction + Rev77 rename): see `git log -1` at time of push. Base remains `main` at `3226c76fa338e425e553638e5f5f48924182a1c0` (unchanged from the Rev74 correction — no further reconciliation needed).
+
+## Evidence (Rev77 correction)
+
+- `rm -rf dist && npx tsc -p tsconfig.json`: exit 0, strict mode, zero errors, clean rebuild.
+- `node --test dist/tests/*.test.js`: **733/733 pass** (unchanged from the Rev74-corrected head — pure rename, zero behavior change, zero new/removed test), 0 fail/cancelled/skipped/todo.
+- `git diff --stat origin/main -- src/ tests/`: 6 files touched (unchanged file list), 901 insertions, 0 deletions.
+- `git diff origin/main -- package.json package-lock.json`: empty — zero new dependency introduced.
+- `grep -rn "CanonicalServiceResolution\|resolveCanonicalServiceFromOrder" src/ tests/`: zero matches (confirmed no stray reference to the old names remains anywhere in source or tests).
+
+## Status
+
 **IMPLEMENTED / SELF-VALIDATED** — pending Brain independent exact-head review of the new head. Not yet `VERIFIED`/`PASS`/`CLOSED`; Claude's authority ends at this status per `AGENTS.md` §10. `MERGE_DISPOSITION: HOLD_MERGE` — normal task-scoped PR against `main`; merge requires a separately granted protected owner-gate, never inferred from any prior PR's grant.

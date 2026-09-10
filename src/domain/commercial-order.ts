@@ -19,7 +19,7 @@ type OrderId = string & { readonly __brand: "OrderId" };
  * WEBSITE_BUILD_v1 proof starts from a preconstructed Project/SoldScope,
  * never from a zero-history customer order). Deliberately has no
  * `projectId`: an order is the entry point that precedes any Project -
- * resolving it (see `resolveCanonicalServiceFromOrder` below) is a
+ * resolving it (see `resolveDeclaredServiceFromOrder` below) is a
  * prerequisite input to later project/sold-scope creation, not a
  * consequence of it. No price, discount, payout, or commission field
  * exists on this type - this repository has no real commerce/payment/
@@ -36,16 +36,16 @@ export interface CommercialOrder {
 
 /**
  * A caller-declared mapping from an opaque commercial `serviceRef` to the
- * canonical `OfferBlueprintVersion` + `DeliveryRecipe` that fulfills it.
+ * specific `OfferBlueprintVersion` + `DeliveryRecipe` that fulfills it.
  * Not a real service catalog/product/SKU system - this repository has
- * none - just the minimum reusable pointer a resolver needs, reusing the
+ * none - just the minimum reusable pointer a lookup needs, reusing the
  * existing blueprintId/version/recipeId identifiers verbatim rather than
  * inventing a parallel "product" concept.
  *
  * Rev74 F1 claim-boundary correction (Brain CHANGES_REQUIRED): this catalog
  * carries no admission, provenance, or authority binding of its own - it is
  * whatever `ReadonlyArray<ServiceCatalogEntry>` the caller passes to
- * `resolveCanonicalServiceFromOrder`. Nothing in this module verifies that
+ * `resolveDeclaredServiceFromOrder`. Nothing in this module verifies that
  * a given entry was ever admitted through a trusted, repository-native
  * boundary; a caller can construct an arbitrary entry (any `serviceRef`
  * paired with any `blueprintId`/`blueprintVersion`/`recipeId`) and it
@@ -56,8 +56,19 @@ export interface CommercialOrder {
  * *construction* domain objects, not an admission/provenance system), and
  * building one here would be exactly the "second catalog/orchestration
  * system" Brain's own acceptance forbids. This module therefore does not
- * claim canonical/trusted resolution - see `resolveCanonicalServiceFromOrder`
+ * claim canonical/trusted resolution - see `resolveDeclaredServiceFromOrder`
  * below for the precise, honest scope.
+ *
+ * Rev77 correction (Brain CHANGES_REQUIRED): the Rev74 doc-comment
+ * narrowing above was honest, but the public API's own *names* -
+ * previously `CanonicalServiceResolution`/`resolveCanonicalServiceFromOrder`
+ * - still embedded the disproven canonical claim regardless of what the
+ * prose beside them said. Renamed to `DeclaredServiceLookupResult`/
+ * `resolveDeclaredServiceFromOrder`: "declared" names what this actually
+ * is (a caller-declared catalog lookup), not what it is not (canonical/
+ * trusted resolution). No behavior changed - this is a naming-only
+ * correction; the canonical-resolution provenance gap remains explicitly
+ * OPEN, as before.
  */
 export interface ServiceCatalogEntry {
   readonly serviceRef: string;
@@ -72,9 +83,9 @@ export interface ServiceCatalogEntry {
  * case where a customer's requested `serviceRef` has no matching catalog
  * entry yet. Neither disposition is proof that the matched entry (if any)
  * came from an admitted, trusted source - see the Rev74 correction note on
- * `ServiceCatalogEntry` and `resolveCanonicalServiceFromOrder`.
+ * `ServiceCatalogEntry` and `resolveDeclaredServiceFromOrder`.
  */
-export type CanonicalServiceResolution =
+export type DeclaredServiceLookupResult =
   | {
       readonly status: "RESOLVED";
       readonly blueprintId: OfferBlueprintVersion["blueprintId"];
@@ -154,10 +165,10 @@ export function createCommercialOrder(input: {
  * bind to yet, and inventing one here would itself be the "second
  * catalog/orchestration system" out of scope for this checkpoint.
  */
-export function resolveCanonicalServiceFromOrder(
+export function resolveDeclaredServiceFromOrder(
   order: CommercialOrder,
   catalog: ReadonlyArray<ServiceCatalogEntry>,
-): CanonicalServiceResolution {
+): DeclaredServiceLookupResult {
   const matchCount = catalog.filter((entry) => entry.serviceRef === order.serviceRef).length;
   if (matchCount > 1) {
     throw new InvalidCommercialOrderError(

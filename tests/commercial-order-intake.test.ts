@@ -8,7 +8,7 @@ import {
   intakeSoldScopeFromResolution,
   InvalidCommercialOrderIntakeError,
 } from "../src/domain/commercial-order-intake.js";
-import type { CanonicalServiceResolution } from "../src/domain/commercial-order.js";
+import type { DeclaredServiceLookupResult } from "../src/domain/commercial-order.js";
 import { WEBSITE_BUILD_V1_BLUEPRINT } from "../src/fixtures/website-build-v1.js";
 import {
   buildWebsiteBuildV1ColdStartFixture,
@@ -27,7 +27,7 @@ const project = createProject({
   state: "active",
 });
 
-const resolvedForBlueprint: CanonicalServiceResolution = {
+const resolvedForBlueprint: DeclaredServiceLookupResult = {
   status: "RESOLVED",
   blueprintId: WEBSITE_BUILD_V1_BLUEPRINT.blueprintId,
   blueprintVersion: WEBSITE_BUILD_V1_BLUEPRINT.version,
@@ -64,7 +64,7 @@ test("intakeSoldScopeFromResolution forwards included/excludedRequirementIds unc
 });
 
 test("rejects intake for an UNRESOLVED_SERVICE resolution", () => {
-  const unresolved: CanonicalServiceResolution = {
+  const unresolved: DeclaredServiceLookupResult = {
     status: "UNRESOLVED_SERVICE",
     reason: "no catalog entry",
   };

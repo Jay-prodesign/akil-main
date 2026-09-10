@@ -2,7 +2,7 @@ import type { TenantScope } from "./tenant-scope.js";
 import type { Project } from "./project.js";
 import type { OfferBlueprintVersion } from "./offer-blueprint.js";
 import { createSoldScope, type SoldScope } from "./sold-scope.js";
-import type { CanonicalServiceResolution } from "./commercial-order.js";
+import type { DeclaredServiceLookupResult } from "./commercial-order.js";
 
 export class InvalidCommercialOrderIntakeError extends Error {
   constructor(reason: string) {
@@ -17,7 +17,7 @@ export class InvalidCommercialOrderIntakeError extends Error {
  * order-driven intake compiler." Nothing previously bound a resolved
  * `CommercialOrder` to the `SoldScope` built from it - a caller could
  * construct a `SoldScope` against any blueprint regardless of what the
- * order actually resolved to (`resolveCanonicalServiceFromOrder`,
+ * order actually resolved to (`resolveDeclaredServiceFromOrder`,
  * `commercial-order.ts`). This function is that missing binding: it fails
  * closed unless the supplied `blueprint`'s identity/version exactly
  * matches the order's own resolution (same "exact-version validation"
@@ -29,7 +29,7 @@ export class InvalidCommercialOrderIntakeError extends Error {
 export function intakeSoldScopeFromResolution(input: {
   tenantScope: TenantScope;
   project: Project;
-  resolution: CanonicalServiceResolution;
+  resolution: DeclaredServiceLookupResult;
   blueprint: OfferBlueprintVersion;
   soldScopeId: unknown;
   outcomeContractRef: unknown;
