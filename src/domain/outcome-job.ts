@@ -3,6 +3,11 @@ import type { Customer } from "./customer.js";
 import type { Project } from "./project.js";
 import type { VerificationResult } from "./verification-result.js";
 import { createAuditEvent, type AuditEvent } from "./audit-event.js";
+import {
+  requireSameTenant,
+  requireProtectedActionAuthorization,
+  type AuthorityContext,
+} from "./authority.js";
 
 export class InvalidOutcomeJobError extends Error {
   constructor(reason: string) {
@@ -293,4 +298,107 @@ export function enterExceptionState(input: {
     reason: input.reason,
   });
   return { job: updatedJob, auditEvent };
+}
+
+export class InvalidExceptionRecoveryError extends Error {
+  constructor(reason: string) {
+    super(`Invalid exception-state recovery: ${reason}`);
+    this.name = "InvalidExceptionRecoveryError";
+  }
+}
+
+/**
+ * SALE-TO-CLOSE Rev91/92/93/94: the mandatory "temporary provider/
+ * execution failure recovery" acceptance case, explicitly authorized as a
+ * bounded extension of this already-closed/VERIFIED state contract rather
+ * than a Founder-gated question. This is the SMALLEST addition that
+ * satisfies it - not a general exception-exit graph, and not a second
+ * workflow/state system:
+ *
+ * - Only `BLOCKED` and `RECOVERING` are recoverable through this path.
+ *   Rev91's own text names these two states specifically as "temporary"
+ *   exception states; `ESCALATED` (implies a human decision path this
+ *   function does not model) and `STOPPED` (a governed terminal
+ *   disposition - see `applyExternalSaleDisposition` in
+ *   `external-sale-bootstrap.ts` - that must never be silently undone "as
+ *   though nothing happened") are both deliberately excluded, not merely
+ *   forgotten.
+ * - The recovery target (`to`) is restricted to `READY`, `EXECUTING`, or
+ *   `VERIFYING` - every state that still requires passing through the
+ *   unmodified, separate `verifyOutcomeJob` gate to ever reach `VERIFIED`.
+ *   `VERIFIED` and `CLOSED` are structurally unreachable as recovery
+ *   targets, so recovery can never bypass execution or verification by
+ *   construction, not merely by convention.
+ * - Recovery requires both an explicit `AuthorityContext` with
+ *   `canPerformProtectedActions: true` (reusing `authority.ts`'s existing
+ *   protected-action gate - the same primitive `governed-evaluation-
+ *   loop.ts`'s MATERIAL-change path already uses, not a new authority
+ *   system) and a non-empty `evidenceRef` - "recovery must require
+ *   sufficient evidence/authority" is enforced, not merely documented.
+ * - It always produces a new `AuditEvent` (via the same `createAuditEvent`
+ *   every other transition in this file uses) recording the exact
+ *   `from -> to` transition, the reason, and the evidence reference as a
+ *   `relatedRefs` entry - the prior exception-entry `AuditEvent` this
+ *   recovers from is a separate, already-returned object this function
+ *   never touches or erases, so the full audit trail (entry then
+ *   recovery) is preserved by construction as long as a caller persists
+ *   both, exactly as it already must for every other transition here.
+ */
+const RECOVERABLE_EXCEPTION_STATES: ReadonlySet<OutcomeJobState> = new Set<OutcomeJobState>([
+  "BLOCKED",
+  "RECOVERING",
+]);
+
+const RECOVERY_TARGET_STATES: ReadonlySet<OutcomeJobState> = new Set<OutcomeJobState>([
+  "READY",
+  "EXECUTING",
+  "VERIFYING",
+]);
+
+export function recoverFromExceptionState(input: {
+  job: OutcomeJob;
+  authority: AuthorityContext;
+  to: unknown;
+  eventId: unknown;
+  actorRef: unknown;
+  timestamp: unknown;
+  reason: unknown;
+  evidenceRef: unknown;
+}): { job: OutcomeJob; auditEvent: AuditEvent } {
+  requireSameTenant(input.authority, input.job.tenantId);
+  if (!RECOVERABLE_EXCEPTION_STATES.has(input.job.state)) {
+    throw new InvalidExceptionRecoveryError(
+      `only a job in BLOCKED or RECOVERING can be recovered through this governed path; current state: ${input.job.state}`,
+    );
+  }
+  requireProtectedActionAuthorization(input.authority, "recoverFromExceptionState");
+
+  if (typeof input.to !== "string" || !RECOVERY_TARGET_STATES.has(input.to as OutcomeJobState)) {
+    throw new InvalidExceptionRecoveryError(
+      "to must be one of READY, EXECUTING, VERIFYING - recovery can never bypass execution or verification",
+    );
+  }
+  const to = input.to as OutcomeJobState;
+
+  if (typeof input.evidenceRef !== "string" || input.evidenceRef.trim().length === 0) {
+    throw new InvalidExceptionRecoveryError(
+      "evidenceRef is required and must be a non-empty string - recovery must be evidence-backed",
+    );
+  }
+  if (typeof input.reason !== "string" || input.reason.trim().length === 0) {
+    throw new InvalidExceptionRecoveryError("reason is required and must be a non-empty string");
+  }
+
+  const fromState = input.job.state;
+  const recoveredJob: OutcomeJob = { ...input.job, state: to };
+  const auditEvent = createAuditEvent({
+    job: input.job,
+    eventId: input.eventId,
+    actorRef: input.actorRef,
+    eventType: `EXCEPTION_STATE_RECOVERED:${fromState}->${to}`,
+    timestamp: input.timestamp,
+    reason: input.reason,
+    relatedRefs: [input.evidenceRef],
+  });
+  return { job: recoveredJob, auditEvent };
 }
