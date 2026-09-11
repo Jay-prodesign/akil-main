@@ -322,6 +322,23 @@ export interface LocalWorkerRegistration {
   readonly boundProjectOwnerships: ReadonlyArray<ProjectOwnershipRef>;
 }
 
+/**
+ * Rev101 F2: fail-closed shape validation for a caller-declared ref list -
+ * matches the array/non-empty-string-member check `createDevicePolicy`
+ * already applies to `allowedWorkspaceRootRefs` (an empty array is valid;
+ * a non-array or any non-string/empty-string member is not). No existing
+ * convention in this codebase dedupes such ref lists (`worker-routing-
+ * policy.ts` only ever tests membership via `.includes()`/`includesAll`),
+ * so duplicates are left as the caller supplied them rather than silently
+ * dropped.
+ */
+function requireStringRefArray(value: unknown, field: string): ReadonlyArray<string> {
+  if (!Array.isArray(value) || value.some((ref) => typeof ref !== "string" || ref.trim().length === 0)) {
+    throw new InvalidLocalExecutionError(`${field} must be an array of non-empty strings (an empty array is valid)`);
+  }
+  return value as ReadonlyArray<string>;
+}
+
 export function createLocalWorkerRegistration(input: {
   workerId: unknown;
   device: DeviceRegistration;
@@ -341,6 +358,22 @@ export function createLocalWorkerRegistration(input: {
 }): LocalWorkerRegistration {
   const workerId = requireNonEmptyString(input.workerId, "workerId");
   const ownerMembershipRef = requireNonEmptyString(input.ownerMembershipRef, "ownerMembershipRef");
+  // Rev101 F1: a worker can never be registered under an owner other than
+  // the device's own enrolled owner - no delegation/re-assignment
+  // primitive exists yet for this purpose (none was found anywhere in
+  // this repository), so a mismatch fails closed here rather than being
+  // silently accepted as two independent claims of ownership.
+  if (ownerMembershipRef !== input.device.ownerMembershipRef) {
+    throw new InvalidLocalExecutionError(
+      "ownerMembershipRef must match the registered device's own ownerMembershipRef",
+    );
+  }
+  const declaredCapabilityRefs = requireStringRefArray(input.declaredCapabilityRefs, "declaredCapabilityRefs");
+  const declaredToolRefs = requireStringRefArray(input.declaredToolRefs, "declaredToolRefs");
+  const declaredPolicyConstraintRefs = requireStringRefArray(
+    input.declaredPolicyConstraintRefs,
+    "declaredPolicyConstraintRefs",
+  );
   const adapterKind = requireNonEmptyString(input.adapterKind, "adapterKind");
   const evaluationEvidenceRef = requireNonEmptyString(
     input.evaluationEvidenceRef,
@@ -373,9 +406,9 @@ export function createLocalWorkerRegistration(input: {
     tenantId: input.device.tenantId,
     ownerMembershipRef,
     adapterKind,
-    declaredCapabilityRefs: input.declaredCapabilityRefs as ReadonlyArray<string>,
-    declaredToolRefs: input.declaredToolRefs as ReadonlyArray<string>,
-    declaredPolicyConstraintRefs: input.declaredPolicyConstraintRefs as ReadonlyArray<string>,
+    declaredCapabilityRefs,
+    declaredToolRefs,
+    declaredPolicyConstraintRefs,
     trustStatus: input.trustStatus,
     availability: input.availability,
     maxRiskLevel: input.maxRiskLevel,

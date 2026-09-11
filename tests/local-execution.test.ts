@@ -634,3 +634,145 @@ test("L41: createLocalTaskCheckpoint succeeds for a RUNNING lease", () => {
   });
   assert.equal(checkpoint.leaseId, lease.leaseId);
 });
+
+// --- Rev101 F1/F2 corrections ---
+
+test("L42 (Rev101 F1, adversarial A-device/B-worker-owner substitution): createLocalWorkerRegistration fails closed when ownerMembershipRef does not match the registered device's own owner", () => {
+  const device = onlineDevice("42", "owner-device-a");
+  assert.throws(
+    () =>
+      createLocalWorkerRegistration({
+        workerId: "worker-42",
+        device,
+        ownerMembershipRef: "owner-worker-b",
+        adapterKind: "CODEX_LOCAL",
+        declaredCapabilityRefs: [],
+        declaredToolRefs: [],
+        declaredPolicyConstraintRefs: [],
+        trustStatus: "ADMITTED",
+        availability: "AVAILABLE",
+        maxRiskLevel: "STANDARD",
+        authorityLevel: "STANDARD",
+        costWeight: 1,
+        evaluationEvidenceRef: "evidence:x",
+        poolMode: "PRIVATE",
+        boundProjectOwnerships: [],
+      }),
+    InvalidLocalExecutionError,
+  );
+});
+
+test("L43 (Rev101 F1): createLocalWorkerRegistration succeeds when ownerMembershipRef matches the device's own owner exactly", () => {
+  const device = onlineDevice("43", "owner-device-a");
+  const worker = createLocalWorkerRegistration({
+    workerId: "worker-43",
+    device,
+    ownerMembershipRef: "owner-device-a",
+    adapterKind: "CODEX_LOCAL",
+    declaredCapabilityRefs: [],
+    declaredToolRefs: [],
+    declaredPolicyConstraintRefs: [],
+    trustStatus: "ADMITTED",
+    availability: "AVAILABLE",
+    maxRiskLevel: "STANDARD",
+    authorityLevel: "STANDARD",
+    costWeight: 1,
+    evaluationEvidenceRef: "evidence:x",
+    poolMode: "PRIVATE",
+    boundProjectOwnerships: [],
+  });
+  assert.equal(worker.ownerMembershipRef, "owner-device-a");
+});
+
+test("L44 (Rev101 F2): createLocalWorkerRegistration fails closed on a non-array declaredCapabilityRefs/declaredToolRefs/declaredPolicyConstraintRefs", () => {
+  const device = onlineDevice("44");
+  const base = {
+    workerId: "worker-44",
+    device,
+    ownerMembershipRef: "owner-1",
+    adapterKind: "CODEX_LOCAL",
+    trustStatus: "ADMITTED" as const,
+    availability: "AVAILABLE" as const,
+    maxRiskLevel: "STANDARD" as const,
+    authorityLevel: "STANDARD" as const,
+    costWeight: 1,
+    evaluationEvidenceRef: "evidence:x",
+    poolMode: "PRIVATE" as const,
+    boundProjectOwnerships: [],
+  };
+  assert.throws(
+    () =>
+      createLocalWorkerRegistration({
+        ...base,
+        declaredCapabilityRefs: "not-an-array" as unknown as [],
+        declaredToolRefs: [],
+        declaredPolicyConstraintRefs: [],
+      }),
+    InvalidLocalExecutionError,
+  );
+  assert.throws(
+    () =>
+      createLocalWorkerRegistration({
+        ...base,
+        declaredCapabilityRefs: [],
+        declaredToolRefs: "not-an-array" as unknown as [],
+        declaredPolicyConstraintRefs: [],
+      }),
+    InvalidLocalExecutionError,
+  );
+  assert.throws(
+    () =>
+      createLocalWorkerRegistration({
+        ...base,
+        declaredCapabilityRefs: [],
+        declaredToolRefs: [],
+        declaredPolicyConstraintRefs: "not-an-array" as unknown as [],
+      }),
+    InvalidLocalExecutionError,
+  );
+});
+
+test("L45 (Rev101 F2): createLocalWorkerRegistration fails closed on an empty-string or non-string member in any declared ref list, but accepts an empty array", () => {
+  const device = onlineDevice("45");
+  const base = {
+    workerId: "worker-45",
+    device,
+    ownerMembershipRef: "owner-1",
+    adapterKind: "CODEX_LOCAL",
+    trustStatus: "ADMITTED" as const,
+    availability: "AVAILABLE" as const,
+    maxRiskLevel: "STANDARD" as const,
+    authorityLevel: "STANDARD" as const,
+    costWeight: 1,
+    evaluationEvidenceRef: "evidence:x",
+    poolMode: "PRIVATE" as const,
+    boundProjectOwnerships: [],
+  };
+  assert.throws(
+    () =>
+      createLocalWorkerRegistration({
+        ...base,
+        declaredCapabilityRefs: ["cap:ok", ""],
+        declaredToolRefs: [],
+        declaredPolicyConstraintRefs: [],
+      }),
+    InvalidLocalExecutionError,
+  );
+  assert.throws(
+    () =>
+      createLocalWorkerRegistration({
+        ...base,
+        declaredCapabilityRefs: [],
+        declaredToolRefs: [123 as unknown as string],
+        declaredPolicyConstraintRefs: [],
+      }),
+    InvalidLocalExecutionError,
+  );
+  const worker = createLocalWorkerRegistration({
+    ...base,
+    declaredCapabilityRefs: [],
+    declaredToolRefs: [],
+    declaredPolicyConstraintRefs: [],
+  });
+  assert.deepEqual(worker.declaredCapabilityRefs, []);
+});
