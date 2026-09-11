@@ -137,6 +137,24 @@ Per Rev90/93's own sequencing, the next progressive-elaboration step: "generic a
 - Zero new npm dependency; only type-only imports of the already-established catalog types plus the global `URL` constructor (no new package).
 - No filesystem/network/child_process/HTTP coupling; pure functions only.
 
+## Slice 5: prebuilt connector endpoint definitions
+
+Per Rev90/93's own sequencing, the next progressive-elaboration step: "prebuilt adapters." New module: `src/domain/prebuilt-connector-definitions.ts`. Still no real HTTP call, DNS resolution, or request ever executed - static, real endpoint/capability declarations only, reusing slice 4's own `validateConnectorEndpoints`/`requireAbsoluteHttpUrl` validators rather than re-implementing them.
+
+- Defines five single-host, honestly-scoped prebuilt connectors: `GITHUB` (OAUTH2), `OPENAI`/`ANTHROPIC`/`GOOGLE_AI` (API_KEY, each with `model-inference`/`model-catalog` capabilities on their own real, distinct API hosts), and `GOOGLE_DRIVE` (OAUTH2, with real search/read/create/write/share capabilities on the Drive API v3's one stable host - directly satisfying the blueprint's own "a real initial connector capability, not a decorative catalog card" requirement).
+- **Deliberately deferred, not fabricated**: `GOOGLE_WORKSPACE` (the blueprint's Docs/Sheets/Slides capabilities span three genuinely distinct Google API hosts - `docs.googleapis.com`/`sheets.googleapis.com`/`slides.googleapis.com` - and this module's one-`baseUrl`-per-definition shape would need a genuine architecture decision, a per-endpoint base-URL override, to represent that honestly; not made unilaterally here) and `META` (multiple materially different product APIs - Graph/WhatsApp Business/Marketing - with no single canonical surface to default to without guessing). `resolvePrebuiltConnectorDefinition` fail-closed distinguishes "recognized kind, not yet defined" from "genuinely unrecognized kind" for both.
+- `bindPrebuiltDefinition` reuses the exact same fail-closed connector-kind/auth-mode binding discipline as slice 4's `bindGenericApiDefinition`/`bindGenericOAuthDefinition`.
+
+### Test coverage (slice 5)
+
+`tests/prebuilt-connector-definitions.test.ts`, 7 tests (Q1-Q7): exact defined-kind roster (excluding `GOOGLE_WORKSPACE`/`META`), fail-closed resolution for deferred-but-recognized vs. genuinely-unrecognized kinds, per-provider endpoint/auth-mode/host verification for all five connectors, fail-closed binding (match succeeds, connector-kind mismatch rejected), and **adversarial cross-connector isolation** (no connector's capability ever resolves against another connector's definition).
+
+### Evidence (slice 5)
+
+- Build: `npm run test` -> clean `tsc` build (strict, `exactOptionalPropertyTypes: true`), full regression **765/765 pass** (708 true pre-existing + 57 new: 22 K-tests + 7 M-tests + 5 N-tests + 11 P-tests + 7 Q-tests + 5 boundary-scan tests, boundary-scan file list now covering all five slice-1 through slice-5 modules).
+- Zero new npm dependency; only type-only imports of already-established types plus the shared validators exported from slice 4.
+- No filesystem/network/child_process/HTTP coupling; pure functions only (module-load-time validation of the static registry is deterministic and side-effect-free).
+
 ## Status
 
-**IMPLEMENTED / SELF-VALIDATED (slice 4 added)** (slices 1-4 of CONN-001). Pending Brain independent exact-head re-review. `MERGE_DISPOSITION: HOLD_MERGE` (no `MAIN` mutation). Next dependency-safe steps per Rev90/93's own sequencing: prebuilt adapters (as catalog descriptors, still no real network call), then the Rev91/92/93 SALE-TO-CLOSE E2E acceptance floor (P0 adversarial tests only - duplicate/replay/crash convergence, tenant isolation, revoked/wrong connection fail-closed, temporary provider recovery, cancellation/refund/chargeback governed disposition, verification-gated CLOSED), without a further Brain dispatch.
+**IMPLEMENTED / SELF-VALIDATED (slice 5 added)** (slices 1-5 of CONN-001). Pending Brain independent exact-head re-review. `MERGE_DISPOSITION: HOLD_MERGE` (no `MAIN` mutation). Remaining per Rev90/91/92/93's own sequencing: the two mandatory E2E acceptance cases (need real credentials/admin-UI wiring - protected gate), then the Rev91/92/93 SALE-TO-CLOSE E2E acceptance floor (P0 adversarial tests only - duplicate/replay/crash convergence, tenant isolation, revoked/wrong connection fail-closed, temporary provider recovery, cancellation/refund/chargeback governed disposition, verification-gated CLOSED), without a further Brain dispatch.

@@ -64,7 +64,8 @@ function requireNonEmptyString(value: unknown, field: string): string {
   return value;
 }
 
-function requireAbsoluteHttpUrl(value: unknown, field: string): string {
+/** Exported for reuse by `prebuilt-connector-definitions.ts`. */
+export function requireAbsoluteHttpUrl(value: unknown, field: string): string {
   const raw = requireNonEmptyString(value, field);
   let parsed: URL;
   try {
@@ -99,7 +100,13 @@ function requirePositiveInteger(value: unknown, field: string): number {
  *   resolution (`resolveEndpointForCapability`, below) would otherwise be
  *   ambiguous.
  */
-function validateEndpoints(endpoints: unknown): ReadonlyArray<GenericConnectorEndpointDefinition> {
+/**
+ * Exported so `prebuilt-connector-definitions.ts` can reuse the exact
+ * same endpoint validation discipline for CONN-001's prebuilt connector
+ * registry, rather than re-implementing (and risking silently diverging
+ * from) these fail-closed rules.
+ */
+export function validateConnectorEndpoints(endpoints: unknown): ReadonlyArray<GenericConnectorEndpointDefinition> {
   if (!Array.isArray(endpoints) || endpoints.length === 0) {
     throw new InvalidGenericConnectorDefinitionError("endpoints must be a non-empty array");
   }
@@ -183,7 +190,7 @@ export function createGenericApiConnectorDefinition(input: {
     );
   }
   const authMode = input.authMode as GenericApiAuthMode;
-  const endpoints = validateEndpoints(input.endpoints);
+  const endpoints = validateConnectorEndpoints(input.endpoints);
 
   let validationEndpointCapabilityRef: RequirementId | undefined;
   if (input.validationEndpointCapabilityRef !== undefined) {
@@ -255,7 +262,7 @@ export function createGenericOAuthConnectorDefinition(input: {
     scopes.push(value);
   }
 
-  const endpoints = validateEndpoints(input.endpoints);
+  const endpoints = validateConnectorEndpoints(input.endpoints);
 
   return { connectionBindingId, authorizationUrl, tokenUrl, scopes, endpoints };
 }

@@ -254,6 +254,17 @@ Version names are capability/release checkpoints, not engineering permission sto
 - Status: **IMPLEMENTED / SELF-VALIDATED**, pending Brain independent exact-head review. `MERGE_DISPOSITION: HOLD_MERGE` unchanged.
 - `NEXT`: prebuilt adapters (still no real network call), then the Rev91/92/93 SALE-TO-CLOSE E2E acceptance floor, without a further Brain dispatch per Rev90/93's own sequencing.
 
+## CONN-001 slice 5: prebuilt connector endpoint definitions (no Brain dispatch required to begin)
+
+- Fresh-read the canonical Handoff before continuing (still Rev93, no new revision - confirmed via unchanged `modifiedTime` and unchanged PR #38 live GitHub state since the slice-4 push).
+- New module `src/domain/prebuilt-connector-definitions.ts`: static, real, single-host endpoint/capability declarations for `GITHUB`, `OPENAI`, `ANTHROPIC`, `GOOGLE_AI`, and `GOOGLE_DRIVE` - still zero real HTTP calls, reusing slice 4's `validateConnectorEndpoints`/`requireAbsoluteHttpUrl` validators.
+- `GOOGLE_DRIVE` carries real search/read/create/write/share capabilities on the Drive API v3's one stable host, directly satisfying the blueprint's "a real initial connector capability, not a decorative catalog card" requirement.
+- `GOOGLE_WORKSPACE` and `META` are explicitly deferred, not fabricated: Workspace's Docs/Sheets/Slides capabilities span three genuinely distinct Google API hosts, which this module's one-`baseUrl`-per-definition shape cannot honestly represent without a genuine architecture decision (a per-endpoint base-URL override) this bounded slice does not unilaterally make; Meta exposes multiple materially different product APIs with no single canonical surface to default to. `resolvePrebuiltConnectorDefinition` fail-closed distinguishes "recognized, not yet defined" from "genuinely unrecognized."
+- 7 new tests (Q1-Q7), including adversarial cross-connector capability-resolution isolation (no connector's capability ever resolves against another connector's definition).
+- Full regression: **765/765 pass** (708 true pre-existing + 57: 22 K-tests + 7 M-tests + 5 N-tests + 11 P-tests + 7 Q-tests + 5 boundary-scan), strict typecheck clean, zero new dependency.
+- Status: **IMPLEMENTED / SELF-VALIDATED**, pending Brain independent exact-head review. `MERGE_DISPOSITION: HOLD_MERGE` unchanged.
+- `NEXT`: the two mandatory E2E acceptance cases (protected gate - need real credentials/admin-UI wiring), then the Rev91/92/93 SALE-TO-CLOSE E2E acceptance floor, without a further Brain dispatch per Rev90/93's own sequencing.
+
 ## Claude's role inside the corridor (condensed — see Drive packet §5/§6/§12 for full text)
 
 Claude is the delegated Engineering Brain + Primary Engineer inside the corridor: fresh-read and reconcile live repo truth before mutating; reuse existing patterns; choose the next dependency-safe work unit from the corridor-admitted graph (not roadmap prose at large); make reversible technical/architecture-within-envelope decisions; implement/test/self-review/fix/evidence/update state; continue across task and version boundaries when entry predicates are satisfied — without a routine per-task Brain/Founder start ceremony. Claude must not self-expand product scope, cross a material architecture envelope silently, or use implementation convenience to bypass a protected gate. Brain retains company/product strategy, canonical scope/version authority, material architecture-envelope decisions outside the delegated bounds, protected-gate classification, and independent/final verification.
