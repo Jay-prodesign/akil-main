@@ -197,7 +197,7 @@ test("P5: rejects a candidate whose claim is REVOKED", () => {
   assert.equal(decision.status, "REJECTED");
 });
 
-test("P6 (§12 'cannot self-certify', extended to routing): excludes a candidate whose partner equals the routing decision's own owner, even if otherwise eligible", () => {
+test("P6 (bounded opaque-identity-reuse guard): excludes a candidate whose partnerOrganizationId is literally reused as decidedByOwnerId, even if otherwise eligible", () => {
   const selfCandidate = makeEligibleCandidate("6-self");
   const otherCandidate = makeEligibleCandidate("6-other");
   const decision = resolvePartnerRoute({
@@ -534,4 +534,22 @@ test("P23 (Rev62 serviceRef exactness extended to routing): an assignment scoped
     ],
   });
   assert.equal(decision.status, "REJECTED");
+});
+
+test("P24 (Rev101 F1, adversarial deciding identity tied to the candidate): excludes a candidate whose partnerEmployeeMembershipId - not its partnerOrganizationId - is literally reused as decidedByOwnerId, even if otherwise eligible", () => {
+  const selfCandidate = makeEligibleCandidate("24-self");
+  const otherCandidate = makeEligibleCandidate("24-other");
+  const decision = resolvePartnerRoute({
+    requiredCapabilityRef: "cap:seo-audit",
+    targetOwnership,
+    asOf: "2026-06-01T00:00:00.000Z",
+    // Reuses the self-candidate's own partnerEmployeeMembershipId, not its
+    // partnerOrganizationId - the specific gap Rev101 F1 named ("doesn't
+    // account for the candidate's own distinct partner-employee-
+    // membership identity").
+    decidedByOwnerId: "membership-24-self",
+    candidates: [selfCandidate, otherCandidate],
+  });
+  assert.equal(decision.status, "ROUTED");
+  assert.equal(decision.selectedPartnerOrganizationId, "partner-24-other");
 });

@@ -29,6 +29,25 @@ export class InvalidPartnerRoutingRequestError extends Error {
  * admission (`resolvePartnerCapabilityClaimStatus`) AND per-employee
  * client/project access (`resolvePartnerClientAccess`) - rather than
  * reusing only one of them.
+ *
+ * Rev101 F1 correction: `decidedByOwnerId` is a bare, unbranded, caller-
+ * supplied opaque string with no repository-enforced binding to
+ * `PartnerOrganization["partnerOrganizationId"]` or any other identity
+ * type - no admitted delegation/cross-domain identity-mapping primitive
+ * exists anywhere in this codebase that could prove `decidedByOwnerId`
+ * genuinely belongs to a different, independent party than the routed
+ * candidate, and this module does not invent one. `isEligible` therefore
+ * makes only the narrow, honestly-provable claim that `decidedByOwnerId`
+ * does not literally reuse either identifier the candidate itself
+ * carries - its `partnerOrganizationId` or its own distinct
+ * `partnerEmployeeMembershipId` - mirroring the same bounded opaque-
+ * identity-reuse discipline `admitPartnerCapabilityClaim`'s own self-
+ * admission guard (`partner-capability-admission.ts`, Rev55 F1) already
+ * uses. This detects a decision owner who literally reuses the
+ * candidate's own identifier; it is not a proof of independently
+ * verified authority (that would require a real cross-domain IAM binding,
+ * out of scope here) - callers must not read a `ROUTED` decision as
+ * evidence that `decidedByOwnerId` was independently authenticated.
  */
 export type PartnerRoutingDecisionStatus = "ROUTED" | "REJECTED";
 
@@ -100,10 +119,10 @@ function requireValidTimestamp(value: unknown, field: string): string {
  * - the claim's `capabilityRef` matches `requiredCapabilityRef` and it
  *   resolves `ADMITTED` as of `asOf` (§12: an expired/unverified/revoked
  *   claim is never routable, no matter how early it appears);
- * - the candidate partner is not itself the routing decision's own owner
- *   (§12's "cannot self-certify" discipline, already enforced at
- *   admission in `partner-capability-admission.ts`, extended here to
- *   routing);
+ * - `decidedByOwnerId` does not literally reuse either identifier the
+ *   candidate itself brings to this attempt - its partner organization id
+ *   or its own partner-employee-membership id (Rev101 F1 correction, see
+ *   below);
  * - the specific candidate employee resolves `AUTHORIZED` client access
  *   (`resolvePartnerClientAccess`) for `targetOwnership` - an admitted
  *   organization-level capability claim never substitutes for a real,
@@ -134,7 +153,10 @@ function isEligible(
   if (resolvePartnerCapabilityClaimStatus({ claim: candidate.capabilityClaim, asOf }) !== "ADMITTED") {
     return false;
   }
-  if ((candidate.partnerOrganization.partnerOrganizationId as string) === decidedByOwnerId) {
+  if (
+    (candidate.partnerOrganization.partnerOrganizationId as string) === decidedByOwnerId ||
+    (candidate.partnerEmployeeMembership.partnerEmployeeMembershipId as string) === decidedByOwnerId
+  ) {
     return false;
   }
   const clientAccess = resolvePartnerClientAccess({
