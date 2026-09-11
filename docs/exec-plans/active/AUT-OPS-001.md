@@ -1,0 +1,49 @@
+# AUT-OPS-001 — Account-Manager + Automation Operating Integration (Rev98 gap family 9)
+
+## Provenance
+
+- Governing authority: DEC-160 V2→V5 Autonomous Engineering Corridor. Brain's Rev98 Handoff revision lists twelve "MANDATORY POST-FOUNDATION REOPEN / DISPOSITION FAMILIES." This checkpoint is Family 9: *"V4 WORKSTREAM G — ACCOUNT-MANAGER + AUTOMATION OPERATING INTEGRATION. Reuse V3 AccountOwner/DeliveryOwner, attention and worker routing. Close only missing integration semantics for accountable owner on automation actions, explicit automation<->human handoff/escalation, manual fallback/support-burden observability and separation between human ownership and worker identity."*
+- **Selection reasoning**: continuing Rev101's own "AFTER BOUNDED CORRECTIONS" fresh dependency scan (after PR #41/#42/#43's Rev101 corrections, LOCAL-EXEC-002/PR #44, and OBS-TEL-001/PR #45 were all implemented and pushed), Family 9 was selected next because — unlike `LOCAL-EXEC-003` (external Codex CLI/SDK research required) and most other remaining Rev98 families (each dependent on one of the still-open PR #38-45 checkpoints, or on the still-open Family 2 trusted-ingress boundary) — Family 9 composes **only already-merged `main` modules**: `ownership-assignment.ts` (V3 Workstream B, `OwnershipAssignment`/`resolveCurrentOwner`), `worker-routing-policy.ts` (V5-WRK-001, `WorkerRoutingDecision`/`AdmittedWorker`), and `organization-membership.ts` (V3-ORG-001, `OrganizationMembership`). No branch-stacking on any in-review PR is required.
+- Branch: `claude/aut-ops-001-account-automation-integration`, cut fresh from `main` at `3226c76fa338e425e553638e5f5f48924182a1c0` — an independent Rev98 family.
+
+## Scope (this checkpoint)
+
+`src/domain/automation-operating-integration.ts`:
+
+- **Accountable owner on automation actions**: `bindAccountableOwnerToAutomationAction` — an automated action can only be bound once a `WorkerRoutingDecision` has genuinely `ROUTED` (a `REJECTED` decision has no executor to be accountable for), and only when a real, currently-active `ACCOUNT_OWNER` or `DELIVERY_OWNER` assignment exists for the target ownership scope (resolved via the existing, unmodified `resolveCurrentOwner` — no second ownership-resolution mechanism invented). An automated action can never be represented as "ownerless." Only `ACCOUNT_OWNER`/`DELIVERY_OWNER` (the operational/delivery roles) are eligible; `LEAD_OWNER`/`DEAL_OWNER` are pre-sale roles with no bearing on accountability for an already-executing action.
+- **Explicit automation<->human handoff/escalation**: `AutomationActionStatus` (`AUTOMATED`/`HANDED_OFF_TO_HUMAN`/`COMPLETED`/`FAILED`) is a strictly closed lifecycle. `escalateAutomationActionToHuman` is the *only* function that can produce `HANDED_OFF_TO_HUMAN` — fails closed unless the action is still `AUTOMATED` (an already-escalated/resolved action cannot be escalated again), the escalation target is a real `OrganizationMembership` of the exact same tenant (a bare id string is never accepted, and cross-tenant escalation fails closed), and a non-empty `escalationReason` is supplied. `transitionAutomationAction` handles only the terminal `COMPLETED`/`FAILED` resolutions from either `AUTOMATED` or `HANDED_OFF_TO_HUMAN` — it cannot itself produce a handoff.
+- **Manual fallback/support-burden observability**: `everRequiredManualFallback` is set exactly once, by `escalateAutomationActionToHuman`, and never cleared by any later transition — it is the durable record of whether an action's automation was ever insufficient, regardless of how it eventually resolved. `resolveSupportBurden` is the one-action-at-a-time primitive (`NONE`/`MANUAL_FALLBACK_REQUIRED`) a real telemetry caller would compose into an aggregate rate — no aggregate/rate computed here, and no wiring into `OBS-TEL-001` (explicitly deferred, see below).
+- **Separation between human ownership and worker identity**: structural throughout — every function that names an accountable human takes a full `OrganizationMembership`/`OwnershipAssignment`-derived value (resolved from real domain state), while an automated executor is identified only via `WorkerRoutingDecision["executorWorkerId"]`/`AdmittedWorker["workerId"]`. The two identifier spaces are never accepted interchangeably in any function signature — proven by the boundary scan's own source-level signature inspection (not a runtime identity-equality guess, avoiding the exact overclaiming pattern Rev101 F1 flagged on `V5-PTN-002`'s own self-routing check).
+- `tests/automation-operating-integration.test.ts` (16 tests: A1-A16) and `tests/aut-ops-001-boundary-scan.test.ts` (7 tests).
+
+## Explicitly deferred (not fabricated)
+
+- **No wiring into `OBS-TEL-001`.** That checkpoint (PR #45) is itself still open/unmerged; wiring `resolveSupportBurden` into a real aggregate telemetry metric is future composition work once both floors are merged, not fabricated here.
+- **No wiring into `attention-state.ts`/`team-attention-projection.ts`.** Rev98's own text names "attention" among the modules to reuse, but this checkpoint's scope is bounded to the four acceptance bullets it explicitly lists (accountable owner, handoff/escalation, support-burden observability, human/worker separation) — attention-surface wiring is presentation-layer composition for a later, separate UI-facing checkpoint (Family 10, itself gated on the still-open Family 2 staff-ingress boundary).
+- **No second worker-routing or ownership-resolution engine.** `resolveWorkerRoute`/`createOwnershipAssignment` are never called from this module (verified by the boundary scan) — this module only ever *consumes* an already-produced `WorkerRoutingDecision` and an already-maintained `OwnershipAssignment` history.
+- **No durable persistence/store.** Every object in this module is an in-memory, pure value, matching this checkpoint's own "smallest missing integration semantics" scope.
+
+## Architecture / semantic invariants (verified by test)
+
+- Binding: succeeds for both `DELIVERY_OWNER` (A1) and `ACCOUNT_OWNER` (A5); fails closed on a `REJECTED` routing decision (A2, sanity-checked), on no active owner for the required role (A3, sanity-checked — never ownerless), on `LEAD_OWNER`/`DEAL_OWNER` as the accountable role (A4), and on an ownership scope that doesn't match the given tenant scope (A6).
+- Escalation: records a real handoff with the target membership id and a mandatory reason (A7); fails closed on re-escalating an already-`HANDED_OFF_TO_HUMAN` action (A8, sanity-checked), on a cross-tenant escalation target (A9, sanity-checked), and on an empty `escalationReason` (A10).
+- Transitions: `AUTOMATED`→`COMPLETED` directly (no handoff required) (A11); `HANDED_OFF_TO_HUMAN`→`FAILED` (A12); `AUTOMATED` can never jump directly to `HANDED_OFF_TO_HUMAN` via `transitionAutomationAction` — only `escalateAutomationActionToHuman` produces that state (A13); a terminal `COMPLETED` action can never transition further (A14).
+- Support burden: `NONE` for an action that never required escalation (A15); `MANUAL_FALLBACK_REQUIRED` for an action that was ever escalated, even after it later `COMPLETED` — the signal survives resolution (A16).
+- Sanity-checked: three representative adversarial guards (A3's never-ownerless guard, A8's re-escalation guard, A9's cross-tenant-escalation guard) were each temporarily disabled together and the build/tests rerun — exactly those three tests failed, with every other test still passing; the guards were then restored and 731/731 reconfirmed.
+
+## Hard Non-Scope
+
+No modification to any existing merged file (`ownership-assignment.ts`, `worker-routing-policy.ts`, `organization-membership.ts`, `tenant-scope.ts`, `project-ownership.ts` are all read-only dependencies here); no real network/vendor call; no persistence/durable store; no admin/UI wiring; no new runtime dependency; no wiring into `OBS-TEL-001` or `attention-state.ts`.
+
+## Evidence
+
+- `npm run build` (`tsc -p tsconfig.json`, strict mode incl. `exactOptionalPropertyTypes`/`noUncheckedIndexedAccess`): exit 0, zero errors.
+- `npm run test`: **731/731 pass**, 0 fail, 0 skipped (708 pre-existing baseline + 23 new: 16 in `tests/automation-operating-integration.test.ts`, 7 in `tests/aut-ops-001-boundary-scan.test.ts`).
+- `npx tsc --noEmit -p .`: exit 0.
+- Sanity-checked adversarial tests: A3's never-ownerless guard, A8's re-escalation guard, and A9's cross-tenant-escalation guard were each temporarily disabled together, confirmed exactly those 3 tests then failed (with all other tests, including the corresponding positive cases, still passing), then all three were restored and 731/731 reconfirmed.
+- `package.json`: zero new runtime dependency; `clean` script carried forward (same build-hygiene fix already applied on every other branch cut this session).
+- Files touched: `src/domain/automation-operating-integration.ts` (new), `tests/automation-operating-integration.test.ts` (new), `tests/aut-ops-001-boundary-scan.test.ts` (new), `package.json` (clean-script fix), this exec-plan, `docs/engineering/CURRENT_STATE.md`, `docs/exec-plans/corridors/V2_TO_V5.md`.
+
+## Status
+
+**IMPLEMENTED / SELF-VALIDATED** — pending fresh Brain independent exact-head review. Not yet `VERIFIED`/`PASS`/`CLOSED`; Claude's authority ends at this status per `AGENTS.md` §10. `MERGE_DISPOSITION: HOLD_MERGE` — normal task-scoped PR against `main`; merge requires a separately granted protected owner-gate, never inferred from any prior PR's grant. Per Rev95/97/98/99/100/101's continuous-execution batch-mode authorization, independent Brain exact-head review of this checkpoint is deferred to the one consolidated end-of-batch packet alongside PR #38, PR #39, RUNTIME-001, V5-PTN-002 (Rev101-corrected), V4-EFF-001 (Rev101-corrected), LOCAL-EXEC-001 (Rev101-corrected), LOCAL-EXEC-002, and OBS-TEL-001.
