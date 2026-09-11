@@ -170,26 +170,30 @@ test("E11: reportExternalEffectOutcome cannot be called twice on the same attemp
   );
 });
 
-test("E12: verifyExternalEffectReadback moves an APPLIED attempt to VERIFIED when the readback confirms it", () => {
+test("E12: verifyExternalEffectReadback moves an APPLIED attempt to VERIFIED when the readback confirms it, preserving readback evidence and the original effect correlation ref", () => {
   const attempt = startExternalEffectAttempt({ intent: noApprovalIntent(), attemptId: "attempt-10" });
-  const applied = reportExternalEffectOutcome({ attempt, outcome: "APPLIED", externalCorrelationRef: "x" });
+  const applied = reportExternalEffectOutcome({ attempt, outcome: "APPLIED", externalCorrelationRef: "provider-effect-ref" });
   const verified = verifyExternalEffectReadback({
     attempt: applied,
     readbackConfirmsApplied: true,
     evidenceRef: "evidence:readback-confirmed",
   });
   assert.equal(verified.state, "VERIFIED");
+  assert.equal(verified.readbackEvidenceRef, "evidence:readback-confirmed");
+  assert.equal(verified.externalCorrelationRef, "provider-effect-ref");
 });
 
-test("E13 (readback authoritative over claimed outcome): a readback that disproves an APPLIED claim corrects the attempt to FAILED, not left falsely APPLIED", () => {
+test("E13 (readback authoritative over claimed outcome): a readback that disproves an APPLIED claim corrects the attempt to FAILED, not left falsely APPLIED, and preserves both the readback evidence and the original effect correlation ref for reconciliation", () => {
   const attempt = startExternalEffectAttempt({ intent: noApprovalIntent(), attemptId: "attempt-11" });
-  const applied = reportExternalEffectOutcome({ attempt, outcome: "APPLIED", externalCorrelationRef: "x" });
+  const applied = reportExternalEffectOutcome({ attempt, outcome: "APPLIED", externalCorrelationRef: "provider-effect-ref" });
   const corrected = verifyExternalEffectReadback({
     attempt: applied,
     readbackConfirmsApplied: false,
     evidenceRef: "evidence:readback-disproved",
   });
   assert.equal(corrected.state, "FAILED");
+  assert.equal(corrected.readbackEvidenceRef, "evidence:readback-disproved");
+  assert.equal(corrected.externalCorrelationRef, "provider-effect-ref");
 });
 
 test("E14: verifyExternalEffectReadback fails closed on a non-APPLIED attempt (e.g. still NOT_STARTED)", () => {
@@ -355,9 +359,9 @@ test("E22: retryExternalEffectAttempt rejects a mismatched intent/attempt pair",
   );
 });
 
-test("E23: rollbackExternalEffectAttempt moves an APPLIED attempt to ROLLED_BACK with a governed authority", () => {
+test("E23 (Rev101 F1: rollback preserves original effect correlation): rollbackExternalEffectAttempt moves an APPLIED attempt to ROLLED_BACK with a governed authority, without erasing the original externalCorrelationRef the effect was reported under", () => {
   const attempt = startExternalEffectAttempt({ intent: noApprovalIntent(), attemptId: "attempt-21" });
-  const applied = reportExternalEffectOutcome({ attempt, outcome: "APPLIED", externalCorrelationRef: "x" });
+  const applied = reportExternalEffectOutcome({ attempt, outcome: "APPLIED", externalCorrelationRef: "provider-effect-ref" });
   const rolledBack = rollbackExternalEffectAttempt({
     attempt: applied,
     authority: grantedAuthority(),
@@ -365,20 +369,30 @@ test("E23: rollbackExternalEffectAttempt moves an APPLIED attempt to ROLLED_BACK
     evidenceRef: "evidence:rollback-approved",
   });
   assert.equal(rolledBack.state, "ROLLED_BACK");
-  assert.equal(rolledBack.externalCorrelationRef, "provider-rollback-ref");
+  assert.equal(rolledBack.externalCorrelationRef, "provider-effect-ref");
+  assert.equal(rolledBack.rollbackCorrelationRef, "provider-rollback-ref");
+  assert.equal(rolledBack.rollbackEvidenceRef, "evidence:rollback-approved");
 });
 
-test("E24: rollbackExternalEffectAttempt also accepts a VERIFIED attempt", () => {
+test("E24 (Rev101 F1: rollback of a VERIFIED attempt preserves both readback and original effect lineage): rollbackExternalEffectAttempt also accepts a VERIFIED attempt", () => {
   const attempt = startExternalEffectAttempt({ intent: noApprovalIntent(), attemptId: "attempt-22" });
-  const applied = reportExternalEffectOutcome({ attempt, outcome: "APPLIED", externalCorrelationRef: "x" });
-  const verified = verifyExternalEffectReadback({ attempt: applied, readbackConfirmsApplied: true, evidenceRef: "x" });
+  const applied = reportExternalEffectOutcome({ attempt, outcome: "APPLIED", externalCorrelationRef: "provider-effect-ref" });
+  const verified = verifyExternalEffectReadback({
+    attempt: applied,
+    readbackConfirmsApplied: true,
+    evidenceRef: "evidence:readback-confirmed",
+  });
   const rolledBack = rollbackExternalEffectAttempt({
     attempt: verified,
     authority: grantedAuthority(),
     rollbackCorrelationRef: "provider-rollback-ref-2",
-    evidenceRef: "evidence:x",
+    evidenceRef: "evidence:rollback-x",
   });
   assert.equal(rolledBack.state, "ROLLED_BACK");
+  assert.equal(rolledBack.externalCorrelationRef, "provider-effect-ref");
+  assert.equal(rolledBack.readbackEvidenceRef, "evidence:readback-confirmed");
+  assert.equal(rolledBack.rollbackCorrelationRef, "provider-rollback-ref-2");
+  assert.equal(rolledBack.rollbackEvidenceRef, "evidence:rollback-x");
 });
 
 test("E25: rollbackExternalEffectAttempt fails closed on a NOT_STARTED attempt (nothing has applied yet to roll back)", () => {
@@ -419,13 +433,36 @@ test("E27: isRecognizedExternalEffectAttemptState is a fail-closed type guard ov
   assert.equal(isRecognizedExternalEffectAttemptState(undefined), false);
 });
 
-test("E28 (full happy-path chain): PROPOSED->attempt->APPLIED->VERIFIED never regresses to an earlier state and preserves effectIntentId/tenantId throughout", () => {
+test("E28 (full happy-path chain): PROPOSED->attempt->APPLIED->VERIFIED never regresses to an earlier state and preserves effectIntentId/tenantId/correlation/readback-evidence throughout", () => {
   const intent = noApprovalIntent();
   const attempt = startExternalEffectAttempt({ intent, attemptId: "attempt-25" });
   const applied = reportExternalEffectOutcome({ attempt, outcome: "APPLIED", externalCorrelationRef: "provider-x" });
-  const verified = verifyExternalEffectReadback({ attempt: applied, readbackConfirmsApplied: true, evidenceRef: "x" });
+  const verified = verifyExternalEffectReadback({ attempt: applied, readbackConfirmsApplied: true, evidenceRef: "evidence:readback" });
   assert.equal(verified.effectIntentId, intent.effectIntentId);
   assert.equal(verified.tenantId, intent.tenantId);
   assert.equal(verified.externalCorrelationRef, "provider-x");
+  assert.equal(verified.readbackEvidenceRef, "evidence:readback");
   assert.equal(verified.state, "VERIFIED");
+});
+
+test("E29 (Rev101 F1 full lineage chain): APPLIED->VERIFIED->ROLLED_BACK retains the original effect correlation ref, the readback evidence, and the rollback's own distinct correlation/evidence all at once", () => {
+  const intent = noApprovalIntent();
+  const attempt = startExternalEffectAttempt({ intent, attemptId: "attempt-26" });
+  const applied = reportExternalEffectOutcome({ attempt, outcome: "APPLIED", externalCorrelationRef: "provider-original-effect" });
+  const verified = verifyExternalEffectReadback({
+    attempt: applied,
+    readbackConfirmsApplied: true,
+    evidenceRef: "evidence:readback-confirmed",
+  });
+  const rolledBack = rollbackExternalEffectAttempt({
+    attempt: verified,
+    authority: grantedAuthority(),
+    rollbackCorrelationRef: "provider-rollback-compensating-action",
+    evidenceRef: "evidence:rollback-authorized",
+  });
+  assert.equal(rolledBack.state, "ROLLED_BACK");
+  assert.equal(rolledBack.externalCorrelationRef, "provider-original-effect");
+  assert.equal(rolledBack.readbackEvidenceRef, "evidence:readback-confirmed");
+  assert.equal(rolledBack.rollbackCorrelationRef, "provider-rollback-compensating-action");
+  assert.equal(rolledBack.rollbackEvidenceRef, "evidence:rollback-authorized");
 });

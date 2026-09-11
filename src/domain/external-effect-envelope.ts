@@ -94,6 +94,9 @@ export interface ExternalEffectAttempt {
   readonly state: ExternalEffectAttemptState;
   readonly externalCorrelationRef?: string;
   readonly approvalEvidenceRef?: string;
+  readonly readbackEvidenceRef?: string;
+  readonly rollbackCorrelationRef?: string;
+  readonly rollbackEvidenceRef?: string;
 }
 
 function requireNonEmptyString(value: unknown, field: string): string {
@@ -214,6 +217,14 @@ export function reportExternalEffectOutcome(input: {
  * reported success but a follow-up read shows otherwise), the attempt is
  * corrected to `FAILED` rather than left falsely `APPLIED` - readback
  * evidence is always authoritative over the original claimed outcome.
+ *
+ * Rev101 F1 fix: the readback's own `evidenceRef` is preserved on the
+ * returned attempt as `readbackEvidenceRef` (distinct from
+ * `approvalEvidenceRef`) rather than validated and discarded, and the
+ * original `externalCorrelationRef` this attempt already carried from
+ * `reportExternalEffectOutcome` is left untouched either way - a
+ * disproving readback must not erase the correlation the FAILED state
+ * needs to be reconciled against.
  */
 export function verifyExternalEffectReadback(input: {
   attempt: ExternalEffectAttempt;
@@ -228,8 +239,12 @@ export function verifyExternalEffectReadback(input: {
   if (typeof input.readbackConfirmsApplied !== "boolean") {
     throw new InvalidExternalEffectError("readbackConfirmsApplied must be a boolean");
   }
-  requireNonEmptyString(input.evidenceRef, "evidenceRef");
-  return { ...input.attempt, state: input.readbackConfirmsApplied ? "VERIFIED" : "FAILED" };
+  const readbackEvidenceRef = requireNonEmptyString(input.evidenceRef, "evidenceRef");
+  return {
+    ...input.attempt,
+    state: input.readbackConfirmsApplied ? "VERIFIED" : "FAILED",
+    readbackEvidenceRef,
+  };
 }
 
 const RECOVERABLE_ATTEMPT_STATES: ReadonlySet<ExternalEffectAttemptState> = new Set(["FAILED", "UNKNOWN"]);
@@ -292,6 +307,13 @@ export function retryExternalEffectAttempt(input: {
  * failed/unknown attempt. Requires the same authority/evidence
  * discipline; `rollbackCorrelationRef` is the opaque proof that an
  * actual compensating action occurred (this module never performs it).
+ *
+ * Rev101 F1 fix: the rollback's own correlation and evidence are carried
+ * forward as distinct `rollbackCorrelationRef`/`rollbackEvidenceRef`
+ * fields rather than overwriting `externalCorrelationRef` - the original
+ * effect's correlation ref (set when the effect was first reported
+ * APPLIED/VERIFIED) must survive a rollback so the original and the
+ * compensating action can both still be reconciled afterward.
  */
 export function rollbackExternalEffectAttempt(input: {
   attempt: ExternalEffectAttempt;
@@ -306,9 +328,14 @@ export function rollbackExternalEffectAttempt(input: {
     );
   }
   requireProtectedActionAuthorization(input.authority, "rollbackExternalEffectAttempt");
-  requireNonEmptyString(input.evidenceRef, "evidenceRef");
+  const rollbackEvidenceRef = requireNonEmptyString(input.evidenceRef, "evidenceRef");
   const rollbackCorrelationRef = requireNonEmptyString(input.rollbackCorrelationRef, "rollbackCorrelationRef");
-  return { ...input.attempt, state: "ROLLED_BACK", externalCorrelationRef: rollbackCorrelationRef };
+  return {
+    ...input.attempt,
+    state: "ROLLED_BACK",
+    rollbackCorrelationRef,
+    rollbackEvidenceRef,
+  };
 }
 
 /**
