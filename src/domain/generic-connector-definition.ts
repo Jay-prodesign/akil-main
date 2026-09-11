@@ -49,12 +49,27 @@ const RECOGNIZED_GENERIC_API_AUTH_MODES: ReadonlySet<string> = new Set<GenericAp
   "CUSTOM_HEADER",
 ]);
 
+/**
+ * Rev94 F3: `baseUrlOverride` is the explicit, per-endpoint multi-host
+ * contract that resolves `GOOGLE_WORKSPACE`'s genuine multi-host shape
+ * (Docs/Sheets/Slides each live on their own distinct API host) inside
+ * this existing declarative contract, rather than either forcing three
+ * hosts into one dishonest single-`baseUrl` definition or deferring
+ * Workspace indefinitely. When present, it is the absolute base URL an
+ * execution adapter must use for *this endpoint specifically*, taking
+ * priority over the connector definition's own top-level `baseUrl`; when
+ * absent, the endpoint uses the definition's `baseUrl` as before (the
+ * common case for every single-host connector). See
+ * `prebuilt-connector-definitions.ts`'s `GOOGLE_WORKSPACE` entry for the
+ * concrete usage.
+ */
 export interface GenericConnectorEndpointDefinition {
   readonly capabilityRef: RequirementId;
   readonly method: HttpMethod;
   readonly path: string;
   readonly requestMapping?: string;
   readonly responseMapping?: string;
+  readonly baseUrlOverride?: string;
 }
 
 function requireNonEmptyString(value: unknown, field: string): string {
@@ -147,7 +162,14 @@ export function validateConnectorEndpoints(endpoints: unknown): ReadonlyArray<Ge
             ...withRequestMapping,
             responseMapping: requireNonEmptyString(entry.responseMapping, `endpoints[${index}].responseMapping`),
           };
-    validated.push(withResponseMapping);
+    const withBaseUrlOverride =
+      entry.baseUrlOverride === undefined
+        ? withResponseMapping
+        : {
+            ...withResponseMapping,
+            baseUrlOverride: requireAbsoluteHttpUrl(entry.baseUrlOverride, `endpoints[${index}].baseUrlOverride`),
+          };
+    validated.push(withBaseUrlOverride);
   }
   return validated;
 }

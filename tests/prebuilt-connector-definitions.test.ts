@@ -22,18 +22,47 @@ function ownership(): ProjectOwnershipRef {
   });
 }
 
-test("Q1: listDefinedPrebuiltConnectorKinds lists exactly the five honestly-scoped single-host prebuilt kinds, excluding GOOGLE_WORKSPACE and META", () => {
+test("Q1 (Rev94-corrected): listDefinedPrebuiltConnectorKinds lists exactly the six honestly-scoped prebuilt kinds, including GOOGLE_WORKSPACE (now resolved via per-endpoint baseUrlOverride) but still excluding META", () => {
   const kinds = listDefinedPrebuiltConnectorKinds();
   assert.deepEqual(
     [...kinds].sort(),
-    ["ANTHROPIC", "GITHUB", "GOOGLE_AI", "GOOGLE_DRIVE", "OPENAI"].sort(),
+    ["ANTHROPIC", "GITHUB", "GOOGLE_AI", "GOOGLE_DRIVE", "GOOGLE_WORKSPACE", "OPENAI"].sort(),
   );
 });
 
-test("Q2 (adversarial): resolvePrebuiltConnectorDefinition fail-closed throws (never returns undefined) for a not-yet-defined but recognized kind, distinctly from a genuinely unrecognized one", () => {
-  assert.throws(() => resolvePrebuiltConnectorDefinition("GOOGLE_WORKSPACE"), InvalidGenericConnectorDefinitionError);
+test("Q2 (adversarial, Rev94-corrected): resolvePrebuiltConnectorDefinition now defines GOOGLE_WORKSPACE, but still fail-closed throws (never returns undefined) for META (deliberately deferred) and for a genuinely unrecognized kind", () => {
+  assert.doesNotThrow(() => resolvePrebuiltConnectorDefinition("GOOGLE_WORKSPACE"));
   assert.throws(() => resolvePrebuiltConnectorDefinition("META"), InvalidGenericConnectorDefinitionError);
   assert.throws(() => resolvePrebuiltConnectorDefinition("SLACK"), InvalidGenericConnectorDefinitionError);
+});
+
+test("Q8 (Rev94 F3, GOOGLE_WORKSPACE multi-host): Docs/Sheets/Slides each resolve to their own real host via baseUrlOverride, while the definition's own top-level baseUrl remains Docs' host", () => {
+  const definition = resolvePrebuiltConnectorDefinition("GOOGLE_WORKSPACE");
+  assert.equal(definition.baseUrl, "https://docs.googleapis.com/v1");
+  assert.equal(definition.authMode, "OAUTH2");
+
+  const docsRead = resolveEndpointForCapability(definition, "cap:workspace-docs-read");
+  assert.equal(docsRead.baseUrlOverride, undefined);
+
+  const sheetsRead = resolveEndpointForCapability(definition, "cap:workspace-sheets-read");
+  assert.equal(sheetsRead.baseUrlOverride, "https://sheets.googleapis.com/v4");
+
+  const slidesRead = resolveEndpointForCapability(definition, "cap:workspace-slides-read");
+  assert.equal(slidesRead.baseUrlOverride, "https://slides.googleapis.com/v1");
+
+  // Distinct capabilityRefs per service - a Drive-only or Docs-only
+  // connection's admitted scope cannot silently become Sheets/Slides
+  // authority merely because they share one PrebuiltConnectorKind.
+  for (const capabilityRef of [
+    "cap:workspace-docs-read",
+    "cap:workspace-docs-create",
+    "cap:workspace-sheets-read",
+    "cap:workspace-sheets-create",
+    "cap:workspace-slides-read",
+    "cap:workspace-slides-create",
+  ]) {
+    assert.doesNotThrow(() => resolveEndpointForCapability(definition, capabilityRef));
+  }
 });
 
 test("Q3: GITHUB's definition uses a stable single host and OAUTH2, with both declared capabilities resolvable", () => {

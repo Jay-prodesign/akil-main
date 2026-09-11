@@ -18,24 +18,33 @@ import {
  * caller-authored Generic Custom API definition are held to exactly the
  * same fail-closed shape rules.
  *
- * DELIBERATELY DEFERRED, NOT FABRICATED (Rev90's own "avoid speculative
+ * Rev94 F3 correction: `GOOGLE_WORKSPACE` is now defined. The original
+ * Rev90 deferral reasoned that Docs/Sheets/Slides live on three genuinely
+ * distinct API hosts and that `PrebuiltConnectorDefinition` had exactly
+ * one `baseUrl` per definition, so representing Workspace honestly would
+ * need a genuine architecture decision. Rev94 explicitly authorized
+ * exactly that decision: `generic-connector-definition.ts`'s
+ * `GenericConnectorEndpointDefinition` now carries an optional, explicit
+ * per-endpoint `baseUrlOverride` - the connector keeps one canonical
+ * definition (and one representative top-level `baseUrl`, Docs' own host),
+ * while each Sheets/Slides endpoint declares its own real host via
+ * `baseUrlOverride`. Scope/capability separation stays explicit: Drive,
+ * Docs, Sheets and Slides each get their own distinct `capabilityRef`s
+ * (never one collapsed "workspace" capability), so a connection admitted
+ * for only some of them cannot be treated as authorizing the rest -
+ * `resolveEndpointForCapability` only ever resolves a capability the
+ * definition actually declares.
+ *
+ * DELIBERATELY DEFERRED, NOT FABRICATED (Rev90/95's own "avoid speculative
  * provider breadth" instruction):
- * - `GOOGLE_WORKSPACE` - the blueprint's own text calls for "applicable
- *   Docs/Sheets/Slides capabilities," but those are three genuinely
- *   distinct Google API hosts (`docs.googleapis.com`,
- *   `sheets.googleapis.com`, `slides.googleapis.com`). This module's
- *   `PrebuiltConnectorDefinition` (like `GenericApiConnectorDefinition`)
- *   has exactly one `baseUrl` per definition - supporting three hosts
- *   under one definition would require a genuine architecture decision
- *   (a per-endpoint base-URL override) this bounded slice does not
- *   unilaterally make. Fabricating a definition against only one of the
- *   three hosts and calling it "Workspace" would misrepresent capability.
  * - `META` - Rev90's own text: "may be included when its adapter can be
  *   implemented honestly without production credential activation." Meta
  *   exposes multiple, materially different product APIs (Graph API,
  *   WhatsApp Business API, Marketing API) with no single canonical
  *   surface a bounded slice can honestly default to without guessing
- *   which product this repository actually needs.
+ *   which product this repository actually needs - unlike Workspace's
+ *   Docs/Sheets/Slides (three hosts of the *same* well-understood product
+ *   family), Meta's three APIs are different products entirely.
  *
  * `GOOGLE_DRIVE` is included (the blueprint explicitly names it as
  * requiring "a real initial connector capability, not a decorative
@@ -43,11 +52,16 @@ import {
  * covering search/read/create/write/share.
  */
 const PREBUILT_ENDPOINT_SOURCE: Record<
-  "GITHUB" | "OPENAI" | "ANTHROPIC" | "GOOGLE_AI" | "GOOGLE_DRIVE",
+  "GITHUB" | "OPENAI" | "ANTHROPIC" | "GOOGLE_AI" | "GOOGLE_DRIVE" | "GOOGLE_WORKSPACE",
   {
     baseUrl: string;
     authMode: ConnectorAuthMode;
-    endpoints: ReadonlyArray<{ capabilityRef: string; method: GenericConnectorEndpointDefinition["method"]; path: string }>;
+    endpoints: ReadonlyArray<{
+      capabilityRef: string;
+      method: GenericConnectorEndpointDefinition["method"];
+      path: string;
+      baseUrlOverride?: string;
+    }>;
   }
 > = {
   GITHUB: {
@@ -93,6 +107,41 @@ const PREBUILT_ENDPOINT_SOURCE: Record<
       { capabilityRef: "cap:drive-share", method: "POST", path: "/files/{fileId}/permissions" },
     ],
   },
+  GOOGLE_WORKSPACE: {
+    // Representative/primary host - Docs' own. Sheets and Slides endpoints
+    // below declare their own real host via baseUrlOverride rather than
+    // being forced under this one.
+    baseUrl: "https://docs.googleapis.com/v1",
+    authMode: "OAUTH2",
+    endpoints: [
+      { capabilityRef: "cap:workspace-docs-read", method: "GET", path: "/documents/{documentId}" },
+      { capabilityRef: "cap:workspace-docs-create", method: "POST", path: "/documents" },
+      {
+        capabilityRef: "cap:workspace-sheets-read",
+        method: "GET",
+        path: "/spreadsheets/{spreadsheetId}",
+        baseUrlOverride: "https://sheets.googleapis.com/v4",
+      },
+      {
+        capabilityRef: "cap:workspace-sheets-create",
+        method: "POST",
+        path: "/spreadsheets",
+        baseUrlOverride: "https://sheets.googleapis.com/v4",
+      },
+      {
+        capabilityRef: "cap:workspace-slides-read",
+        method: "GET",
+        path: "/presentations/{presentationId}",
+        baseUrlOverride: "https://slides.googleapis.com/v1",
+      },
+      {
+        capabilityRef: "cap:workspace-slides-create",
+        method: "POST",
+        path: "/presentations",
+        baseUrlOverride: "https://slides.googleapis.com/v1",
+      },
+    ],
+  },
 };
 
 export type DefinedPrebuiltConnectorKind = keyof typeof PREBUILT_ENDPOINT_SOURCE;
@@ -126,11 +175,11 @@ const PREBUILT_CONNECTOR_DEFINITIONS: ReadonlyMap<DefinedPrebuiltConnectorKind, 
 );
 
 /**
- * Fail-closed: never returns `undefined`. A recognized `PrebuiltConnectorKind`
- * (per `integration-connector-catalog.ts`'s closed enum) that has no entry
- * in this registry yet (`GOOGLE_WORKSPACE`, `META`) throws a distinct,
- * honest "not yet defined" error rather than being confused with a
- * genuinely unrecognized kind.
+ * Fail-closed: never returns `undefined`. `META` - a recognized
+ * `PrebuiltConnectorKind` (per `integration-connector-catalog.ts`'s closed
+ * enum) with no entry in this registry yet - throws a distinct, honest
+ * "not yet defined" error rather than being confused with a genuinely
+ * unrecognized kind.
  */
 export function resolvePrebuiltConnectorDefinition(connectorKind: unknown): PrebuiltConnectorDefinition {
   if (typeof connectorKind !== "string") {
@@ -140,7 +189,7 @@ export function resolvePrebuiltConnectorDefinition(connectorKind: unknown): Preb
   if (definition !== undefined) {
     return definition;
   }
-  if (connectorKind === "GOOGLE_WORKSPACE" || connectorKind === "META") {
+  if (connectorKind === "META") {
     throw new InvalidGenericConnectorDefinitionError(
       `${connectorKind} is a recognized prebuilt connector kind but has no defined endpoint set yet - deliberately deferred, not fabricated`,
     );

@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createProjectOwnershipRef, type ProjectOwnershipRef } from "../src/domain/project-ownership.js";
-import { createConnectionRequirement, type ConnectionRequirement } from "../src/domain/connection-authority.js";
+import { createConnectionRequirement, createSecretRef, type ConnectionRequirement } from "../src/domain/connection-authority.js";
 import {
   createConnectorDescriptor,
   requestConnectorConnection,
@@ -14,7 +14,13 @@ import {
 import {
   FileDurableConnectorConnectionStore,
   ConnectorConnectionVersionConflictError,
+  CorruptedConnectorConnectionFileError,
 } from "../src/domain/durable-connector-connection-store.js";
+
+function tenantFilePath(dir: string, tenantId: string): string {
+  const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
+  return join(dir, `${safeKey}.json`);
+}
 
 function freshStoreDir(): string {
   return mkdtempSync(join(tmpdir(), "conn-001-connector-connection-store-"));
@@ -265,6 +271,217 @@ test("M7 (restart-safety): a fresh store instance over the same baseDir reconstr
     const storeB = new FileDurableConnectorConnectionStore(dir);
     const reloaded = storeB.get(requirement.ownership.tenantId, instance.binding.connectionBindingId);
     assert.deepEqual(reloaded, updated);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Rev94 F2: fail-closed replay validation - forged/corrupt on-disk records
+// ---------------------------------------------------------------------------
+
+test("M8 (adversarial replay): a forged file that is not valid JSON fails closed on read", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableConnectorConnectionStore(dir);
+    const requirement = requirementFor(githubDescriptor(), ownership());
+    writeFileSync(tenantFilePath(dir, requirement.ownership.tenantId), "{ not valid json", "utf8");
+    assert.throws(() => store.list(requirement.ownership.tenantId), CorruptedConnectorConnectionFileError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("M9 (adversarial replay): a forged file that is a bare JSON array (not an object keyed by connectionBindingId) fails closed", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableConnectorConnectionStore(dir);
+    const requirement = requirementFor(githubDescriptor(), ownership());
+    writeFileSync(tenantFilePath(dir, requirement.ownership.tenantId), "[]", "utf8");
+    assert.throws(() => store.list(requirement.ownership.tenantId), CorruptedConnectorConnectionFileError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("M10 (adversarial replay): a forged record whose stored key does not match its embedded instance.binding.connectionBindingId fails closed", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableConnectorConnectionStore(dir);
+    const descriptor = githubDescriptor();
+    const requirement = requirementFor(descriptor, ownership());
+    const instance = requestConnectorConnection({
+      requirement,
+      connectorDescriptor: descriptor,
+      connectionBindingId: "bind-1",
+      workspaceRef: "workspace-1",
+      integrationInstanceRef: "instance-1",
+      delegatedScope: [],
+      authMode: "OAUTH2",
+    });
+    const stored = store.save(instance);
+    const forgedFile = {
+      "bind-DIFFERENT-KEY": { instance, version: stored.version },
+    };
+    writeFileSync(tenantFilePath(dir, requirement.ownership.tenantId), JSON.stringify(forgedFile), "utf8");
+    assert.throws(() => store.list(requirement.ownership.tenantId), CorruptedConnectorConnectionFileError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("M11 (adversarial replay): a forged record claiming a foreign tenant's ownership.tenantId under this tenant's file fails closed (cross-tenant contamination)", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableConnectorConnectionStore(dir);
+    const descriptor = githubDescriptor();
+    const requirementA = requirementFor(descriptor, ownership("a"));
+    const instanceA = requestConnectorConnection({
+      requirement: requirementA,
+      connectorDescriptor: descriptor,
+      connectionBindingId: "bind-a",
+      workspaceRef: "workspace-a",
+      integrationInstanceRef: "instance-a",
+      delegatedScope: [],
+      authMode: "OAUTH2",
+    });
+    const storedA = store.save(instanceA);
+
+    // Forge tenant A's file to contain a record whose embedded
+    // ownership.tenantId is actually tenant B's - simulating either file
+    // corruption or an attempted cross-tenant injection.
+    const requirementB = requirementFor(descriptor, ownership("b"));
+    const instanceBUnderTenantAFile = requestConnectorConnection({
+      requirement: requirementB,
+      connectorDescriptor: descriptor,
+      connectionBindingId: "bind-a",
+      workspaceRef: "workspace-b-forged",
+      integrationInstanceRef: "instance-b-forged",
+      delegatedScope: [],
+      authMode: "OAUTH2",
+    });
+    const forgedFile = {
+      "bind-a": { instance: instanceBUnderTenantAFile, version: storedA.version },
+    };
+    writeFileSync(tenantFilePath(dir, requirementA.ownership.tenantId), JSON.stringify(forgedFile), "utf8");
+
+    assert.throws(() => store.list(requirementA.ownership.tenantId), CorruptedConnectorConnectionFileError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("M12 (adversarial replay): a forged record with an unrecognized connectorKind fails closed", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableConnectorConnectionStore(dir);
+    const descriptor = githubDescriptor();
+    const requirement = requirementFor(descriptor, ownership());
+    const instance = requestConnectorConnection({
+      requirement,
+      connectorDescriptor: descriptor,
+      connectionBindingId: "bind-1",
+      workspaceRef: "workspace-1",
+      integrationInstanceRef: "instance-1",
+      delegatedScope: [],
+      authMode: "OAUTH2",
+    });
+    const stored = store.save(instance);
+    const forgedInstance = { ...instance, connectorKind: "NOT_A_REAL_CONNECTOR" };
+    const forgedFile = { "bind-1": { instance: forgedInstance, version: stored.version } };
+    writeFileSync(tenantFilePath(dir, requirement.ownership.tenantId), JSON.stringify(forgedFile), "utf8");
+
+    assert.throws(() => store.list(requirement.ownership.tenantId), CorruptedConnectorConnectionFileError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("M13 (adversarial replay): a forged record whose binding.providerRef does not match instance.connectorKind fails closed", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableConnectorConnectionStore(dir);
+    const descriptor = githubDescriptor();
+    const requirement = requirementFor(descriptor, ownership());
+    const instance = requestConnectorConnection({
+      requirement,
+      connectorDescriptor: descriptor,
+      connectionBindingId: "bind-1",
+      workspaceRef: "workspace-1",
+      integrationInstanceRef: "instance-1",
+      delegatedScope: [],
+      authMode: "OAUTH2",
+    });
+    const stored = store.save(instance);
+    const forgedInstance = {
+      ...instance,
+      binding: { ...instance.binding, providerRef: "OPENAI" },
+    };
+    const forgedFile = { "bind-1": { instance: forgedInstance, version: stored.version } };
+    writeFileSync(tenantFilePath(dir, requirement.ownership.tenantId), JSON.stringify(forgedFile), "utf8");
+
+    assert.throws(() => store.list(requirement.ownership.tenantId), CorruptedConnectorConnectionFileError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("M14 (adversarial replay): a forged record whose secretRef is an object (not a plain opaque string) fails closed - structural secret boundary", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableConnectorConnectionStore(dir);
+    const descriptor = githubDescriptor();
+    const requirement = requirementFor(descriptor, ownership());
+    const instance = requestConnectorConnection({
+      requirement,
+      connectorDescriptor: descriptor,
+      connectionBindingId: "bind-1",
+      workspaceRef: "workspace-1",
+      integrationInstanceRef: "instance-1",
+      delegatedScope: [],
+      authMode: "OAUTH2",
+    });
+    const stored = store.save(instance);
+    const forgedInstance = {
+      ...instance,
+      binding: { ...instance.binding, secretRef: { raw: "sk-live-forged-secret-value" } },
+    };
+    const forgedFile = { "bind-1": { instance: forgedInstance, version: stored.version } };
+    writeFileSync(tenantFilePath(dir, requirement.ownership.tenantId), JSON.stringify(forgedFile), "utf8");
+
+    assert.throws(() => store.list(requirement.ownership.tenantId), CorruptedConnectorConnectionFileError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("M15 (positive replay): legitimate persisted state with every field populated (serviceRef, secretRef, verificationEvidenceRef) still reconstructs correctly after restart", () => {
+  const dir = freshStoreDir();
+  try {
+    const descriptor = githubDescriptor();
+    const ownershipRef = createProjectOwnershipRef({
+      tenantId: "akilta-tenant-full",
+      customerId: "customer-full",
+      projectId: "project-full",
+      serviceRef: "service-full",
+    });
+    const requirement = requirementFor(descriptor, ownershipRef);
+    const instance = requestConnectorConnection({
+      requirement,
+      connectorDescriptor: descriptor,
+      connectionBindingId: "bind-full",
+      workspaceRef: "workspace-full",
+      integrationInstanceRef: "instance-full",
+      delegatedScope: [],
+      authMode: "OAUTH2",
+      secretRef: createSecretRef({ secretRefId: "secret-ref-full" }),
+    });
+    const storeA = new FileDurableConnectorConnectionStore(dir);
+    storeA.save(instance);
+
+    const storeB = new FileDurableConnectorConnectionStore(dir);
+    const reloaded = storeB.get(requirement.ownership.tenantId, instance.binding.connectionBindingId);
+    assert.deepEqual(reloaded?.instance, instance);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
