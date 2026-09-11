@@ -117,6 +117,26 @@ Per Rev90/93's own sequencing, the next progressive-elaboration step after persi
 - Zero new npm dependency; zero runtime imports beyond the already-established catalog/store types (type-only imports only).
 - No filesystem/network/child_process/HTTP coupling; pure function only.
 
+## Slice 4: Generic Custom API / OAuth connector definitions
+
+Per Rev90/93's own sequencing, the next progressive-elaboration step: "generic adapters." New module: `src/domain/generic-connector-definition.ts`. Still a pure, in-memory data contract with fail-closed validation only - no real HTTP call, no DNS resolution, no request ever executed, matching every other module in `src/domain/`.
+
+- `GenericApiConnectorDefinition`: `baseUrl` (validated as an absolute http/https URL), `authMode` restricted to `API_KEY`/`BEARER_TOKEN`/`BASIC`/`CUSTOM_HEADER` (CONN-001's own "multiple auth modes," `OAUTH2` structurally excluded - that is exclusively the OAuth connector's territory), `endpoints` (non-empty, each with a unique `capabilityRef`, a recognized HTTP method, and a `/`-prefixed path), an optional `validationEndpointCapabilityRef` fail-closed required to reference a real declared endpoint (CONN-001's "Test Connection" acceptance point), and optional `rateLimitPerMinute`/`retryMaxAttempts`.
+- `GenericOAuthConnectorDefinition`: `authorizationUrl`/`tokenUrl` (both validated absolute URLs), non-empty deduplicated `scopes`, and the same endpoint-validation discipline. `authMode` is not a settable field at all - it is `OAUTH2` by construction, the same "structural, not settable" discipline `project-bootstrap-template.ts` uses for `supersedesLocalAuthority: false`.
+- `resolveEndpointForCapability` - fail-closed throws for an undeclared capability, matching `resolveConnectorDescriptor`'s own never-`undefined` discipline; this is the function a real adapter/router would call to find which endpoint satisfies a capability, still without making any call.
+- `bindGenericApiDefinition`/`bindGenericOAuthDefinition` - fail-closed reject a definition binding to the wrong `connectorKind`, the wrong `connectionBindingId`, or a mismatched `authMode`; a definition can never be silently attached to a connection it does not describe.
+- `requestMapping`/`responseMapping` remain opaque, uninterpreted pointers - this module never invents a parallel mapping/execution engine.
+
+### Test coverage (slice 4)
+
+`tests/generic-connector-definition.test.ts`, 11 tests (P1-P11): invalid-baseUrl rejection, **adversarial OAUTH2-on-API-connector rejection**, duplicate-capabilityRef rejection, method/path validation, validation-endpoint-must-exist enforcement, positive-integer rate-limit/retry validation with clean omission when absent, fail-closed capability resolution, OAuth URL/scope validation, fail-closed definition-to-instance binding (connector kind, binding id, and auth mode all independently checked) for both connector families, and multi-instance independence (two definitions for different `connectionBindingId`s never share state or resolve each other's capabilities).
+
+### Evidence (slice 4)
+
+- Build: `npm run test` -> clean `tsc` build (strict, `exactOptionalPropertyTypes: true`), full regression **758/758 pass** (708 true pre-existing + 50 new: 22 K-tests + 7 M-tests + 5 N-tests + 11 P-tests + 5 boundary-scan tests, boundary-scan file list now covering all four slice-1/2/3/4 modules).
+- Zero new npm dependency; only type-only imports of the already-established catalog types plus the global `URL` constructor (no new package).
+- No filesystem/network/child_process/HTTP coupling; pure functions only.
+
 ## Status
 
-**IMPLEMENTED / SELF-VALIDATED (slice 3 added)** (slices 1-3 of CONN-001). Pending Brain independent exact-head re-review. `MERGE_DISPOSITION: HOLD_MERGE` (no `MAIN` mutation). Next dependency-safe steps per Rev90/93's own sequencing: generic/prebuilt adapters, then the Rev91/92/93 SALE-TO-CLOSE E2E acceptance floor (P0 adversarial tests only - duplicate/replay/crash convergence, tenant isolation, revoked/wrong connection fail-closed, temporary provider recovery, cancellation/refund/chargeback governed disposition, verification-gated CLOSED), without a further Brain dispatch.
+**IMPLEMENTED / SELF-VALIDATED (slice 4 added)** (slices 1-4 of CONN-001). Pending Brain independent exact-head re-review. `MERGE_DISPOSITION: HOLD_MERGE` (no `MAIN` mutation). Next dependency-safe steps per Rev90/93's own sequencing: prebuilt adapters (as catalog descriptors, still no real network call), then the Rev91/92/93 SALE-TO-CLOSE E2E acceptance floor (P0 adversarial tests only - duplicate/replay/crash convergence, tenant isolation, revoked/wrong connection fail-closed, temporary provider recovery, cancellation/refund/chargeback governed disposition, verification-gated CLOSED), without a further Brain dispatch.

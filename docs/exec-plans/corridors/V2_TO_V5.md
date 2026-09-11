@@ -242,6 +242,18 @@ Version names are capability/release checkpoints, not engineering permission sto
 - Status: **IMPLEMENTED / SELF-VALIDATED**, pending Brain independent exact-head review. `MERGE_DISPOSITION: HOLD_MERGE` unchanged.
 - `NEXT`: generic/prebuilt adapters, then the Rev91/92/93 SALE-TO-CLOSE E2E acceptance floor, without a further Brain dispatch per Rev90/93's own sequencing.
 
+## CONN-001 slice 4: Generic Custom API/OAuth connector definitions (no Brain dispatch required to begin)
+
+- Fresh-read the canonical Handoff before continuing (still Rev93, no new revision - confirmed via unchanged `modifiedTime` and unchanged PR #38 live GitHub state since the slice-3 push).
+- New module `src/domain/generic-connector-definition.ts`: pure, in-memory declarative data contracts for CONN-001's two mandatory generic connectors - no real HTTP call, no DNS resolution, no request ever executed.
+- `GenericApiConnectorDefinition`: validated `baseUrl`, `authMode` restricted to `API_KEY`/`BEARER_TOKEN`/`BASIC`/`CUSTOM_HEADER` (`OAUTH2` structurally excluded), unique-`capabilityRef` endpoints, a `validationEndpointCapabilityRef` fail-closed required to reference a real declared endpoint (CONN-001's "Test Connection" acceptance point).
+- `GenericOAuthConnectorDefinition`: validated `authorizationUrl`/`tokenUrl`, non-empty deduplicated `scopes`; `authMode` is `OAUTH2` by construction, not a settable field.
+- `resolveEndpointForCapability` fail-closed throws for an undeclared capability (never returns `undefined`, matching `resolveConnectorDescriptor`'s own discipline); `bindGenericApiDefinition`/`bindGenericOAuthDefinition` fail-closed reject a definition attaching to the wrong connector kind, binding id, or auth mode.
+- 11 new tests (P1-P11), including adversarial OAUTH2-on-API-connector rejection and multi-instance independence.
+- Full regression: **758/758 pass** (708 true pre-existing + 50: 22 K-tests + 7 M-tests + 5 N-tests + 11 P-tests + 5 boundary-scan), strict typecheck clean, zero new dependency.
+- Status: **IMPLEMENTED / SELF-VALIDATED**, pending Brain independent exact-head review. `MERGE_DISPOSITION: HOLD_MERGE` unchanged.
+- `NEXT`: prebuilt adapters (still no real network call), then the Rev91/92/93 SALE-TO-CLOSE E2E acceptance floor, without a further Brain dispatch per Rev90/93's own sequencing.
+
 ## Claude's role inside the corridor (condensed — see Drive packet §5/§6/§12 for full text)
 
 Claude is the delegated Engineering Brain + Primary Engineer inside the corridor: fresh-read and reconcile live repo truth before mutating; reuse existing patterns; choose the next dependency-safe work unit from the corridor-admitted graph (not roadmap prose at large); make reversible technical/architecture-within-envelope decisions; implement/test/self-review/fix/evidence/update state; continue across task and version boundaries when entry predicates are satisfied — without a routine per-task Brain/Founder start ceremony. Claude must not self-expand product scope, cross a material architecture envelope silently, or use implementation convenience to bypass a protected gate. Brain retains company/product strategy, canonical scope/version authority, material architecture-envelope decisions outside the delegated bounds, protected-gate classification, and independent/final verification.

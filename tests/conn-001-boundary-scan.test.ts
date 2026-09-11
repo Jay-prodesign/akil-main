@@ -11,6 +11,7 @@ const CONN_001_FILES = [
   "src/domain/integration-connector-catalog.ts",
   "src/domain/durable-connector-connection-store.ts",
   "src/domain/integration-admin-view.ts",
+  "src/domain/generic-connector-definition.ts",
 ];
 
 /**
