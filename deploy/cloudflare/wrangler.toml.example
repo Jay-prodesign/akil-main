@@ -1,0 +1,27 @@
+# RUNTIME-001: Cloudflare Workers deployment candidate scaffold.
+#
+# Example only - not a live binding. Rename to `wrangler.toml` and fill in
+# real values only when an actual Cloudflare account/deploy decision is
+# made; this repository does not do so itself (no `account_id`, zone, or
+# credential is ever meant to live in a checked-in file). No `wrangler`
+# dependency has been added to package.json, and no deploy step runs this
+# file in CI - it documents the target shape only.
+#
+# name/main below assume the worker entry point this checkpoint would add
+# once a real deploy decision is made - see
+# src/runtime/cloudflare-worker-fetch-adapter.ts for the reusable
+# fetch-handler translation layer this entry point would call into.
+
+name = "akilta-backend"
+main = "dist/src/runtime/cloudflare-worker-entry.js"
+compatibility_date = "2026-01-01"
+
+# [vars]
+# DEPLOYMENT_ENV = "production"
+# PERSISTENCE_DRIVER = "POSTGRES"
+
+# Persistence over a raw TCP `pg` connection (this checkpoint's
+# PostgresOutcomeJobStore) is not reachable from a Worker isolate - an
+# HTTP-reachable Postgres driver (e.g. Neon's) would be required, and is
+# an explicit later decision, not made here. See
+# src/runtime/cloudflare-worker-fetch-adapter.ts's own doc comment.
