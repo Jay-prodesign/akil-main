@@ -99,6 +99,24 @@ Per Rev93's own next-action instruction, after the F1 correction above, the corr
 - Zero new npm dependency (`node:fs`/`node:path` only, matching every other durable store in this repository).
 - No network/child_process/HTTP coupling.
 
+## Slice 3: admin read-model surface
+
+Per Rev90/93's own sequencing, the next progressive-elaboration step after persistence is the admin surface: "Settings -> Integrations / AI & Providers with provider catalog, connection instances, status/health, ownership and tenant/project binding." New module: `src/domain/integration-admin-view.ts`.
+
+- `buildIntegrationsAdminView({ catalog, connections })` -> `IntegrationsAdminView { availableConnectors, connections }`. Pure aggregation, no independent judgment.
+- **Same disclosed genuine boundary as `V5-CMD-001`** (`internal-command-projection.ts`): this repository has no internal/staff authentication concept anywhere, so this module has zero HTTP/session/route wiring - exactly the boundary Rev90's own text already accepts for the admin-UI step at this stage. Deliberately cross-tenant, matching that same precedent: an internal company-wide integrations view is exactly the case where seeing across every tenant is the intended, authorized behavior.
+- **Structural secret-masking guarantee**: `IntegrationConnectionSummary` has no field capable of holding a `SecretRef`/`secretRefId` at all - not merely omitted by convention, but structurally absent from the type, so this admin view can never leak a connection's secret reference even to an authorized administrator. Only the existing evidence-gated `verificationEvidenceRef` (an audit pointer, never a credential) passes through, and only when present.
+
+### Test coverage (slice 3)
+
+`tests/integration-admin-view.test.ts`, 5 tests (N1-N5): catalog-entry field mapping, **adversarial secret-masking proof** (a connection with a real `secretRef` set never has that field present in its summary, checked both structurally and by scanning the full serialized view for the literal secret value), connection-state/ownership/version/evidence-ref field mapping, deliberate cross-tenant aggregation (matching `V5-CMD-001`'s precedent), and no-mutation-of-inputs.
+
+### Evidence (slice 3)
+
+- Build: `npm run test` -> clean `tsc` build (strict, `exactOptionalPropertyTypes: true`), full regression **747/747 pass** (708 true pre-existing + 39 new: 22 K-tests + 7 M-tests + 5 N-tests + 5 boundary-scan tests, boundary-scan file list now also covering this module).
+- Zero new npm dependency; zero runtime imports beyond the already-established catalog/store types (type-only imports only).
+- No filesystem/network/child_process/HTTP coupling; pure function only.
+
 ## Status
 
-**IMPLEMENTED / SELF-VALIDATED (slice 2 added)** (slices 1-2 of CONN-001). Pending Brain independent exact-head re-review. `MERGE_DISPOSITION: HOLD_MERGE` (no `MAIN` mutation). Next dependency-safe steps per Rev90/93's own sequencing: admin read-model surface, then generic/prebuilt adapters, then the Rev91/92/93 SALE-TO-CLOSE E2E acceptance floor (P0 adversarial tests only - duplicate/replay/crash convergence, tenant isolation, revoked/wrong connection fail-closed, temporary provider recovery, cancellation/refund/chargeback governed disposition, verification-gated CLOSED), without a further Brain dispatch.
+**IMPLEMENTED / SELF-VALIDATED (slice 3 added)** (slices 1-3 of CONN-001). Pending Brain independent exact-head re-review. `MERGE_DISPOSITION: HOLD_MERGE` (no `MAIN` mutation). Next dependency-safe steps per Rev90/93's own sequencing: generic/prebuilt adapters, then the Rev91/92/93 SALE-TO-CLOSE E2E acceptance floor (P0 adversarial tests only - duplicate/replay/crash convergence, tenant isolation, revoked/wrong connection fail-closed, temporary provider recovery, cancellation/refund/chargeback governed disposition, verification-gated CLOSED), without a further Brain dispatch.

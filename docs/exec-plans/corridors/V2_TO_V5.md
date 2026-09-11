@@ -231,6 +231,17 @@ Version names are capability/release checkpoints, not engineering permission sto
 - Status: **IMPLEMENTED / SELF-VALIDATED**, pending Brain independent exact-head review. `MERGE_DISPOSITION: HOLD_MERGE` unchanged.
 - `NEXT`: admin read-model surface, then generic/prebuilt adapters, then the Rev91/92/93 SALE-TO-CLOSE E2E acceptance floor, without a further Brain dispatch per Rev90/93's own sequencing.
 
+## CONN-001 slice 3: admin read-model surface (no Brain dispatch required to begin)
+
+- Fresh-read the canonical Handoff before continuing (still Rev93 as of this checkpoint - no new revision) - confirmed via `modifiedTime` unchanged since the Rev93 read, and PR #38's live GitHub state unchanged since the slice-2 push.
+- New module `src/domain/integration-admin-view.ts`: `buildIntegrationsAdminView` aggregates the connector catalog and stored connections into the "Settings -> Integrations / AI & Providers" admin read-model CONN-001's spec names.
+- Same disclosed genuine boundary as `V5-CMD-001`'s `internal-command-projection.ts`: no internal/staff authentication concept exists anywhere in this repository, so this module has zero HTTP/session/route wiring; deliberately cross-tenant, matching that same precedent.
+- Structural secret-masking guarantee: `IntegrationConnectionSummary` has no field capable of holding a `SecretRef` at all - not omitted by convention, but structurally absent from the type.
+- 5 new tests (N1-N5), including an adversarial proof that a connection's real `secretRef` never appears anywhere in the serialized admin view (checked both structurally and via a full-JSON substring scan for the literal secret value).
+- Full regression: **747/747 pass** (708 true pre-existing + 39: 22 K-tests + 7 M-tests + 5 N-tests + 5 boundary-scan), strict typecheck clean, zero new dependency.
+- Status: **IMPLEMENTED / SELF-VALIDATED**, pending Brain independent exact-head review. `MERGE_DISPOSITION: HOLD_MERGE` unchanged.
+- `NEXT`: generic/prebuilt adapters, then the Rev91/92/93 SALE-TO-CLOSE E2E acceptance floor, without a further Brain dispatch per Rev90/93's own sequencing.
+
 ## Claude's role inside the corridor (condensed — see Drive packet §5/§6/§12 for full text)
 
 Claude is the delegated Engineering Brain + Primary Engineer inside the corridor: fresh-read and reconcile live repo truth before mutating; reuse existing patterns; choose the next dependency-safe work unit from the corridor-admitted graph (not roadmap prose at large); make reversible technical/architecture-within-envelope decisions; implement/test/self-review/fix/evidence/update state; continue across task and version boundaries when entry predicates are satisfied — without a routine per-task Brain/Founder start ceremony. Claude must not self-expand product scope, cross a material architecture envelope silently, or use implementation convenience to bypass a protected gate. Brain retains company/product strategy, canonical scope/version authority, material architecture-envelope decisions outside the delegated bounds, protected-gate classification, and independent/final verification.
