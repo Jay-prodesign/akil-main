@@ -1,5 +1,5 @@
 import type { StaffSessionContext } from "./staff-session-context.js";
-import { requireCurrentStaffMembership } from "./staff-membership-guard.js";
+import { requireMatchingStaffMembership } from "./staff-membership-guard.js";
 import type { OrganizationMembership } from "../domain/organization-membership.js";
 import type { TenantScope } from "../domain/tenant-scope.js";
 import type { ProjectOwnershipRef } from "../domain/project-ownership.js";
@@ -28,8 +28,8 @@ import type { AdmittedWorker } from "../domain/worker-routing-policy.js";
  * unauthenticated `ownerMembershipRef` string.
  *
  * Every function here follows the same shape: resolve the caller's
- * authenticated `StaffSessionContext` to a real, current, tenant-scoped
- * `OrganizationMembership` via `requireCurrentStaffMembership` (fails
+ * authenticated `StaffSessionContext` to a matching, tenant-scoped
+ * `OrganizationMembership` via `requireMatchingStaffMembership` (fails
  * closed, never guesses), then call the corresponding unmodified
  * `local-execution.ts` function with that membership's own
  * `membershipId` as the trusted `ownerMembershipRef` - never a value the
@@ -37,6 +37,29 @@ import type { AdmittedWorker } from "../domain/worker-routing-policy.js";
  * Rev101 F1 guard (a worker's `ownerMembershipRef` must match its
  * device's) still applies underneath and is not weakened or bypassed by
  * this binding layer.
+ *
+ * Rev106 correction (F1 - privilege escalation): `createLocalWorkerRegistrationForAuthenticatedStaff`
+ * previously accepted caller-supplied `trustStatus`/`authorityLevel` and
+ * forwarded them unchecked into `createLocalWorkerRegistration`, whose
+ * own enum validation alone would accept `"ADMITTED"`/`"ELEVATED"`. A
+ * merely authenticated organization member could therefore mint an
+ * admitted/elevated local worker through this wrapper - membership
+ * proves ownership identity only, never worker trust/admission/
+ * authority. A fresh repo-wide search for an existing, semantically
+ * compatible admission/authority-grant primitive this wrapper could
+ * require instead found none (the closest analog, `service-catalog-
+ * admission.ts`'s `authorizingWorker: AdmittedWorker` gate, belongs to a
+ * different domain and is not reusable here without inventing a new
+ * cross-domain authority mapping, which Rev106 explicitly forbids: "Do
+ * not map OrganizationRole directly to protected authority unless
+ * canonical policy explicitly authorizes that mapping"). Per Rev106's
+ * own second remedy option, this wrapper now remains fail-closed/
+ * non-privileged: `trustStatus` and `authorityLevel` are no longer
+ * caller-supplied parameters at all and are always passed as
+ * `"UNTRUSTED"`/`"STANDARD"` - mirroring `registerDevice`'s own "never
+ * born admitted" discipline. A real admission/elevation step requires a
+ * separate, later, explicitly-authorized grant mechanism; it is not
+ * fabricated here.
  */
 
 export function registerDeviceForAuthenticatedStaff(input: {
@@ -48,7 +71,7 @@ export function registerDeviceForAuthenticatedStaff(input: {
   platform: unknown;
   bridgeVersion: unknown;
 }): DeviceRegistration {
-  const membership = requireCurrentStaffMembership({
+  const membership = requireMatchingStaffMembership({
     session: input.session,
     tenantId: input.tenantScope.tenantId,
     memberships: input.memberships,
@@ -73,16 +96,14 @@ export function createLocalWorkerRegistrationForAuthenticatedStaff(input: {
   declaredCapabilityRefs: ReadonlyArray<unknown>;
   declaredToolRefs: ReadonlyArray<unknown>;
   declaredPolicyConstraintRefs: ReadonlyArray<unknown>;
-  trustStatus: unknown;
   availability: unknown;
   maxRiskLevel: unknown;
-  authorityLevel: unknown;
   costWeight: unknown;
   evaluationEvidenceRef: unknown;
   poolMode: unknown;
   boundProjectOwnerships: ReadonlyArray<ProjectOwnershipRef>;
 }): LocalWorkerRegistration {
-  const membership = requireCurrentStaffMembership({
+  const membership = requireMatchingStaffMembership({
     session: input.session,
     tenantId: input.tenantScope.tenantId,
     memberships: input.memberships,
@@ -95,10 +116,16 @@ export function createLocalWorkerRegistrationForAuthenticatedStaff(input: {
     declaredCapabilityRefs: input.declaredCapabilityRefs,
     declaredToolRefs: input.declaredToolRefs,
     declaredPolicyConstraintRefs: input.declaredPolicyConstraintRefs,
-    trustStatus: input.trustStatus,
+    // Rev106 correction: never caller-supplied - membership proves ownership
+    // identity only, never worker trust/admission/authority. A newly
+    // registered worker is always born UNTRUSTED/STANDARD, mirroring
+    // registerDevice's own "never born admitted" discipline; a real
+    // admission/elevation step is a separate, later, explicitly-authorized
+    // grant mechanism, not fabricated here.
+    trustStatus: "UNTRUSTED",
     availability: input.availability,
     maxRiskLevel: input.maxRiskLevel,
-    authorityLevel: input.authorityLevel,
+    authorityLevel: "STANDARD",
     costWeight: input.costWeight,
     evaluationEvidenceRef: input.evaluationEvidenceRef,
     poolMode: input.poolMode,
@@ -114,7 +141,7 @@ export function resolveEligibleLocalWorkersForAuthenticatedStaff(input: {
   registrations: ReadonlyArray<LocalWorkerRegistration>;
   targetOwnership: ProjectOwnershipRef;
 }): ReadonlyArray<AdmittedWorker> {
-  const membership = requireCurrentStaffMembership({
+  const membership = requireMatchingStaffMembership({
     session: input.session,
     tenantId: input.tenantScope.tenantId,
     memberships: input.memberships,
