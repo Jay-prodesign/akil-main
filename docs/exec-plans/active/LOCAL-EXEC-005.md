@@ -66,6 +66,12 @@ No modification to `local-execution.ts`, `local-execution-bridge.ts`, `worker-ro
 - Sanity-checked: temporarily removed the `accessVerified` field from the type and its two construction sites, confirmed `npx tsc --noEmit` fails exactly on the three call sites that assert it (C9e and the two updated deepEqual assertions), then restored and reconfirmed 954/954 pass and a clean strict typecheck.
 - LOCAL-EXEC-005's SHARED_REPO completion is narrowed accordingly: this checkpoint proves mutex coordination and declared-scope consistency for shared-repo branch claims, but real per-user/device repository-access authorization is an explicitly open gap pending a future, separately-authorized grant primitive — not claimed as delivered here.
 
+## Rev110 correction (stacked-ancestry gap — stale Family 2 wording propagated forward)
+
+- Brain's Rev110 sweep found that this branch's own head still contained Family 2's superseded pre-Rev107 `staff-membership-guard.ts` wording ("trusted for internal/staff action"), even though Rev109's F2-B fix was itself confirmed correct/resolved. Root cause: this branch's dependency `claude/local-exec-004-staff-binding` had never merged forward Family 2's own separate Rev107 wording correction (`e2620f2`) after it landed — see `docs/exec-plans/active/LOCAL-EXEC-004.md`'s own "Rev110 correction" section for the full root-cause record.
+- Fixed by merging the corrected `claude/local-exec-004-staff-binding` head forward into this branch — a clean, conflict-free merge. No behavior change; 954/954 tests pass unchanged (identical count to before the merge, confirming this was purely a wording-propagation gap).
+- `DOWNSTREAM_CONSEQUENCE`: PR #57 (LOCAL-EXEC-006) must merge this corrected head forward in turn.
+
 ## Status
 
 **IMPLEMENTED / SELF-VALIDATED (Rev109-corrected)** — pending independent verification per canonical Handoff Rev105 (self-review alone does not qualify as delegated VERIFY). This checkpoint composes worker/task/device identity and the same authority-adjacent primitives as every other LOCAL-EXEC checkpoint, so it is `SAFE_MERGE`-excluded (auth/IAM/authority) per Execution Contract §9, regardless of verification outcome, and Rev106/108/109 additionally confirm this surface is HIGH/PROTECTED. `MERGE_DISPOSITION: HOLD_MERGE` — this branch merges PR #54 and PR #42; its own eventual PR should be reviewed alongside both upstream source PRs as part of the one consolidated end-of-batch Brain review packet.
