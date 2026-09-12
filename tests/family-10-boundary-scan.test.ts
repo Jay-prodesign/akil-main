@@ -33,6 +33,16 @@ test("Family 10: resolveInternalCommandCenterView always gates through requireIn
   assert.ok(accessCallIndex < projectionCallIndex, "access must be checked before the projection is built");
 });
 
+test("Family 10 (Rev106 correction): resolveInternalCommandCenterView never forwards the caller's raw partnerClaims into the projection, and filters attentionItems by the resolved membership's tenantId", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  const fnStart = content.indexOf("export function resolveInternalCommandCenterView");
+  assert.ok(fnStart >= 0, "resolveInternalCommandCenterView not found");
+  const fnBody = content.slice(fnStart);
+  assert.doesNotMatch(fnBody, /partnerClaims:\s*input\.partnerClaims/);
+  assert.match(fnBody, /partnerClaims:\s*\[\]/);
+  assert.match(fnBody, /item\.tenantId\s*===\s*access\.membership\.tenantId/);
+});
+
 test("Family 10: never calls fetch, a node: builtin, or the system clock - pure composition only", () => {
   const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
   assert.doesNotMatch(content, /\bfetch\s*\(/);
