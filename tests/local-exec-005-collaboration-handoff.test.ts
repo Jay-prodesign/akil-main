@@ -239,7 +239,24 @@ test("C9: claimSharedRepoBranch grants an unclaimed branch to a worker bound to 
   const worker = makeWorker("b1", device, { boundProjectOwnerships: [targetOwnership] });
   const { lease } = runningCheckpoint(worker, device, "b1");
   const claims = claimSharedRepoBranch({ branchRef: "feature-x", lease, worker, targetOwnership, existingClaims: [] });
-  assert.deepEqual(claims, [{ branchRef: "feature-x", leaseId: lease.leaseId }]);
+  assert.deepEqual(claims, [{ branchRef: "feature-x", leaseId: lease.leaseId, accessVerified: false }]);
+});
+
+test("C9e (Rev109 adversarial): a caller-supplied boundProjectOwnerships alone can never produce accessVerified: true - even a worker self-declared for the exact target project only ever gets a structurally-false claim", () => {
+  const device = onlineDevice("b1v");
+  // Self-declared by the caller at worker-registration time (see
+  // local-execution-staff-binding.ts) - not backed by any independent
+  // repository-access grant. Passing isBoundToTargetOwnership proves only
+  // declared-scope consistency, never authorization.
+  const worker = makeWorker("b1v", device, { boundProjectOwnerships: [targetOwnership] });
+  const { lease } = runningCheckpoint(worker, device, "b1v");
+  const claims = claimSharedRepoBranch({ branchRef: "feature-x", lease, worker, targetOwnership, existingClaims: [] });
+  assert.equal(claims[0]?.accessVerified, false);
+  // No SharedRepoBranchClaim value this module can construct has any other
+  // shape for this field - proving by construction, not merely by this one
+  // input, that a self-declared project binding alone cannot authorize
+  // SHARED_REPO access.
+  assert.ok(claims.every((claim) => claim.accessVerified === false));
 });
 
 test("C9b (Rev108 adversarial): claimSharedRepoBranch fails closed when the worker is not bound to the target project - a bare branch/lease claim is never itself authority", () => {
@@ -279,7 +296,9 @@ test("C10: claimSharedRepoBranch fails closed on a second concurrent writer for 
   const workerB = makeWorker("b2b", device, { boundProjectOwnerships: [targetOwnership] });
   const { lease: leaseA } = runningCheckpoint(workerA, device, "b2a");
   const { lease: leaseB } = runningCheckpoint(workerB, device, "b2b");
-  const existingClaims: ReadonlyArray<SharedRepoBranchClaim> = [{ branchRef: "feature-x", leaseId: leaseA.leaseId }];
+  const existingClaims: ReadonlyArray<SharedRepoBranchClaim> = [
+    { branchRef: "feature-x", leaseId: leaseA.leaseId, accessVerified: false },
+  ];
   assert.throws(
     () => claimSharedRepoBranch({ branchRef: "feature-x", lease: leaseB, worker: workerB, targetOwnership, existingClaims }),
     InvalidSharedRepoLeaseError,
@@ -292,7 +311,7 @@ test("C11: claimSharedRepoBranch is idempotent for the same lease re-claiming it
   const { lease } = runningCheckpoint(worker, device, "b3");
   const first = claimSharedRepoBranch({ branchRef: "feature-x", lease, worker, targetOwnership, existingClaims: [] });
   const second = claimSharedRepoBranch({ branchRef: "feature-x", lease, worker, targetOwnership, existingClaims: first });
-  assert.deepEqual(second, [{ branchRef: "feature-x", leaseId: lease.leaseId }]);
+  assert.deepEqual(second, [{ branchRef: "feature-x", leaseId: lease.leaseId, accessVerified: false }]);
 });
 
 // --- verifySharedRepoBaseBeforeContinuing ---
