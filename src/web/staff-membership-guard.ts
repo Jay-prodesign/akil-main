@@ -10,10 +10,20 @@ import type { TenantScope } from "../domain/tenant-scope.js";
  * authenticated staff identity (`staff-route-guard.ts`) - but nothing
  * previously bound the two together with any organizational fact at
  * all. This module is that binding: an authenticated staff principal is
- * trusted for internal/staff action only once it resolves to exactly one
- * `OrganizationMembership` record, from an explicitly caller-supplied
- * set, in the target tenant - a valid session token alone is never
- * sufficient.
+ * bound to an organizational membership fact for downstream policy
+ * evaluation only once it resolves to exactly one `OrganizationMembership`
+ * record, from an explicitly caller-supplied set, in the target tenant -
+ * a valid session token alone is never sufficient. Binding to a
+ * membership record is not itself a grant of trust/authority for any
+ * action; see this module's own Rev106 correction note below and
+ * `authority.ts`'s separate, unmodified `AuthorityContext`.
+ *
+ * Rev107 correction: the sentence above previously read "trusted for
+ * internal/staff action" once resolved to a membership - stronger than
+ * what this module actually proves, and in direct tension with this same
+ * doc comment's own later statement (and Rev106's) that membership grants
+ * no `AuthorityContext`/protected-action authority. Narrowed to identity/
+ * binding language only; no behavior change.
  *
  * Rev106 correction: this module's functions were previously named/
  * documented as resolving a "current" membership. Independently

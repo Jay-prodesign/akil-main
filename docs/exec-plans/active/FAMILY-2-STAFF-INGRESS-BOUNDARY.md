@@ -60,6 +60,11 @@ No modification to `session-context.ts`, `session-provider.ts`, `route-guard.ts`
 - Sanity-checked: the rename is purely mechanical (identical filter/throw logic); F2-11 through F2-16's existing behavioral assertions (matching, undefined-on-no-match, cross-tenant exclusion, ambiguity, fail-closed-on-none) all still hold unchanged under the new names, confirming no behavior was altered while the overclaim was removed.
 - **`DEPENDENCY_CONSEQUENCE`**: PR #54 (LOCAL-EXEC-004) and PR #55 (Family 10) both import this module and must pick up this rename before their own Rev106 corrections are considered complete — tracked and applied on each of those branches directly.
 
+## Rev107 correction (very bounded wording-only cleanup)
+
+- Brain's Rev107 incremental re-review of the Rev106-corrected exact head `9efac4b54f1ab53c892d2bed6834d23bd20e77b5` confirmed the currentness overclaim substantially resolved, but found one remaining source-level doc sentence too strong: the module comment said an authenticated principal is "trusted for internal/staff action" once it resolves to exactly one `OrganizationMembership` — stronger than what this module actually proves, and in tension with the same file's own later statement (and Rev106's) that membership grants no `AuthorityContext`/protected-action authority.
+- Fixed: narrowed to "bound to an organizational membership fact for downstream policy evaluation" — identity/binding language only, no trust/authorization claim. No behavior change; 730/730 tests pass unchanged.
+
 ## Status
 
 **IMPLEMENTED / SELF-VALIDATED (Rev106-corrected)** — pending fresh Brain independent exact-head review of the corrected head. Not yet `VERIFIED`/`PASS`/`CLOSED`; Claude's authority ends at this status per `AGENTS.md` §10. `MERGE_DISPOSITION: HOLD_MERGE` — cut fresh from `main`, a normal task-scoped PR; Rev106 additionally confirms this surface is HIGH/PROTECTED (auth/IAM-adjacent) and therefore `SAFE_MERGE`-excluded under Rev105/Execution Contract §9 regardless of verification outcome. Per Rev95/97/98/99/100/101/102/106's continuous-execution batch-mode authorization, independent Brain exact-head review is deferred to the one consolidated end-of-batch packet alongside every other open checkpoint in this batch.
