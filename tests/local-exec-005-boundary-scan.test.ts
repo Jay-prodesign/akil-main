@@ -60,6 +60,13 @@ test("LOCAL-EXEC-005 (Rev108 correction): claimSharedRepoBranch verifies the wor
   assert.match(fnBody, /isBoundToTargetOwnership\(/);
 });
 
+test("LOCAL-EXEC-005 (Rev109 correction): SharedRepoBranchClaim.accessVerified is a structural false literal, never a runtime-settable true value", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  assert.match(content, /accessVerified:\s*false/);
+  assert.doesNotMatch(content, /accessVerified:\s*true/);
+  assert.doesNotMatch(content, /accessVerified:\s*boolean/);
+});
+
 test("LOCAL-EXEC-005: never calls fetch, a node: builtin, or the system clock - pure domain composition only", () => {
   const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
   assert.doesNotMatch(content, /\bfetch\s*\(/);

@@ -254,11 +254,29 @@ export function createWorkspaceSnapshotPackage(input: {
  * concurrent claim fails closed rather than silently queuing or
  * overwriting the first.
  */
+/**
+ * Rev109 correction (F2-B - `accessVerified` is a structural `false`
+ * literal, never a runtime flag): see `claimSharedRepoBranch`'s own
+ * doc comment for the full rationale. No input to this module can ever
+ * make this field `true` - that is the point. A real per-user/device
+ * repository-access grant primitive, if one is later explicitly
+ * authorized and built, would need its own separate field/type; it is
+ * not fabricated here by widening this literal.
+ */
 export interface SharedRepoBranchClaim {
   readonly branchRef: string;
   readonly leaseId: LocalTaskLease["leaseId"];
+  readonly accessVerified: false;
 }
 
+/**
+ * Rev109 correction: this is a declared-scope consistency check only,
+ * never an authorization check - see `claimSharedRepoBranch`'s doc
+ * comment. It still catches a worker that was not even nominally
+ * registered for this project claiming its branch, which is worth
+ * keeping, but it must never be read as proof of granted repository
+ * access.
+ */
 function isBoundToTargetOwnership(worker: LocalWorkerRegistration, targetOwnership: ProjectOwnershipRef): boolean {
   return worker.boundProjectOwnerships.some(
     (bound) =>
@@ -271,20 +289,42 @@ function isBoundToTargetOwnership(worker: LocalWorkerRegistration, targetOwnersh
 
 /**
  * Rev108 correction (F2 - shared-repo access must be separately
- * authorized, not just mutually exclusive): this function previously
- * proved only mutual exclusion (one lease per branch), never that the
- * claiming worker/device was actually authorized for this project's
- * shared repository at all, falling short of §14's "explicit repository
- * access is separately authorized for each user/device." A fresh
- * repo-wide search found no dedicated repository-access-grant primitive,
- * but L0's own `LocalWorkerRegistration.boundProjectOwnerships` is
- * already the semantically compatible existing primitive - it is the
- * same field `resolveEligibleLocalWorkers` already consults to gate
- * `ORG_POOL` worker access to a project - so this function now requires
- * the claiming `worker` to already be bound to `targetOwnership` before
- * granting a branch claim, reusing that existing authorization fact
- * rather than inventing a second IAM or treating the bare branch/lease
- * strings as authority.
+ * authorized, not just mutually exclusive) claimed
+ * `LocalWorkerRegistration.boundProjectOwnerships` was "the semantically
+ * compatible existing primitive" proving a worker's shared-repository
+ * access was authorized. Rev109 found this overclaimed: independently
+ * re-verified against `local-execution-staff-binding.ts`,
+ * `boundProjectOwnerships` is itself a bare caller-supplied parameter to
+ * `createLocalWorkerRegistrationForAuthenticatedStaff`, never checked
+ * against any independent grant - an authenticated organization member
+ * can self-declare any `ProjectOwnershipRef` there. Membership
+ * authenticates *who* is calling, never *what project access* they
+ * hold; treating that self-declaration as a shared-repository access
+ * grant would be exactly the caller-supplied-value-as-authority pattern
+ * Rev106/Rev108 already forbid elsewhere. A fresh repo-wide search for
+ * an existing repository/project access-grant primitive found
+ * `OwnershipAssignment` (`ownership-assignment.ts`), but that binds a
+ * *business* ownership role (Lead/Deal/Account/Delivery Owner) to a
+ * membership - it proves nothing about who may write to a *shared code
+ * repository branch* for that project, and reusing it here would be
+ * exactly the cross-domain authority mapping Rev106 already forbade for
+ * a structurally identical reason (`service-catalog-admission.ts`'s
+ * `AdmittedWorker` gate, rejected there as "a different domain ...
+ * not reusable here without inventing a new cross-domain authority
+ * mapping").
+ *
+ * Per Rev109's own second remedy, this function remains explicitly
+ * coordination-only: it still requires the claiming worker's
+ * self-declared `boundProjectOwnerships` to be scope-consistent with
+ * `targetOwnership` (catching a worker not even nominally registered
+ * for this project), and it still proves mutual exclusion - exactly
+ * one lease may hold a branch at a time. But it can never assert that
+ * shared-repository access was actually, independently authorized:
+ * every returned `SharedRepoBranchClaim.accessVerified` is the
+ * structural literal `false`, not a runtime flag any input could set
+ * true. Real per-user/device repository-access admission remains
+ * explicitly OPEN, not fabricated here - LOCAL-EXEC-005's own SHARED_REPO
+ * completion/status is narrowed accordingly (see its exec-plan).
  */
 export function claimSharedRepoBranch(input: {
   branchRef: unknown;
@@ -299,7 +339,7 @@ export function claimSharedRepoBranch(input: {
   }
   if (!isBoundToTargetOwnership(input.worker, input.targetOwnership)) {
     throw new InvalidSharedRepoLeaseError(
-      "worker is not bound to targetOwnership - shared-repo access must be separately authorized per worker/device, never assumed from a bare branch/lease claim",
+      "worker is not even declared as scoped to targetOwnership - this is a coordination-scope consistency check only, never proof of authorized repository access",
     );
   }
   const conflicting = input.existingClaims.find(
@@ -311,7 +351,7 @@ export function claimSharedRepoBranch(input: {
     );
   }
   const withoutThisLease = input.existingClaims.filter((claim) => claim.leaseId !== input.lease.leaseId);
-  return [...withoutThisLease, { branchRef, leaseId: input.lease.leaseId }];
+  return [...withoutThisLease, { branchRef, leaseId: input.lease.leaseId, accessVerified: false }];
 }
 
 /**
