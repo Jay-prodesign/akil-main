@@ -76,8 +76,8 @@ test("Family 2: each module exports exactly the expected surface", () => {
   assert.deepEqual(Object.keys(StaffMembershipGuard).sort(), [
     "AmbiguousStaffMembershipError",
     "NoStaffMembershipError",
-    "requireCurrentStaffMembership",
-    "resolveCurrentStaffMembership",
+    "requireMatchingStaffMembership",
+    "resolveMatchingStaffMembership",
   ]);
 });
 

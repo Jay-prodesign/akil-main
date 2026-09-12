@@ -8,11 +8,26 @@ import type { TenantScope } from "../domain/tenant-scope.js";
  * checked for permission/protected-action authority (`authority.ts`), and
  * a `StaffSessionContext` can already prove a request carries *some*
  * authenticated staff identity (`staff-route-guard.ts`) - but nothing
- * previously bound the two together with a real, current organizational
- * fact. This module is that binding: an authenticated staff principal is
+ * previously bound the two together with any organizational fact at
+ * all. This module is that binding: an authenticated staff principal is
  * trusted for internal/staff action only once it resolves to exactly one
- * current `OrganizationMembership` record in the target tenant - a valid
- * session token alone is never sufficient.
+ * `OrganizationMembership` record, from an explicitly caller-supplied
+ * set, in the target tenant - a valid session token alone is never
+ * sufficient.
+ *
+ * Rev106 correction: this module's functions were previously named/
+ * documented as resolving a "current" membership. Independently
+ * re-verified against `organization-membership.ts`: `OrganizationMembership`
+ * carries no active/revoked/effective/temporal-lifecycle field at all -
+ * only `membershipId`/`tenantId`/`principalRef`/`role`. This module can
+ * therefore only prove the provable fact - exactly one caller-supplied
+ * membership matches this principal in this tenant - and must never
+ * represent or imply "currentness" as an established property.
+ * Currentness/effective-status provenance remains external/open, exactly
+ * as it was before this correction; no second membership-lifecycle
+ * primitive is invented here to manufacture that guarantee. Membership
+ * identity alone also still grants no `AuthorityContext`/protected-action
+ * authority - that remains solely `authority.ts`'s concern, unchanged.
  *
  * `memberships` is caller-supplied (this module has no persistence/lookup
  * capability of its own, consistent with every other pure `src/web/`/
@@ -23,7 +38,9 @@ import type { TenantScope } from "../domain/tenant-scope.js";
  */
 export class NoStaffMembershipError extends Error {
   constructor() {
-    super("The authenticated staff principal has no current OrganizationMembership in this tenant");
+    super(
+      "The authenticated staff principal matches no OrganizationMembership in this tenant among the supplied set",
+    );
     this.name = "NoStaffMembershipError";
   }
 }
@@ -38,14 +55,14 @@ export class AmbiguousStaffMembershipError extends Error {
 }
 
 /**
- * Pure lookup - never throws on zero matches (a session with no
+ * Pure lookup - never throws on zero matches (a session with no matching
  * membership yet is an ordinary, expected state, not a caller error).
  * Throws only on more than one match: an ambiguous binding is never
  * silently resolved to "the first one," matching `resolveTrustedServiceForOrder`'s
  * (`SVC-ADM-001`) and `resolveCurrentOwner`'s (`V3-OWN-001`) own
  * fail-closed-on-ambiguity precedent.
  */
-export function resolveCurrentStaffMembership(input: {
+export function resolveMatchingStaffMembership(input: {
   session: StaffSessionContext;
   tenantId: TenantScope["tenantId"];
   memberships: ReadonlyArray<OrganizationMembership>;
@@ -68,12 +85,12 @@ export function resolveCurrentStaffMembership(input: {
  * act - mirroring `requireSession`'s (V2-APP-001) "no partial-credential
  * state" discipline for the membership-binding dimension specifically.
  */
-export function requireCurrentStaffMembership(input: {
+export function requireMatchingStaffMembership(input: {
   session: StaffSessionContext;
   tenantId: TenantScope["tenantId"];
   memberships: ReadonlyArray<OrganizationMembership>;
 }): OrganizationMembership {
-  const membership = resolveCurrentStaffMembership(input);
+  const membership = resolveMatchingStaffMembership(input);
   if (membership === undefined) {
     throw new NoStaffMembershipError();
   }
