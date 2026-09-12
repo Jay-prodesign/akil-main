@@ -52,7 +52,11 @@ function onlineDevice(seed: string, ownerMembershipRef = "owner-1"): DeviceRegis
 function makeWorker(
   seed: string,
   device: DeviceRegistration,
-  overrides?: Partial<{ adapterKind: string; ownerMembershipRef: string }>,
+  overrides?: Partial<{
+    adapterKind: string;
+    ownerMembershipRef: string;
+    boundProjectOwnerships: ReadonlyArray<ReturnType<typeof createProjectOwnershipRef>>;
+  }>,
 ): LocalWorkerRegistration {
   return createLocalWorkerRegistration({
     workerId: `worker-${seed}`,
@@ -69,7 +73,7 @@ function makeWorker(
     costWeight: 1,
     evaluationEvidenceRef: `evidence-${seed}`,
     poolMode: "PRIVATE",
-    boundProjectOwnerships: [],
+    boundProjectOwnerships: overrides?.boundProjectOwnerships ?? [],
   });
 }
 
@@ -105,15 +109,44 @@ function taskPacket() {
 
 // --- planCollaborationModeTransition ---
 
-test("C1: PRIVATE -> SHARED_ARTIFACT is WIDENING and discloses newly visible refs", () => {
+test("C1: PRIVATE -> SHARED_ARTIFACT is WIDENING and discloses newly visible refs and resources", () => {
   const preflight = planCollaborationModeTransition({
     from: "PRIVATE",
     to: "SHARED_ARTIFACT",
     newlyVisibleToRefs: ["worker-2"],
+    visibleResourceRefs: ["file:src/domain/local-execution-collaboration.ts"],
   });
   assert.equal(preflight.direction, "WIDENING");
   assert.deepEqual(preflight.newlyVisibleToRefs, ["worker-2"]);
+  assert.deepEqual(preflight.visibleResourceRefs, ["file:src/domain/local-execution-collaboration.ts"]);
   assert.match(preflight.disclosure, /worker-2/);
+  assert.match(preflight.disclosure, /local-execution-collaboration\.ts/);
+});
+
+test("C1b (Rev108 adversarial): a widening transition with an empty newlyVisibleToRefs fails closed - visibility cannot widen to no one", () => {
+  assert.throws(
+    () =>
+      planCollaborationModeTransition({
+        from: "PRIVATE",
+        to: "SHARED_ARTIFACT",
+        newlyVisibleToRefs: [],
+        visibleResourceRefs: ["file:x"],
+      }),
+    InvalidCollaborationTransitionError,
+  );
+});
+
+test("C1c (Rev108 adversarial): a widening transition with an empty visibleResourceRefs fails closed - visibility cannot widen to nothing", () => {
+  assert.throws(
+    () =>
+      planCollaborationModeTransition({
+        from: "PRIVATE",
+        to: "SHARED_ARTIFACT",
+        newlyVisibleToRefs: ["worker-2"],
+        visibleResourceRefs: [],
+      }),
+    InvalidCollaborationTransitionError,
+  );
 });
 
 test("C2: SHARED_REPO -> PRIVATE is NARROWING and always states data already downloaded cannot be forgotten", () => {
@@ -121,19 +154,31 @@ test("C2: SHARED_REPO -> PRIVATE is NARROWING and always states data already dow
     from: "SHARED_REPO",
     to: "PRIVATE",
     newlyVisibleToRefs: [],
+    visibleResourceRefs: [],
   });
   assert.equal(preflight.direction, "NARROWING");
   assert.match(preflight.disclosure, /cannot make any worker\/device.*forget it/);
 });
 
 test("C3: same mode -> same mode is UNCHANGED", () => {
-  const preflight = planCollaborationModeTransition({ from: "ISOLATED_PROJECT", to: "ISOLATED_PROJECT", newlyVisibleToRefs: [] });
+  const preflight = planCollaborationModeTransition({
+    from: "ISOLATED_PROJECT",
+    to: "ISOLATED_PROJECT",
+    newlyVisibleToRefs: [],
+    visibleResourceRefs: [],
+  });
   assert.equal(preflight.direction, "UNCHANGED");
 });
 
 test("C4: unrecognized CollaborationMode fails closed", () => {
   assert.throws(
-    () => planCollaborationModeTransition({ from: "PRIVATE", to: "BOGUS" as never, newlyVisibleToRefs: [] }),
+    () =>
+      planCollaborationModeTransition({
+        from: "PRIVATE",
+        to: "BOGUS" as never,
+        newlyVisibleToRefs: [],
+        visibleResourceRefs: [],
+      }),
     InvalidCollaborationTransitionError,
   );
 });
@@ -183,33 +228,70 @@ test("C8: createWorkspaceSnapshotPackage rejects a non-positive-integer snapshot
 
 // --- SharedRepoBranchClaim ---
 
-test("C9: claimSharedRepoBranch grants an unclaimed branch", () => {
+const otherOwnership = createProjectOwnershipRef({
+  tenantId: "tenant-collab-1",
+  customerId: "customer-1",
+  projectId: "project-other",
+});
+
+test("C9: claimSharedRepoBranch grants an unclaimed branch to a worker bound to the target project", () => {
   const device = onlineDevice("b1");
-  const worker = makeWorker("b1", device);
+  const worker = makeWorker("b1", device, { boundProjectOwnerships: [targetOwnership] });
   const { lease } = runningCheckpoint(worker, device, "b1");
-  const claims = claimSharedRepoBranch({ branchRef: "feature-x", lease, existingClaims: [] });
+  const claims = claimSharedRepoBranch({ branchRef: "feature-x", lease, worker, targetOwnership, existingClaims: [] });
   assert.deepEqual(claims, [{ branchRef: "feature-x", leaseId: lease.leaseId }]);
+});
+
+test("C9b (Rev108 adversarial): claimSharedRepoBranch fails closed when the worker is not bound to the target project - a bare branch/lease claim is never itself authority", () => {
+  const device = onlineDevice("b1u");
+  const worker = makeWorker("b1u", device, { boundProjectOwnerships: [] });
+  const { lease } = runningCheckpoint(worker, device, "b1u");
+  assert.throws(
+    () => claimSharedRepoBranch({ branchRef: "feature-x", lease, worker, targetOwnership, existingClaims: [] }),
+    InvalidSharedRepoLeaseError,
+  );
+});
+
+test("C9c (Rev108 adversarial): claimSharedRepoBranch fails closed when the worker is bound to a different project than the one being claimed for", () => {
+  const device = onlineDevice("b1d");
+  const worker = makeWorker("b1d", device, { boundProjectOwnerships: [otherOwnership] });
+  const { lease } = runningCheckpoint(worker, device, "b1d");
+  assert.throws(
+    () => claimSharedRepoBranch({ branchRef: "feature-x", lease, worker, targetOwnership, existingClaims: [] }),
+    InvalidSharedRepoLeaseError,
+  );
+});
+
+test("C9d (Rev108 adversarial): claimSharedRepoBranch fails closed when the supplied worker does not match the lease's own workerId", () => {
+  const device = onlineDevice("b1w");
+  const worker = makeWorker("b1w", device, { boundProjectOwnerships: [targetOwnership] });
+  const otherWorker = makeWorker("b1w-other", device, { boundProjectOwnerships: [targetOwnership] });
+  const { lease } = runningCheckpoint(worker, device, "b1w");
+  assert.throws(
+    () => claimSharedRepoBranch({ branchRef: "feature-x", lease, worker: otherWorker, targetOwnership, existingClaims: [] }),
+    InvalidSharedRepoLeaseError,
+  );
 });
 
 test("C10: claimSharedRepoBranch fails closed on a second concurrent writer for the same branch", () => {
   const device = onlineDevice("b2");
-  const workerA = makeWorker("b2a", device);
-  const workerB = makeWorker("b2b", device);
+  const workerA = makeWorker("b2a", device, { boundProjectOwnerships: [targetOwnership] });
+  const workerB = makeWorker("b2b", device, { boundProjectOwnerships: [targetOwnership] });
   const { lease: leaseA } = runningCheckpoint(workerA, device, "b2a");
   const { lease: leaseB } = runningCheckpoint(workerB, device, "b2b");
   const existingClaims: ReadonlyArray<SharedRepoBranchClaim> = [{ branchRef: "feature-x", leaseId: leaseA.leaseId }];
   assert.throws(
-    () => claimSharedRepoBranch({ branchRef: "feature-x", lease: leaseB, existingClaims }),
+    () => claimSharedRepoBranch({ branchRef: "feature-x", lease: leaseB, worker: workerB, targetOwnership, existingClaims }),
     InvalidSharedRepoLeaseError,
   );
 });
 
 test("C11: claimSharedRepoBranch is idempotent for the same lease re-claiming its own branch", () => {
   const device = onlineDevice("b3");
-  const worker = makeWorker("b3", device);
+  const worker = makeWorker("b3", device, { boundProjectOwnerships: [targetOwnership] });
   const { lease } = runningCheckpoint(worker, device, "b3");
-  const first = claimSharedRepoBranch({ branchRef: "feature-x", lease, existingClaims: [] });
-  const second = claimSharedRepoBranch({ branchRef: "feature-x", lease, existingClaims: first });
+  const first = claimSharedRepoBranch({ branchRef: "feature-x", lease, worker, targetOwnership, existingClaims: [] });
+  const second = claimSharedRepoBranch({ branchRef: "feature-x", lease, worker, targetOwnership, existingClaims: first });
   assert.deepEqual(second, [{ branchRef: "feature-x", leaseId: lease.leaseId }]);
 });
 
@@ -335,10 +417,13 @@ test("F1: resolveLocalExecutionFailover selects the next eligible worker under t
   const device = onlineDevice("f1", "owner-f1");
   const primary = makeWorker("f1-primary", device, { ownerMembershipRef: "owner-f1" });
   const fallback = makeWorker("f1-fallback", device, { ownerMembershipRef: "owner-f1" });
-  const { checkpoint } = runningCheckpoint(primary, device, "f1");
+  const { lease, checkpoint } = runningCheckpoint(primary, device, "f1");
+  const checkpointed = transitionLocalTaskLease({ lease, to: "CHECKPOINTED", workspaceCheckpointRef: checkpoint.checkpointRef });
   const result = resolveLocalExecutionFailover({
     outgoingWorker: primary,
     checkpoint,
+    currentLease: checkpointed,
+    expectedTaskRef: lease.taskRef,
     reason: "USAGE_LIMITED",
     executionPolicy: failoverExecutionPolicy(),
     registrations: [primary, fallback],
@@ -355,18 +440,23 @@ test("F1: resolveLocalExecutionFailover selects the next eligible worker under t
   assert.equal(result.outgoingWorkerId, primary.workerId);
   assert.equal(result.incomingWorker.workerId, fallback.workerId);
   assert.equal(result.checkpointRef, checkpoint.checkpointRef);
+  assert.equal(result.endedLease.status, "CANCELLED");
+  assert.equal(result.endedLease.leaseId, lease.leaseId);
 });
 
 test("F2: resolveLocalExecutionFailover fails closed while the external-effect state is UNKNOWN - no blind retry on another worker", () => {
   const device = onlineDevice("f2", "owner-f2");
   const primary = makeWorker("f2-primary", device, { ownerMembershipRef: "owner-f2" });
   const fallback = makeWorker("f2-fallback", device, { ownerMembershipRef: "owner-f2" });
-  const { checkpoint } = runningCheckpoint(primary, device, "f2");
+  const { lease, checkpoint } = runningCheckpoint(primary, device, "f2");
+  const checkpointed = transitionLocalTaskLease({ lease, to: "CHECKPOINTED", workspaceCheckpointRef: checkpoint.checkpointRef });
   assert.throws(
     () =>
       resolveLocalExecutionFailover({
         outgoingWorker: primary,
         checkpoint,
+        currentLease: checkpointed,
+        expectedTaskRef: lease.taskRef,
         reason: "OFFLINE",
         externalEffectState: "UNKNOWN",
         executionPolicy: failoverExecutionPolicy(),
@@ -388,12 +478,15 @@ test("F2: resolveLocalExecutionFailover fails closed while the external-effect s
 test("F3: resolveLocalExecutionFailover fails closed when no other eligible worker exists", () => {
   const device = onlineDevice("f3", "owner-f3");
   const primary = makeWorker("f3-primary", device, { ownerMembershipRef: "owner-f3" });
-  const { checkpoint } = runningCheckpoint(primary, device, "f3");
+  const { lease, checkpoint } = runningCheckpoint(primary, device, "f3");
+  const checkpointed = transitionLocalTaskLease({ lease, to: "CHECKPOINTED", workspaceCheckpointRef: checkpoint.checkpointRef });
   assert.throws(
     () =>
       resolveLocalExecutionFailover({
         outgoingWorker: primary,
         checkpoint,
+        currentLease: checkpointed,
+        expectedTaskRef: lease.taskRef,
         reason: "DEGRADED",
         executionPolicy: failoverExecutionPolicy(),
         registrations: [primary],
@@ -416,12 +509,15 @@ test("F4: resolveLocalExecutionFailover never silently routes to a different emp
   const otherDevice = onlineDevice("f4-other", "owner-other");
   const primary = makeWorker("f4-primary", device, { ownerMembershipRef: "owner-f4" });
   const otherEmployeeWorker = makeWorker("f4-other-worker", otherDevice, { ownerMembershipRef: "owner-other" });
-  const { checkpoint } = runningCheckpoint(primary, device, "f4");
+  const { lease, checkpoint } = runningCheckpoint(primary, device, "f4");
+  const checkpointed = transitionLocalTaskLease({ lease, to: "CHECKPOINTED", workspaceCheckpointRef: checkpoint.checkpointRef });
   assert.throws(
     () =>
       resolveLocalExecutionFailover({
         outgoingWorker: primary,
         checkpoint,
+        currentLease: checkpointed,
+        expectedTaskRef: lease.taskRef,
         reason: "OFFLINE",
         executionPolicy: failoverExecutionPolicy(),
         registrations: [primary, otherEmployeeWorker],
@@ -443,12 +539,15 @@ test("F5: resolveLocalExecutionFailover requires a non-empty evidenceRef", () =>
   const device = onlineDevice("f5", "owner-f5");
   const primary = makeWorker("f5-primary", device, { ownerMembershipRef: "owner-f5" });
   const fallback = makeWorker("f5-fallback", device, { ownerMembershipRef: "owner-f5" });
-  const { checkpoint } = runningCheckpoint(primary, device, "f5");
+  const { lease, checkpoint } = runningCheckpoint(primary, device, "f5");
+  const checkpointed = transitionLocalTaskLease({ lease, to: "CHECKPOINTED", workspaceCheckpointRef: checkpoint.checkpointRef });
   assert.throws(
     () =>
       resolveLocalExecutionFailover({
         outgoingWorker: primary,
         checkpoint,
+        currentLease: checkpointed,
+        expectedTaskRef: lease.taskRef,
         reason: "USAGE_LIMITED",
         executionPolicy: failoverExecutionPolicy(),
         registrations: [primary, fallback],
@@ -463,5 +562,159 @@ test("F5: resolveLocalExecutionFailover requires a non-empty evidenceRef", () =>
         evidenceRef: "",
       }),
     InvalidCollaborationTransitionError,
+  );
+});
+
+// --- Rev108 correction (F1 - failover checkpoint/lease lineage) ---
+
+test("F6 (Rev108 adversarial): resolveLocalExecutionFailover fails closed when the checkpoint's leaseId does not match the supplied currentLease - a foreign checkpoint cannot authorize failover", () => {
+  const device = onlineDevice("f6", "owner-f6");
+  const primary = makeWorker("f6-primary", device, { ownerMembershipRef: "owner-f6" });
+  const fallback = makeWorker("f6-fallback", device, { ownerMembershipRef: "owner-f6" });
+  const { lease: leaseA, checkpoint: checkpointA } = runningCheckpoint(primary, device, "f6a");
+  const { lease: leaseB } = runningCheckpoint(primary, device, "f6b");
+  const checkpointedB = transitionLocalTaskLease({ lease: leaseB, to: "CHECKPOINTED", workspaceCheckpointRef: "cp" });
+  assert.throws(
+    () =>
+      resolveLocalExecutionFailover({
+        outgoingWorker: primary,
+        checkpoint: checkpointA,
+        currentLease: checkpointedB,
+        expectedTaskRef: leaseB.taskRef,
+        reason: "OFFLINE",
+        executionPolicy: failoverExecutionPolicy(),
+        registrations: [primary, fallback],
+        requestingTenantId: tenantScope.tenantId,
+        targetOwnership,
+        requestingOwnerMembershipRef: "owner-f6",
+        requiredCapabilityRef: "cap:code-edit",
+        riskLevel: "STANDARD",
+        requiredToolRefs: [],
+        requiredPolicyConstraintRefs: [],
+        requiredAuthorityLevel: "STANDARD",
+        evidenceRef: "evidence-failover-6",
+      }),
+    InvalidLocalFailoverError,
+  );
+});
+
+test("F7 (Rev108 adversarial): resolveLocalExecutionFailover fails closed when currentLease.workerId does not match the outgoing worker - cross-worker substitution", () => {
+  const device = onlineDevice("f7", "owner-f7");
+  const primary = makeWorker("f7-primary", device, { ownerMembershipRef: "owner-f7" });
+  const otherWorker = makeWorker("f7-other", device, { ownerMembershipRef: "owner-f7" });
+  const fallback = makeWorker("f7-fallback", device, { ownerMembershipRef: "owner-f7" });
+  const { lease, checkpoint } = runningCheckpoint(otherWorker, device, "f7");
+  const checkpointed = transitionLocalTaskLease({ lease, to: "CHECKPOINTED", workspaceCheckpointRef: checkpoint.checkpointRef });
+  assert.throws(
+    () =>
+      resolveLocalExecutionFailover({
+        outgoingWorker: primary,
+        checkpoint,
+        currentLease: checkpointed,
+        expectedTaskRef: lease.taskRef,
+        reason: "OFFLINE",
+        executionPolicy: failoverExecutionPolicy(),
+        registrations: [primary, otherWorker, fallback],
+        requestingTenantId: tenantScope.tenantId,
+        targetOwnership,
+        requestingOwnerMembershipRef: "owner-f7",
+        requiredCapabilityRef: "cap:code-edit",
+        riskLevel: "STANDARD",
+        requiredToolRefs: [],
+        requiredPolicyConstraintRefs: [],
+        requiredAuthorityLevel: "STANDARD",
+        evidenceRef: "evidence-failover-7",
+      }),
+    InvalidLocalFailoverError,
+  );
+});
+
+test("F8 (Rev108 adversarial): resolveLocalExecutionFailover fails closed when currentLease.tenantId does not match requestingTenantId - cross-tenant substitution", () => {
+  const otherTenantScope = createTenantScope("tenant-collab-other");
+  const device = onlineDevice("f8", "owner-f8");
+  const primary = makeWorker("f8-primary", device, { ownerMembershipRef: "owner-f8" });
+  const fallback = makeWorker("f8-fallback", device, { ownerMembershipRef: "owner-f8" });
+  const { lease, checkpoint } = runningCheckpoint(primary, device, "f8");
+  const checkpointed = transitionLocalTaskLease({ lease, to: "CHECKPOINTED", workspaceCheckpointRef: checkpoint.checkpointRef });
+  assert.throws(
+    () =>
+      resolveLocalExecutionFailover({
+        outgoingWorker: primary,
+        checkpoint,
+        currentLease: checkpointed,
+        expectedTaskRef: lease.taskRef,
+        reason: "OFFLINE",
+        executionPolicy: failoverExecutionPolicy(),
+        registrations: [primary, fallback],
+        requestingTenantId: otherTenantScope.tenantId,
+        targetOwnership,
+        requestingOwnerMembershipRef: "owner-f8",
+        requiredCapabilityRef: "cap:code-edit",
+        riskLevel: "STANDARD",
+        requiredToolRefs: [],
+        requiredPolicyConstraintRefs: [],
+        requiredAuthorityLevel: "STANDARD",
+        evidenceRef: "evidence-failover-8",
+      }),
+    InvalidLocalFailoverError,
+  );
+});
+
+test("F9 (Rev108 adversarial): resolveLocalExecutionFailover fails closed when currentLease.taskRef does not match expectedTaskRef - cross-task substitution", () => {
+  const device = onlineDevice("f9", "owner-f9");
+  const primary = makeWorker("f9-primary", device, { ownerMembershipRef: "owner-f9" });
+  const fallback = makeWorker("f9-fallback", device, { ownerMembershipRef: "owner-f9" });
+  const { lease, checkpoint } = runningCheckpoint(primary, device, "f9");
+  const checkpointed = transitionLocalTaskLease({ lease, to: "CHECKPOINTED", workspaceCheckpointRef: checkpoint.checkpointRef });
+  assert.throws(
+    () =>
+      resolveLocalExecutionFailover({
+        outgoingWorker: primary,
+        checkpoint,
+        currentLease: checkpointed,
+        expectedTaskRef: "some-other-task",
+        reason: "OFFLINE",
+        executionPolicy: failoverExecutionPolicy(),
+        registrations: [primary, fallback],
+        requestingTenantId: tenantScope.tenantId,
+        targetOwnership,
+        requestingOwnerMembershipRef: "owner-f9",
+        requiredCapabilityRef: "cap:code-edit",
+        riskLevel: "STANDARD",
+        requiredToolRefs: [],
+        requiredPolicyConstraintRefs: [],
+        requiredAuthorityLevel: "STANDARD",
+        evidenceRef: "evidence-failover-9",
+      }),
+    InvalidLocalFailoverError,
+  );
+});
+
+test("F10 (Rev108 adversarial): resolveLocalExecutionFailover fails closed when currentLease is not CHECKPOINTED - the checkpoint step must have just completed, not be an unrelated historical record", () => {
+  const device = onlineDevice("f10", "owner-f10");
+  const primary = makeWorker("f10-primary", device, { ownerMembershipRef: "owner-f10" });
+  const fallback = makeWorker("f10-fallback", device, { ownerMembershipRef: "owner-f10" });
+  const { lease, checkpoint } = runningCheckpoint(primary, device, "f10");
+  assert.throws(
+    () =>
+      resolveLocalExecutionFailover({
+        outgoingWorker: primary,
+        checkpoint,
+        currentLease: lease,
+        expectedTaskRef: lease.taskRef,
+        reason: "OFFLINE",
+        executionPolicy: failoverExecutionPolicy(),
+        registrations: [primary, fallback],
+        requestingTenantId: tenantScope.tenantId,
+        targetOwnership,
+        requestingOwnerMembershipRef: "owner-f10",
+        requiredCapabilityRef: "cap:code-edit",
+        riskLevel: "STANDARD",
+        requiredToolRefs: [],
+        requiredPolicyConstraintRefs: [],
+        requiredAuthorityLevel: "STANDARD",
+        evidenceRef: "evidence-failover-10",
+      }),
+    InvalidLocalFailoverError,
   );
 });
