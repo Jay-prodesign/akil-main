@@ -1,0 +1,45 @@
+# LOCAL-EXEC-004 — Staff/Team/Pool Wiring reusing Family 2 + V3 Membership/Authority (Phase L3)
+
+## Provenance
+
+- Governing authority: DEC-160 V2→V5 Autonomous Engineering Corridor. Rev99/§21's Implementation Program names `LOCAL-EXEC-004` (Phase L3) as explicitly depending on Rev98 Family 2's "still-open trusted internal/staff ingress boundary" — `local-execution.ts`'s own doc comments record its `ownerMembershipRef`/`requestingOwnerMembershipRef` fields as "deliberately opaque caller-supplied strings, never resolved against any real authentication system, exactly matching this floor's own stated dependency boundary." Canonical Handoff Rev103's "NEXT GRAPH" text explicitly names `LOCAL-EXEC-004 staff/team/pool wiring reusing Family 2 + existing V3 membership/authority` as next-in-line now that Family 2 exists.
+- Branch `claude/local-exec-004-staff-binding`, created by merging `claude/family-2-staff-ingress-boundary` (PR #53, `staff-session-context.ts`/`staff-membership-guard.ts`) with `claude/local-exec-003-codex-adapter` (PR #49, the full LOCAL-EXEC-001→003 chain) — both trace to the same `main` ancestor (`3226c76fa338e425e553638e5f5f48924182a1c0`), so the merge was clean on every source/test file; conflicts existed only in `CURRENT_STATE.md`/`V2_TO_V5.md` (both additive independent narratives, resolved by keeping both in sequence, no content dropped). 857/857 tests pass on the merged base before this checkpoint's own new code.
+
+## Scope (this checkpoint)
+
+`src/web/local-execution-staff-binding.ts` — a thin composition layer, three functions, each following the identical shape: resolve the caller's authenticated `StaffSessionContext` to a real, current, tenant-scoped `OrganizationMembership` via `staff-membership-guard.ts`'s unmodified `requireCurrentStaffMembership` (fails closed, never guesses), then call the corresponding unmodified `local-execution.ts` function with that membership's own `membershipId` as the trusted `ownerMembershipRef`/`requestingOwnerMembershipRef` — never a value the caller supplied directly for that field:
+
+- `registerDeviceForAuthenticatedStaff` — wraps `registerDevice`.
+- `createLocalWorkerRegistrationForAuthenticatedStaff` — wraps `createLocalWorkerRegistration`. `local-execution.ts`'s own Rev101 F1 guard (a worker's `ownerMembershipRef` must match its device's own) still applies underneath and is neither weakened nor duplicated here.
+- `resolveEligibleLocalWorkersForAuthenticatedStaff` — wraps `resolveEligibleLocalWorkers`, so `PERSONAL_LOCAL`'s employee-isolation dimension is now driven by a real authenticated identity rather than a bare caller-asserted string.
+- `tests/local-exec-004-staff-binding.test.ts` (10 tests: L4-1–L4-10) and `tests/local-exec-004-boundary-scan.test.ts` (5 tests).
+
+## Explicitly deferred (not fabricated)
+
+- **No modification to `local-execution.ts`, `staff-membership-guard.ts`, `staff-session-context.ts`, or `organization-membership.ts`.** All four are read-only dependencies; every existing guard (Rev101 F1's owner-match check, Family 2's ambiguity/no-membership fail-closed checks) is reused exactly as-is, not re-implemented.
+- **No device bridge/control-channel wiring.** `LOCAL-EXEC-002`'s protocol layer is untouched; this checkpoint only changes how an `ownerMembershipRef` is obtained before a device/worker/eligibility call is made, not the protocol itself.
+- **No `AuthorityContext`/permission-policy wiring.** Exactly the same deferral Family 2 itself recorded — this checkpoint binds *identity*, not authorization policy.
+- **No TaskPacket/cross-worker handoff (LOCAL-EXEC-005's own scope).**
+- **No admin/staff UI surface.**
+
+## Architecture / semantic invariants (verified by test)
+
+- `registerDeviceForAuthenticatedStaff` binds `ownerMembershipRef` to the resolved membership's `membershipId`, never a caller string (L4-1); throws `NoStaffMembershipError` — never registers a device — when the session has no membership in the tenant (L4-2); never accepts a same-`principalRef` membership from a different tenant (L4-3); throws `AmbiguousStaffMembershipError` rather than guessing on more than one match (L4-4).
+- `createLocalWorkerRegistrationForAuthenticatedStaff` binds the worker's `ownerMembershipRef` to the resolved membership, matching its device's own owner (L4-5); fails closed before ever reaching the underlying constructor when the session is unbound (L4-6); a *different*, still-authenticated staff member's own resolved membership still fails `local-execution.ts`'s own Rev101 F1 ownership-mismatch guard when it doesn't match the device's enrolled owner — proving this binding layer does not create a bypass of that existing guard (L4-7).
+- `resolveEligibleLocalWorkersForAuthenticatedStaff` derives `requestingOwnerMembershipRef` from the authenticated session, admitting only that staff member's own `PRIVATE` worker (L4-8); never admits another staff member's `PRIVATE` worker even in the same tenant — employee isolation now driven by real identity (L4-9); throws `NoStaffMembershipError` rather than silently resolving zero eligible workers when the requester itself is unbound (L4-10).
+- Boundary scan confirms structurally: no raw `ownerMembershipRef: unknown`/`requestingOwnerMembershipRef: unknown` parameter exists anywhere in this module's own function signatures (every one is derived, never caller-supplied for that field), and `requireCurrentStaffMembership` is called exactly once per exported function (three total).
+
+## Hard Non-Scope
+
+No modification to `local-execution.ts`, `staff-session-context.ts`, `staff-membership-guard.ts`, `organization-membership.ts`, or `tenant-scope.ts` (all read-only dependencies); no real network/IdP call anywhere; no persistence; no admin/UI wiring; no new runtime dependency; no `AuthorityContext` composition.
+
+## Evidence
+
+- `npx tsc --noEmit -p .` / `npm run build`: exit 0, strict mode.
+- `npm run test`: **872/872 pass** (857 pre-existing on the merged Family-2 + LOCAL-EXEC-003 base + 15 new: 10 functional + 5 boundary-scan).
+- `package.json`: zero new runtime dependency.
+- Files touched: `src/web/local-execution-staff-binding.ts` (new), `tests/local-exec-004-staff-binding.test.ts` (new), `tests/local-exec-004-boundary-scan.test.ts` (new), this exec-plan, `docs/engineering/CURRENT_STATE.md`, `docs/exec-plans/corridors/V2_TO_V5.md`.
+
+## Status
+
+**IMPLEMENTED / SELF-VALIDATED** — pending independent verification per canonical Handoff Rev105 (delegated VERIFY requires a reviewer distinct from this implementing context; self-review alone does not qualify). This checkpoint composes/touches authentication and worker-authority identity binding (`OrganizationMembership`, `AdmittedWorker`-adjacent worker registration), which falls inside Rev105/Execution Contract §9's SAFE_MERGE exclusion list (auth/IAM/authority) — it is not eligible for `SAFE_MERGE` to `main` regardless of verification outcome. `MERGE_DISPOSITION: HOLD_MERGE` — this branch is a merge of the Family 2 branch and the LOCAL-EXEC-001→003 chain; its own eventual PR should be reviewed alongside all upstream source PRs (#49, #53) as part of the one consolidated end-of-batch Brain review packet.
