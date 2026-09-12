@@ -22,8 +22,11 @@ import type { PartnerCapabilityClaim } from "../domain/partner-capability-admiss
  * modifies `internal-command-projection.ts`, `staff-route-guard.ts`, or
  * `staff-membership-guard.ts`, it only composes them so the internal
  * command-center projection can no longer be reached without first
- * proving a genuine authenticated staff session bound to a real,
- * current `OrganizationMembership`.
+ * proving a genuine authenticated staff session bound to a matching,
+ * tenant-scoped `OrganizationMembership` (Rev107: this repeats
+ * `staff-membership-guard.ts`'s own exact wording rather than
+ * "current" - that module carries no temporal-lifecycle field to prove
+ * currentness with).
  *
  * The customer/internal separation §14 itself requires is preserved
  * structurally: this module imports nothing from `session-context.ts`/

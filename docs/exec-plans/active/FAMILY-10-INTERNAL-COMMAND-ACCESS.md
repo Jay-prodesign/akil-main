@@ -48,6 +48,11 @@ No modification to `internal-command-projection.ts`, `staff-session-context.ts`,
 - New adversarial tests F10-8 (a second tenant's attention item is never included in the returned view) and F10-9 (partner claims never surface through this tenant-membership-only gate, even when supplied) prove the boundary; a new boundary-scan test confirms structurally that `resolveInternalCommandCenterView`'s own source never forwards `input.partnerClaims` directly and does filter by `access.membership.tenantId`.
 - Sanity-checked: temporarily reverted the fix (passed `input.attentionItems`/`input.partnerClaims` straight through, unfiltered) and confirmed exactly the 3 tests proving this dimension (F10-8, F10-9, and the boundary-scan structural check) then failed; restored the fix and reconfirmed 754/754 pass.
 
+## Rev107 correction (very bounded wording-only cleanup)
+
+- Brain's Rev107 incremental re-review confirmed the cross-tenant behavioral fix resolved, but found the module header still said the staff session is bound to a "real, current `OrganizationMembership`" — reintroducing PR #53's own disproven currentness claim.
+- Fixed: replaced with `staff-membership-guard.ts`'s own exact wording ("a matching, tenant-scoped `OrganizationMembership`"), since that module carries no temporal-lifecycle field to prove currentness with. No behavior change; 754/754 tests pass unchanged.
+
 ## Status
 
 **IMPLEMENTED / SELF-VALIDATED (Rev106-corrected)** — pending independent verification per canonical Handoff Rev105 (self-review alone does not qualify as delegated VERIFY). This checkpoint gates access to internal data via authentication/organizational-membership identity binding, which falls inside Rev105/Execution Contract §9's SAFE_MERGE exclusion list (auth/IAM/authority) — it is not eligible for `SAFE_MERGE` to `main` regardless of verification outcome, and Rev106 additionally confirms this surface is HIGH/PROTECTED. `MERGE_DISPOSITION: HOLD_MERGE` — this branch is a merge of the Family 2 branch and the V5-CMD-001 branch; its own eventual PR should be reviewed alongside both upstream source PRs as part of the one consolidated end-of-batch Brain review packet.
