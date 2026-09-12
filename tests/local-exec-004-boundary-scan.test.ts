@@ -16,12 +16,20 @@ test("LOCAL-EXEC-004: does not redefine DeviceRegistration, LocalWorkerRegistrat
   assert.doesNotMatch(content, /interface\s+AdmittedWorker\b/);
 });
 
-test("LOCAL-EXEC-004: never accepts a raw ownerMembershipRef/requestingOwnerMembershipRef string parameter directly from the caller - always derived via requireCurrentStaffMembership", () => {
+test("LOCAL-EXEC-004: never accepts a raw ownerMembershipRef/requestingOwnerMembershipRef string parameter directly from the caller - always derived via requireMatchingStaffMembership", () => {
   const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
   assert.doesNotMatch(content, /ownerMembershipRef:\s*unknown/);
   assert.doesNotMatch(content, /requestingOwnerMembershipRef:\s*unknown/);
-  const callCount = (content.match(/requireCurrentStaffMembership\(/g) ?? []).length;
-  assert.equal(callCount, 3, "expected exactly one requireCurrentStaffMembership call per exported function");
+  const callCount = (content.match(/requireMatchingStaffMembership\(/g) ?? []).length;
+  assert.equal(callCount, 3, "expected exactly one requireMatchingStaffMembership call per exported function");
+});
+
+test("LOCAL-EXEC-004 (Rev106 correction): never accepts a caller-supplied trustStatus/authorityLevel for a newly registered worker - always mints UNTRUSTED/STANDARD", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  assert.doesNotMatch(content, /trustStatus:\s*unknown/);
+  assert.doesNotMatch(content, /authorityLevel:\s*unknown/);
+  assert.match(content, /trustStatus:\s*"UNTRUSTED"/);
+  assert.match(content, /authorityLevel:\s*"STANDARD"/);
 });
 
 test("LOCAL-EXEC-004: never calls fetch, a node: builtin, or the system clock - pure composition only", () => {

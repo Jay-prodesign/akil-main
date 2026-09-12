@@ -113,10 +113,8 @@ function baseWorkerFields() {
     declaredCapabilityRefs: [],
     declaredToolRefs: [],
     declaredPolicyConstraintRefs: [],
-    trustStatus: "ADMITTED",
     availability: "AVAILABLE",
     maxRiskLevel: "STANDARD",
-    authorityLevel: "STANDARD",
     costWeight: 0,
     evaluationEvidenceRef: "evidence:worker-eval-1",
     poolMode: "PRIVATE",
@@ -269,4 +267,27 @@ test("L4-10 (adversarial): resolveEligibleLocalWorkersForAuthenticatedStaff thro
       }),
     NoStaffMembershipError,
   );
+});
+
+// --- Rev106 correction (F1 - privilege escalation) ---
+
+test("L4-11 (Rev106 adversarial): an authenticated ordinary staff member can never self-elevate worker trust/authority - createLocalWorkerRegistrationForAuthenticatedStaff always mints UNTRUSTED/STANDARD regardless of caller intent", () => {
+  const device = registerDeviceForAuthenticatedStaff({
+    session: staffSession(),
+    tenantScope,
+    memberships: [membership()],
+    deviceId: "device-1",
+    publicKeyFingerprint: "fp-1",
+    platform: "macos",
+    bridgeVersion: "1.0.0",
+  });
+  const registration = createLocalWorkerRegistrationForAuthenticatedStaff({
+    session: staffSession(),
+    tenantScope,
+    memberships: [membership()],
+    device,
+    ...baseWorkerFields(),
+  });
+  assert.equal(registration.trustStatus, "UNTRUSTED");
+  assert.equal(registration.authorityLevel, "STANDARD");
 });
