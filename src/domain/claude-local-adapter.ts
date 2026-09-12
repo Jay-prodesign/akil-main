@@ -70,8 +70,19 @@ export function resolveClaudeAdapterPolicyCheck(input: {
 
 /**
  * A direct 1:1 projection of the Claude Code CLI's own six real
- * permission-mode values (ADR-0003, corroborated against this
- * environment's own live session-creation parameter schema).
+ * permission-mode values. Rev109 correction: previously corroborated
+ * only against this environment's own live session-creation parameter
+ * schema, which Brain correctly found insufficient to model as a
+ * "provider-officially documented" contract. Independently re-verified
+ * directly against the official Claude Code documentation
+ * (ADR-0003's Research findings, fetched 2026-09-12) — all six values
+ * (`default`/`plan`/`acceptEdits`/`auto`/`dontAsk`/`bypassPermissions`)
+ * are named there by exact literal. `auto`/`dontAsk`/`bypassPermissions`
+ * availability is plan- and version-gated at actual runtime; this
+ * module does not negotiate that itself since no real CLI invocation
+ * happens here - a caller at real activation time is responsible for
+ * confirming the invoked client version/plan actually supports the mode
+ * it requests.
  */
 export type ClaudePermissionMode = "DEFAULT" | "PLAN" | "ACCEPT_EDITS" | "DONT_ASK" | "BYPASS_PERMISSIONS" | "AUTO";
 
