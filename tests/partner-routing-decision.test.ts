@@ -327,6 +327,28 @@ test("P14 (§12 'records reason'): reason is always a non-empty string for both 
   assert.ok(rejected.reason.length > 0);
 });
 
+test("Rev102 correction: neither ROUTED nor REJECTED reason claims decidedByOwnerId was independently verified/authenticated - only the provable non-reuse fact", () => {
+  const routed = resolvePartnerRoute({
+    requiredCapabilityRef: "cap:seo-audit",
+    targetOwnership,
+    asOf: "2026-06-01T00:00:00.000Z",
+    decidedByOwnerId: "owner-rev102",
+    candidates: [makeEligibleCandidate("rev102")],
+  });
+  const rejected = resolvePartnerRoute({
+    requiredCapabilityRef: "cap:seo-audit",
+    targetOwnership,
+    asOf: "2026-06-01T00:00:00.000Z",
+    decidedByOwnerId: "owner-rev102",
+    candidates: [],
+  });
+  assert.doesNotMatch(routed.reason, /independent(ly)? of/i);
+  assert.doesNotMatch(routed.reason, /independently (verified|authenticated)/i);
+  assert.doesNotMatch(rejected.reason, /independent(ly)? of/i);
+  assert.match(routed.reason, /does not literally reuse/);
+  assert.match(rejected.reason, /without the decision owner literally reusing/);
+});
+
 test("P15: fallback list deduplicates a partner that appears more than once in candidates (e.g. via two employees)", () => {
   const partnerB = makePartner("partner-15-b");
   const membershipB1 = makeMembership("membership-15-b1", partnerB);

@@ -216,7 +216,7 @@ export function resolvePartnerRoute(request: PartnerRoutingRequest): PartnerRout
       decidedByOwnerId,
       fallbackPartnerOrganizationIds: [],
       reason:
-        "no candidate partner has both an ADMITTED capability claim for the required capability as of the given date and an AUTHORIZED client assignment for the target project, independent of the routing decision owner",
+        "no candidate partner has both an ADMITTED capability claim for the required capability as of the given date and an AUTHORIZED client assignment for the target project, without the decision owner literally reusing that candidate's own partnerOrganizationId or partnerEmployeeMembershipId",
     };
   }
 
@@ -239,7 +239,7 @@ export function resolvePartnerRoute(request: PartnerRoutingRequest): PartnerRout
     selectedPartnerOrganizationId: selected.partnerOrganization.partnerOrganizationId,
     selectedPartnerEmployeeMembershipId: selected.partnerEmployeeMembership.partnerEmployeeMembershipId,
     fallbackPartnerOrganizationIds,
-    reason: `partner ${selected.partnerOrganization.partnerOrganizationId} (employee ${selected.partnerEmployeeMembership.partnerEmployeeMembershipId}) holds an ADMITTED capability claim for ${requiredCapabilityRef} as of ${asOf} and an AUTHORIZED client assignment for the target project, independent of decision owner ${decidedByOwnerId}${
+    reason: `partner ${selected.partnerOrganization.partnerOrganizationId} (employee ${selected.partnerEmployeeMembership.partnerEmployeeMembershipId}) holds an ADMITTED capability claim for ${requiredCapabilityRef} as of ${asOf} and an AUTHORIZED client assignment for the target project; decision owner ${decidedByOwnerId} does not literally reuse this candidate's own partnerOrganizationId or partnerEmployeeMembershipId${
       fallbackPartnerOrganizationIds.length > 0
         ? `; ${fallbackPartnerOrganizationIds.length} eligible fallback candidate(s) recorded`
         : ""
