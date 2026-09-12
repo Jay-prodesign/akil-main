@@ -4,6 +4,7 @@
 
 - Governing authority: DEC-160 V2→V5 Autonomous Engineering Corridor. Canonical Handoff Rev103's "NEXT GRAPH" text names `LOCAL-EXEC-005 / Phase L4` as following once L0's stable workspace/task/checkpoint primitives exist. The dedicated architecture packet (Drive `1vhHCHZYu15IugytGb2O2epe7jgRFQF6vRoZsozjASDU`) §12-15 was fresh-read in full before any design here — never paraphrased from a one-line summary — per this corridor's own established discipline (the same discipline that required a fresh read before LOCAL-EXEC-001 itself).
 - Branch `claude/local-exec-005-collaboration-handoff`, created by merging `claude/local-exec-004-staff-binding` (PR #54, the full LOCAL-EXEC-001→004 chain) with `claude/v4-eff-001-external-effect-envelope` (PR #42, Rev101-corrected) — both trace to the same `main` ancestor (`3226c76fa338e425e553638e5f5f48924182a1c0`), clean merge on every source/test file, doc-only conflicts in `CURRENT_STATE.md`/`V2_TO_V5.md` resolved by keeping both branches' independently-true narratives in sequence. The merge exists specifically so this checkpoint's failover gate can reuse `external-effect-envelope.ts`'s real `ExternalEffectAttemptState` unmodified, per §15's own instruction ("Never automatically fail over an external effect when the effect state is UNKNOWN; use the V4 external-effect recovery/readback envelope first"). 907/907 tests pass on the merged base before this checkpoint's own new code.
+- **Follow-up merge (same auto-resume continuation, before independent review):** PR #54's own base moved after this checkpoint was cut, when Brain's Rev106 periodic HIGH-RISK sweep found and this session fixed a real privilege-escalation bug in `local-execution-staff-binding.ts` (see `docs/exec-plans/active/LOCAL-EXEC-004.md`'s "Rev106 correction" section). This checkpoint's own `local-execution-collaboration.ts` never imports `local-execution-staff-binding.ts`/`staff-membership-guard.ts` at all, so it was never exposed to that defect - but leaving this branch's base pinned to the pre-fix head would still be stale. Merged the corrected `claude/local-exec-004-staff-binding` head in (clean merge, no conflicts): 940/940 tests pass (938 pre-existing + 2 from the Rev106 correction).
 
 ## Scope (this checkpoint)
 
@@ -43,8 +44,8 @@ No modification to `local-execution.ts`, `local-execution-bridge.ts`, `worker-ro
 ## Evidence
 
 - `npx tsc --noEmit -p .` / `npm run build`: exit 0, strict mode.
-- `npm run test`: **938/938 pass** (907 pre-existing on the merged Family-2 + LOCAL-EXEC-001→004 + V4-EFF-001 base + 31 new: 24 functional + 7 boundary-scan).
-- Sanity-checked: temporarily removed the `externalEffectState === "UNKNOWN"` fail-closed gate from `resolveLocalExecutionFailover` and confirmed exactly the 2 tests proving that dimension (F2 functional + the boundary-scan ordering test) then failed; restored, reconfirmed 938/938 pass.
+- `npm run test`: **940/940 pass** (907 pre-existing on the original merged base + 31 new for this checkpoint + 2 from the follow-up Rev106 LOCAL-EXEC-004 merge).
+- Sanity-checked: temporarily removed the `externalEffectState === "UNKNOWN"` fail-closed gate from `resolveLocalExecutionFailover` and confirmed exactly the 2 tests proving that dimension (F2 functional + the boundary-scan ordering test) then failed; restored, reconfirmed all tests pass.
 - `package.json`: zero new runtime dependency.
 - Files touched: `src/domain/local-execution-collaboration.ts` (new), `tests/local-exec-005-collaboration-handoff.test.ts` (new), `tests/local-exec-005-boundary-scan.test.ts` (new), this exec-plan, `docs/engineering/CURRENT_STATE.md`, `docs/exec-plans/corridors/V2_TO_V5.md`.
 
