@@ -9,8 +9,8 @@ import { createDevFixtureStaffSessionProvider, DevFixtureStaffSessionProviderInP
 import { createProductionStaffSessionProvider } from "../src/web/production-staff-session-provider.js";
 import { requireStaffSession, StaffUnauthenticatedError } from "../src/web/staff-route-guard.js";
 import {
-  resolveCurrentStaffMembership,
-  requireCurrentStaffMembership,
+  resolveMatchingStaffMembership,
+  requireMatchingStaffMembership,
   NoStaffMembershipError,
   AmbiguousStaffMembershipError,
 } from "../src/web/staff-membership-guard.js";
@@ -116,8 +116,8 @@ test("F2-10 (adversarial): requireStaffSession throws StaffUnauthenticatedError 
 
 // --- staff-membership-guard.ts ---
 
-test("F2-11: resolveCurrentStaffMembership finds the matching membership for the session's principal in the given tenant", () => {
-  const found = resolveCurrentStaffMembership({
+test("F2-11: resolveMatchingStaffMembership finds the matching membership for the session's principal in the given tenant", () => {
+  const found = resolveMatchingStaffMembership({
     session: staffSession("staff-1"),
     tenantId: tenantScope.tenantId,
     memberships: [membership()],
@@ -125,8 +125,8 @@ test("F2-11: resolveCurrentStaffMembership finds the matching membership for the
   assert.equal(found?.principalRef, "staff-1");
 });
 
-test("F2-12: resolveCurrentStaffMembership returns undefined (never throws) when no membership matches - an unbound session is expected, not an error", () => {
-  const found = resolveCurrentStaffMembership({
+test("F2-12: resolveMatchingStaffMembership returns undefined (never throws) when no membership matches - an unbound session is expected, not an error", () => {
+  const found = resolveMatchingStaffMembership({
     session: staffSession("staff-unknown"),
     tenantId: tenantScope.tenantId,
     memberships: [membership()],
@@ -134,8 +134,8 @@ test("F2-12: resolveCurrentStaffMembership returns undefined (never throws) when
   assert.equal(found, undefined);
 });
 
-test("F2-13 (adversarial cross-tenant): resolveCurrentStaffMembership never matches a membership from a different tenant, even with the same principalRef", () => {
-  const found = resolveCurrentStaffMembership({
+test("F2-13 (adversarial cross-tenant): resolveMatchingStaffMembership never matches a membership from a different tenant, even with the same principalRef", () => {
+  const found = resolveMatchingStaffMembership({
     session: staffSession("staff-1"),
     tenantId: otherTenantScope.tenantId,
     memberships: [membership()],
@@ -143,10 +143,10 @@ test("F2-13 (adversarial cross-tenant): resolveCurrentStaffMembership never matc
   assert.equal(found, undefined);
 });
 
-test("F2-14 (adversarial ambiguity): resolveCurrentStaffMembership throws, never guesses, when more than one membership matches the same principal/tenant", () => {
+test("F2-14 (adversarial ambiguity): resolveMatchingStaffMembership throws, never guesses, when more than one membership matches the same principal/tenant", () => {
   assert.throws(
     () =>
-      resolveCurrentStaffMembership({
+      resolveMatchingStaffMembership({
         session: staffSession("staff-1"),
         tenantId: tenantScope.tenantId,
         memberships: [
@@ -158,8 +158,8 @@ test("F2-14 (adversarial ambiguity): resolveCurrentStaffMembership throws, never
   );
 });
 
-test("F2-15: requireCurrentStaffMembership returns the membership when exactly one match exists", () => {
-  const found = requireCurrentStaffMembership({
+test("F2-15: requireMatchingStaffMembership returns the membership when exactly one match exists", () => {
+  const found = requireMatchingStaffMembership({
     session: staffSession("staff-1"),
     tenantId: tenantScope.tenantId,
     memberships: [membership()],
@@ -167,10 +167,10 @@ test("F2-15: requireCurrentStaffMembership returns the membership when exactly o
   assert.equal(found.principalRef, "staff-1");
 });
 
-test("F2-16 (adversarial): requireCurrentStaffMembership throws NoStaffMembershipError rather than returning undefined when no membership matches - an authenticated session alone is never sufficient authority", () => {
+test("F2-16 (adversarial): requireMatchingStaffMembership throws NoStaffMembershipError rather than returning undefined when no membership matches - an authenticated session alone is never sufficient authority", () => {
   assert.throws(
     () =>
-      requireCurrentStaffMembership({
+      requireMatchingStaffMembership({
         session: staffSession("staff-unknown"),
         tenantId: tenantScope.tenantId,
         memberships: [membership()],
