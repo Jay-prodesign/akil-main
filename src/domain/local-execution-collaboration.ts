@@ -8,7 +8,7 @@ import type {
   LocalTaskCheckpoint,
   LocalWorkerRegistration,
 } from "./local-execution.js";
-import { resolveEligibleLocalWorkers, toAdmittedWorker } from "./local-execution.js";
+import { resolveEligibleLocalWorkers, toAdmittedWorker, transitionLocalTaskLease } from "./local-execution.js";
 import type { ExternalEffectAttemptState } from "./external-effect-envelope.js";
 
 export class InvalidCollaborationTransitionError extends Error {
@@ -84,22 +84,30 @@ export interface CollaborationTransitionPreflight {
   readonly to: CollaborationMode;
   readonly direction: "WIDENING" | "NARROWING" | "UNCHANGED";
   readonly newlyVisibleToRefs: ReadonlyArray<string>;
+  readonly visibleResourceRefs: ReadonlyArray<string>;
   readonly disclosure: string;
 }
 
 /**
- * `newlyVisibleToRefs` is the set of worker/device refs that will gain
- * access on a widening transition - required (may be empty, never
- * omitted) so a caller cannot silently widen visibility without stating
- * who gains it. A narrowing transition ignores this list entirely (it
- * describes future grants, not the past exposure narrowing can never
- * undo) and always carries the honest "cannot un-download" disclosure
- * §14 requires verbatim.
+ * Rev108 correction (F2 - widening preflight must carry a real
+ * visibility/resource set): a widening transition previously accepted an
+ * empty `newlyVisibleToRefs` and named no resource/artifact set at all,
+ * so the preflight did not actually prove what becomes visible to whom -
+ * it could be silently vacuous. `newlyVisibleToRefs` (who gains access)
+ * and `visibleResourceRefs` (what becomes visible - files/artifacts/
+ * repo refs, opaque to this module) are now both required to be
+ * non-empty whenever the transition genuinely widens; a caller cannot
+ * claim to widen collaboration without naming at least one real
+ * recipient and at least one real resource. A narrowing transition
+ * ignores both lists entirely (they describe future grants, not the
+ * past exposure narrowing can never undo) and always carries the honest
+ * "cannot un-download" disclosure §14 requires verbatim.
  */
 export function planCollaborationModeTransition(input: {
   from: CollaborationMode;
   to: CollaborationMode;
   newlyVisibleToRefs: ReadonlyArray<unknown>;
+  visibleResourceRefs: ReadonlyArray<unknown>;
 }): CollaborationTransitionPreflight {
   const fromRank = COLLABORATION_RANK[input.from];
   const toRank = COLLABORATION_RANK[input.to];
@@ -111,18 +119,37 @@ export function planCollaborationModeTransition(input: {
     input.newlyVisibleToRefs.some((ref) => typeof ref !== "string" || ref.trim().length === 0)
   ) {
     throw new InvalidCollaborationTransitionError(
-      "newlyVisibleToRefs must be an array of non-empty strings (an empty array is valid)",
+      "newlyVisibleToRefs must be an array of non-empty strings (an empty array is valid unless the transition widens)",
+    );
+  }
+  if (
+    !Array.isArray(input.visibleResourceRefs) ||
+    input.visibleResourceRefs.some((ref) => typeof ref !== "string" || ref.trim().length === 0)
+  ) {
+    throw new InvalidCollaborationTransitionError(
+      "visibleResourceRefs must be an array of non-empty strings (an empty array is valid unless the transition widens)",
     );
   }
   if (toRank > fromRank) {
+    if (input.newlyVisibleToRefs.length === 0) {
+      throw new InvalidCollaborationTransitionError(
+        "a widening transition must name at least one recipient in newlyVisibleToRefs - visibility cannot widen to no one",
+      );
+    }
+    if (input.visibleResourceRefs.length === 0) {
+      throw new InvalidCollaborationTransitionError(
+        "a widening transition must name at least one resource in visibleResourceRefs - visibility cannot widen to nothing",
+      );
+    }
+    const newlyVisibleToRefs = input.newlyVisibleToRefs as ReadonlyArray<string>;
+    const visibleResourceRefs = input.visibleResourceRefs as ReadonlyArray<string>;
     return {
       from: input.from,
       to: input.to,
       direction: "WIDENING",
-      newlyVisibleToRefs: input.newlyVisibleToRefs as ReadonlyArray<string>,
-      disclosure: `Moving from ${input.from} to ${input.to} makes this project's workspace visible to: ${
-        input.newlyVisibleToRefs.length > 0 ? (input.newlyVisibleToRefs as string[]).join(", ") : "(no additional workers named)"
-      }.`,
+      newlyVisibleToRefs,
+      visibleResourceRefs,
+      disclosure: `Moving from ${input.from} to ${input.to} makes the following resources visible to ${newlyVisibleToRefs.join(", ")}: ${visibleResourceRefs.join(", ")}.`,
     };
   }
   if (toRank < fromRank) {
@@ -131,6 +158,7 @@ export function planCollaborationModeTransition(input: {
       to: input.to,
       direction: "NARROWING",
       newlyVisibleToRefs: [],
+      visibleResourceRefs: [],
       disclosure:
         `Moving from ${input.from} to ${input.to} stops future access, but cannot make any worker/device that already ` +
         `legitimately downloaded this project's data forget it - narrowing is not retroactive.`,
@@ -141,6 +169,7 @@ export function planCollaborationModeTransition(input: {
     to: input.to,
     direction: "UNCHANGED",
     newlyVisibleToRefs: [],
+    visibleResourceRefs: [],
     disclosure: `${input.from} to ${input.to} is not a mode change.`,
   };
 }
@@ -230,12 +259,49 @@ export interface SharedRepoBranchClaim {
   readonly leaseId: LocalTaskLease["leaseId"];
 }
 
+function isBoundToTargetOwnership(worker: LocalWorkerRegistration, targetOwnership: ProjectOwnershipRef): boolean {
+  return worker.boundProjectOwnerships.some(
+    (bound) =>
+      bound.tenantId === targetOwnership.tenantId &&
+      bound.customerId === targetOwnership.customerId &&
+      bound.projectId === targetOwnership.projectId &&
+      bound.serviceRef === targetOwnership.serviceRef,
+  );
+}
+
+/**
+ * Rev108 correction (F2 - shared-repo access must be separately
+ * authorized, not just mutually exclusive): this function previously
+ * proved only mutual exclusion (one lease per branch), never that the
+ * claiming worker/device was actually authorized for this project's
+ * shared repository at all, falling short of §14's "explicit repository
+ * access is separately authorized for each user/device." A fresh
+ * repo-wide search found no dedicated repository-access-grant primitive,
+ * but L0's own `LocalWorkerRegistration.boundProjectOwnerships` is
+ * already the semantically compatible existing primitive - it is the
+ * same field `resolveEligibleLocalWorkers` already consults to gate
+ * `ORG_POOL` worker access to a project - so this function now requires
+ * the claiming `worker` to already be bound to `targetOwnership` before
+ * granting a branch claim, reusing that existing authorization fact
+ * rather than inventing a second IAM or treating the bare branch/lease
+ * strings as authority.
+ */
 export function claimSharedRepoBranch(input: {
   branchRef: unknown;
   lease: LocalTaskLease;
+  worker: LocalWorkerRegistration;
+  targetOwnership: ProjectOwnershipRef;
   existingClaims: ReadonlyArray<SharedRepoBranchClaim>;
 }): ReadonlyArray<SharedRepoBranchClaim> {
   const branchRef = requireNonEmptyString(input.branchRef, "branchRef");
+  if (input.worker.workerId !== input.lease.workerId) {
+    throw new InvalidSharedRepoLeaseError("worker.workerId does not match lease.workerId");
+  }
+  if (!isBoundToTargetOwnership(input.worker, input.targetOwnership)) {
+    throw new InvalidSharedRepoLeaseError(
+      "worker is not bound to targetOwnership - shared-repo access must be separately authorized per worker/device, never assumed from a bare branch/lease claim",
+    );
+  }
   const conflicting = input.existingClaims.find(
     (claim) => claim.branchRef === branchRef && claim.leaseId !== input.lease.leaseId,
   );
@@ -374,26 +440,55 @@ export interface LocalFailoverResult {
   readonly incomingWorker: AdmittedWorker;
   readonly reason: LocalFailoverReason;
   readonly checkpointRef: LocalTaskCheckpoint["checkpointRef"];
+  readonly endedLease: LocalTaskLease;
   readonly evidenceRef: string;
 }
 
 /**
  * §15's exact failover sequence, composed entirely from existing,
- * unmodified primitives: (1) the caller must already hold a durable
- * `LocalTaskCheckpoint` for the outgoing lease - this function never
- * fabricates one; (2) `resolveEligibleLocalWorkers` (L0, unmodified)
- * re-derives the SAME eligible candidate set the original routing
- * decision used, so a fallback can never be admitted under relaxed
- * requirements; (3) `resolveWorkerRoute` (V5-WRK-001, unmodified) picks
- * among them; (4) §22 case I - an `UNKNOWN` external-effect state fails
- * closed here before any candidate is even resolved, since retrying
- * (via a different worker) an effect whose real-world outcome is
- * unverified is exactly the "blind retry" the recovery/readback envelope
- * exists to prevent.
+ * unmodified primitives.
+ *
+ * Rev108 correction (F1 - failover checkpoint/lease lineage): this
+ * function previously accepted a bare `LocalTaskCheckpoint` with no
+ * authoritative `LocalTaskLease` to bind it to, so it could not prove
+ * the checkpoint actually belonged to the outgoing worker/device/tenant/
+ * task, nor that the current lease was deterministically ended before a
+ * replacement was selected - falling short of §15's own sequence
+ * ("current-worker durable checkpoint -> current lease ended/expired
+ * deterministically -> worker degraded/offline -> unchanged-requirement
+ * routing"). This is now a required `currentLease: LocalTaskLease`
+ * parameter, fail-closed-verified on every dimension before any
+ * candidate is resolved: (1) `checkpoint.leaseId` must equal
+ * `currentLease.leaseId` (the checkpoint belongs to this exact lease,
+ * not a foreign one); (2) `currentLease.workerId`/`deviceId` must equal
+ * the outgoing worker's own (no cross-worker/device substitution); (3)
+ * `currentLease.tenantId` must equal `requestingTenantId` (no
+ * cross-tenant substitution); (4) `currentLease.taskRef` must equal the
+ * caller-declared `expectedTaskRef` (no cross-task substitution); (5)
+ * `currentLease.status` must be `CHECKPOINTED` - the one status L0's own
+ * closed transition graph produces immediately after a checkpoint is
+ * taken, proving the checkpoint step actually just happened rather than
+ * being an unrelated historical record. Only then does this function
+ * itself represent the deterministic lease-end via the existing,
+ * unmodified `transitionLocalTaskLease` (`CHECKPOINTED` -> `CANCELLED`,
+ * an already-legal transition in L0's own graph - no new lease/workflow
+ * engine, no new status value), returning the ended lease as part of the
+ * result so callers hold real proof of the handoff, not just an
+ * assumption. Only after this real lease-end does the function proceed
+ * to: `resolveEligibleLocalWorkers` (L0, unmodified) re-deriving the SAME
+ * eligible candidate set the original routing decision used, so a
+ * fallback can never be admitted under relaxed requirements;
+ * `resolveWorkerRoute` (V5-WRK-001, unmodified) picking among them; §22
+ * case I - an `UNKNOWN` external-effect state still fails closed before
+ * any of this is even attempted, since retrying (via a different worker)
+ * an effect whose real-world outcome is unverified is exactly the "blind
+ * retry" the recovery/readback envelope exists to prevent.
  */
 export function resolveLocalExecutionFailover(input: {
   outgoingWorker: LocalWorkerRegistration;
   checkpoint: LocalTaskCheckpoint;
+  currentLease: LocalTaskLease;
+  expectedTaskRef: unknown;
   reason: LocalFailoverReason;
   externalEffectState?: ExternalEffectAttemptState;
   executionPolicy: Parameters<typeof resolveEligibleLocalWorkers>[0]["executionPolicy"];
@@ -413,6 +508,30 @@ export function resolveLocalExecutionFailover(input: {
       "cannot fail over while the external-effect state is UNKNOWN - verify/recover via the readback envelope first",
     );
   }
+  if (input.checkpoint.leaseId !== input.currentLease.leaseId) {
+    throw new InvalidLocalFailoverError(
+      "checkpoint.leaseId does not match currentLease.leaseId - a foreign checkpoint cannot authorize failover",
+    );
+  }
+  if (input.currentLease.workerId !== input.outgoingWorker.workerId) {
+    throw new InvalidLocalFailoverError("currentLease.workerId does not match the outgoing worker's own workerId");
+  }
+  if (input.currentLease.deviceId !== input.outgoingWorker.deviceId) {
+    throw new InvalidLocalFailoverError("currentLease.deviceId does not match the outgoing worker's own deviceId");
+  }
+  if (input.currentLease.tenantId !== input.requestingTenantId) {
+    throw new InvalidLocalFailoverError("currentLease.tenantId does not match the requesting tenant");
+  }
+  const expectedTaskRef = requireNonEmptyString(input.expectedTaskRef, "expectedTaskRef");
+  if (input.currentLease.taskRef !== expectedTaskRef) {
+    throw new InvalidLocalFailoverError("currentLease.taskRef does not match expectedTaskRef");
+  }
+  if (input.currentLease.status !== "CHECKPOINTED") {
+    throw new InvalidLocalFailoverError(
+      `currentLease must be CHECKPOINTED to prove the checkpoint step just completed (current status: ${input.currentLease.status})`,
+    );
+  }
+  const endedLease = transitionLocalTaskLease({ lease: input.currentLease, to: "CANCELLED" });
   const eligible = resolveEligibleLocalWorkers({
     executionPolicy: input.executionPolicy,
     registrations: input.registrations,
@@ -448,6 +567,7 @@ export function resolveLocalExecutionFailover(input: {
     incomingWorker,
     reason: input.reason,
     checkpointRef: input.checkpoint.checkpointRef,
+    endedLease,
     evidenceRef: requireNonEmptyString(input.evidenceRef, "evidenceRef"),
   };
 }

@@ -34,6 +34,32 @@ test("LOCAL-EXEC-005: resolveLocalExecutionFailover checks the external-effect U
   assert.ok(unknownGateIndex < eligibleCallIndex, "the UNKNOWN external-effect gate must be checked before resolving candidates");
 });
 
+test("LOCAL-EXEC-005 (Rev108 correction): resolveLocalExecutionFailover verifies checkpoint/lease/worker/device/tenant/task lineage and represents the deterministic lease-end via transitionLocalTaskLease before resolving any candidate", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  const fnStart = content.indexOf("export function resolveLocalExecutionFailover");
+  assert.ok(fnStart >= 0, "resolveLocalExecutionFailover not found");
+  const fnBody = content.slice(fnStart);
+  const leaseIdCheckIndex = fnBody.indexOf("checkpoint.leaseId !== input.currentLease.leaseId");
+  const statusCheckIndex = fnBody.indexOf('currentLease.status !== "CHECKPOINTED"');
+  const transitionIndex = fnBody.indexOf("transitionLocalTaskLease(");
+  const eligibleCallIndex = fnBody.indexOf("resolveEligibleLocalWorkers(");
+  assert.ok(
+    leaseIdCheckIndex >= 0 && statusCheckIndex >= 0 && transitionIndex >= 0 && eligibleCallIndex >= 0,
+    "expected lineage checks, the lease-end transition, and the eligibility call all present",
+  );
+  assert.ok(leaseIdCheckIndex < statusCheckIndex, "leaseId lineage must be checked before the status check");
+  assert.ok(statusCheckIndex < transitionIndex, "status must be checked before the deterministic lease-end transition");
+  assert.ok(transitionIndex < eligibleCallIndex, "the lease must be ended before any candidate is resolved");
+});
+
+test("LOCAL-EXEC-005 (Rev108 correction): claimSharedRepoBranch verifies the worker is bound to targetOwnership before any branch claim is granted", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  const fnStart = content.indexOf("export function claimSharedRepoBranch");
+  assert.ok(fnStart >= 0, "claimSharedRepoBranch not found");
+  const fnBody = content.slice(fnStart);
+  assert.match(fnBody, /isBoundToTargetOwnership\(/);
+});
+
 test("LOCAL-EXEC-005: never calls fetch, a node: builtin, or the system clock - pure domain composition only", () => {
   const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
   assert.doesNotMatch(content, /\bfetch\s*\(/);
