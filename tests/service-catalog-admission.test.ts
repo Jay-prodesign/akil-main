@@ -14,6 +14,7 @@ import {
   InvalidServiceCatalogAdmissionError,
   InvalidServiceCatalogAdmissionTransitionError,
 } from "../src/domain/service-catalog-admission.js";
+import type { AdmittedWorker } from "../src/domain/worker-routing-policy.js";
 import { WEBSITE_BUILD_V1_BLUEPRINT } from "../src/fixtures/website-build-v1.js";
 import { WEBSITE_BUILD_V1_RECIPE } from "../src/fixtures/website-build-v1-recipe.js";
 
@@ -27,11 +28,27 @@ const catalogEntry: ServiceCatalogEntry = {
   recipeId: WEBSITE_BUILD_V1_RECIPE.recipeId,
 };
 
+function elevatedWorker(overrides: Partial<AdmittedWorker> = {}): AdmittedWorker {
+  return {
+    workerId: "authority-1",
+    declaredCapabilityRefs: [],
+    declaredToolRefs: [],
+    declaredPolicyConstraintRefs: [],
+    trustStatus: "ADMITTED",
+    availability: "AVAILABLE",
+    maxRiskLevel: "STANDARD",
+    authorityLevel: "ELEVATED",
+    costWeight: 0,
+    evaluationEvidenceRef: "evidence:worker-eval-1",
+    ...overrides,
+  };
+}
+
 function admit() {
   return admitServiceCatalogEntry({
     catalogEntry,
     recipe: WEBSITE_BUILD_V1_RECIPE,
-    admittedByAuthorityId: "authority-1",
+    authorizingWorker: elevatedWorker(),
     evidenceRef: "evidence:catalog-review-1",
     admittedAt: "2026-01-01T00:00:00.000Z",
   });
@@ -60,7 +77,7 @@ test("SA2 (adversarial): admitServiceCatalogEntry rejects a catalogEntry.recipeI
       admitServiceCatalogEntry({
         catalogEntry: mismatched,
         recipe: WEBSITE_BUILD_V1_RECIPE,
-        admittedByAuthorityId: "authority-1",
+        authorizingWorker: elevatedWorker(),
         evidenceRef: "evidence:x",
         admittedAt: "2026-01-01T00:00:00.000Z",
       }),
@@ -68,13 +85,29 @@ test("SA2 (adversarial): admitServiceCatalogEntry rejects a catalogEntry.recipeI
   );
 });
 
-test("SA3: admitServiceCatalogEntry rejects an empty admittedByAuthorityId", () => {
+test("SA3 (Rev102 F2, adversarial): admitServiceCatalogEntry rejects an authorizingWorker that is not trustStatus ADMITTED - an untrusted/revoked caller label cannot become trusted authority", () => {
+  for (const trustStatus of ["UNTRUSTED", "REVOKED"] as const) {
+    assert.throws(
+      () =>
+        admitServiceCatalogEntry({
+          catalogEntry,
+          recipe: WEBSITE_BUILD_V1_RECIPE,
+          authorizingWorker: elevatedWorker({ trustStatus }),
+          evidenceRef: "evidence:x",
+          admittedAt: "2026-01-01T00:00:00.000Z",
+        }),
+      InvalidServiceCatalogAdmissionError,
+    );
+  }
+});
+
+test("SA3b (Rev102 F2, adversarial): admitServiceCatalogEntry rejects an authorizingWorker that is admitted but not authorityLevel ELEVATED", () => {
   assert.throws(
     () =>
       admitServiceCatalogEntry({
         catalogEntry,
         recipe: WEBSITE_BUILD_V1_RECIPE,
-        admittedByAuthorityId: "  ",
+        authorizingWorker: elevatedWorker({ authorityLevel: "STANDARD" }),
         evidenceRef: "evidence:x",
         admittedAt: "2026-01-01T00:00:00.000Z",
       }),
@@ -88,7 +121,7 @@ test("SA4: admitServiceCatalogEntry rejects an empty evidenceRef", () => {
       admitServiceCatalogEntry({
         catalogEntry,
         recipe: WEBSITE_BUILD_V1_RECIPE,
-        admittedByAuthorityId: "authority-1",
+        authorizingWorker: elevatedWorker(),
         evidenceRef: "",
         admittedAt: "2026-01-01T00:00:00.000Z",
       }),
@@ -102,9 +135,23 @@ test("SA5: admitServiceCatalogEntry rejects an empty admittedAt", () => {
       admitServiceCatalogEntry({
         catalogEntry,
         recipe: WEBSITE_BUILD_V1_RECIPE,
-        admittedByAuthorityId: "authority-1",
+        authorizingWorker: elevatedWorker(),
         evidenceRef: "evidence:x",
         admittedAt: "",
+      }),
+    InvalidServiceCatalogAdmissionError,
+  );
+});
+
+test("SA5b (Rev102 F1, adversarial): admitServiceCatalogEntry rejects a malformed (non-parseable) admittedAt", () => {
+  assert.throws(
+    () =>
+      admitServiceCatalogEntry({
+        catalogEntry,
+        recipe: WEBSITE_BUILD_V1_RECIPE,
+        authorizingWorker: elevatedWorker(),
+        evidenceRef: "evidence:x",
+        admittedAt: "not-a-real-timestamp",
       }),
     InvalidServiceCatalogAdmissionError,
   );
@@ -159,6 +206,52 @@ test("SA9: revokeServiceCatalogAdmission accepts a revokedAt exactly equal to ad
     reason: "immediate revoke",
   });
   assert.equal(revoked.status, "REVOKED");
+});
+
+test("SA9b (Rev102 F1, adversarial): revokeServiceCatalogAdmission rejects a malformed (non-parseable) revokedAt", () => {
+  assert.throws(
+    () =>
+      revokeServiceCatalogAdmission({
+        admission: admit(),
+        revokedAt: "not-a-real-timestamp",
+        reason: "malformed",
+      }),
+    InvalidServiceCatalogAdmissionError,
+  );
+});
+
+test("SA9c (Rev102 F1, adversarial timezone-offset ordering): revokeServiceCatalogAdmission compares chronological instants, not raw strings - a revokedAt with a timezone offset that is the SAME instant as admittedAt is accepted as immediate revocation, not rejected as 'before'", () => {
+  // admittedAt is 2026-01-01T00:00:00.000Z; this revokedAt is the identical
+  // instant expressed with a +01:00 offset, which sorts LOWER than the
+  // admittedAt string lexicographically (the digit '0' in "+01:00" vs the
+  // 'Z' the old string comparison would have compared against), so the old
+  // buggy `revokedAt < admittedAt` string comparison would have wrongly
+  // rejected this as "before" even though it is the exact same instant.
+  const revoked = revokeServiceCatalogAdmission({
+    admission: admit(),
+    revokedAt: "2026-01-01T01:00:00.000+01:00",
+    reason: "same instant, different offset",
+  });
+  assert.equal(revoked.status, "REVOKED");
+});
+
+test("SA9d (Rev102 F1, adversarial timezone-offset ordering): a revokedAt that is genuinely 30 minutes before admittedAt in real chronological time is still rejected, even though its raw string sorts AFTER admittedAt lexicographically", () => {
+  // admittedAt is 2026-01-01T00:00:00.000Z (ms 1767225600000). This
+  // revokedAt string, "2026-01-01T00:30:00.000+01:00", lexicographically
+  // sorts AFTER admittedAt (its local-time digits read later), but its
+  // +01:00 offset resolves to the real UTC instant 1767223800000 - 30
+  // minutes BEFORE admittedAt. The old buggy `revokedAt < admittedAt`
+  // string comparison evaluates false here (would have wrongly accepted
+  // this as not-before); only chronological (ms) comparison catches it.
+  assert.throws(
+    () =>
+      revokeServiceCatalogAdmission({
+        admission: admit(),
+        revokedAt: "2026-01-01T00:30:00.000+01:00",
+        reason: "actually before, despite sorting later as a string",
+      }),
+    InvalidServiceCatalogAdmissionTransitionError,
+  );
 });
 
 // --- resolveTrustedServiceForOrder ---
@@ -248,7 +341,7 @@ test("SA15 (adversarial ambiguity): resolveTrustedServiceForOrder throws, never 
   const admissionB = admitServiceCatalogEntry({
     catalogEntry,
     recipe: WEBSITE_BUILD_V1_RECIPE,
-    admittedByAuthorityId: "authority-2",
+    authorizingWorker: elevatedWorker({ workerId: "authority-2" }),
     evidenceRef: "evidence:catalog-review-2",
     admittedAt: "2026-01-02T00:00:00.000Z",
   });
@@ -270,7 +363,7 @@ test("SA16: resolveTrustedServiceForOrder never substitutes a different serviceR
   const otherAdmission = admitServiceCatalogEntry({
     catalogEntry: otherEntry,
     recipe: WEBSITE_BUILD_V1_RECIPE,
-    admittedByAuthorityId: "authority-1",
+    authorizingWorker: elevatedWorker(),
     evidenceRef: "evidence:x",
     admittedAt: "2026-01-01T00:00:00.000Z",
   });

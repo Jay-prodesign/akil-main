@@ -1,6 +1,7 @@
 import type { CommercialOrder, ServiceCatalogEntry, DeclaredServiceLookupResult } from "./commercial-order.js";
 import type { OfferBlueprintVersion } from "./offer-blueprint.js";
 import type { DeliveryRecipe } from "./delivery-recipe.js";
+import type { AdmittedWorker } from "./worker-routing-policy.js";
 
 export class InvalidServiceCatalogAdmissionError extends Error {
   constructor(reason: string) {
@@ -56,18 +57,46 @@ function requireNonEmptyString(value: unknown, field: string): string {
 }
 
 /**
- * The only construction path for a `ServiceCatalogAdmission` - there is no
- * separate "promote" step, matching `capability-admission.ts`'s single
- * fail-closed gate discipline. Fails closed unless `catalogEntry.recipeId`
- * exactly matches the supplied, separately-validated `recipe.recipeId`: an
- * admission can never bind a catalog entry to a recipe it does not actually
- * declare, which would silently re-open the exact provenance gap this
- * module exists to close.
+ * Rev102 F1 correction: `admittedAt`/`revokedAt` were previously validated
+ * only as non-empty strings, and revocation ordering was checked with
+ * lexicographic string comparison - a malformed timestamp, or two
+ * equivalent instants expressed with different timezone offsets, could
+ * therefore be accepted or misordered. Mirrors `partner-capability-
+ * admission.ts`'s own Rev62 fix exactly: both fields must parse as a real
+ * instant, and every ordering comparison below uses the parsed `ms` value,
+ * never the raw string.
+ */
+function requireValidTimestamp(value: unknown, field: string): { raw: string; ms: number } {
+  const raw = requireNonEmptyString(value, field);
+  const ms = Date.parse(raw);
+  if (Number.isNaN(ms)) {
+    throw new InvalidServiceCatalogAdmissionError(`${field} must be a valid ISO timestamp`);
+  }
+  return { raw, ms };
+}
+
+/**
+ * Rev102 F2 correction: this function previously accepted a bare, caller-
+ * supplied `admittedByAuthorityId` string with no admission/authority
+ * binding at all - it recorded a provenance *label*, never an actual
+ * admitted-authority decision, even though Family 1 explicitly requires a
+ * trusted/admitted service-catalog provenance/authority boundary. Rather
+ * than invent a second IAM/global-authority model (`ServiceCatalogEntry`
+ * itself has no tenant scope, so `authority.ts`'s tenant-bound
+ * `AuthorityContext` would misrepresent this as a tenant-scoped action),
+ * this reuses `worker-routing-policy.ts`'s existing, already-established,
+ * non-tenant-scoped admitted-identity/authority-level primitive
+ * (`AdmittedWorker`) exactly as `resolveWorkerRoute` itself already gates
+ * protected/high-trust-scope routes on `authorityLevel: "ELEVATED"`. An
+ * `authorizingWorker` that is not `trustStatus: "ADMITTED"` or not
+ * `authorityLevel: "ELEVATED"` can never admit a catalog entry - an
+ * unproven/untrusted/standard-authority caller label can no longer
+ * silently become trusted catalog authority.
  */
 export function admitServiceCatalogEntry(input: {
   catalogEntry: ServiceCatalogEntry;
   recipe: DeliveryRecipe;
-  admittedByAuthorityId: unknown;
+  authorizingWorker: AdmittedWorker;
   evidenceRef: unknown;
   admittedAt: unknown;
 }): ServiceCatalogAdmission {
@@ -76,21 +105,27 @@ export function admitServiceCatalogEntry(input: {
       `catalogEntry.recipeId "${input.catalogEntry.recipeId}" does not match recipe.recipeId "${input.recipe.recipeId}"`,
     );
   }
-  const admittedByAuthorityId = requireNonEmptyString(
-    input.admittedByAuthorityId,
-    "admittedByAuthorityId",
-  );
+  if (input.authorizingWorker.trustStatus !== "ADMITTED") {
+    throw new InvalidServiceCatalogAdmissionError(
+      `authorizingWorker must have trustStatus "ADMITTED" (got "${input.authorizingWorker.trustStatus}") - an unproven/untrusted caller cannot admit a service catalog entry`,
+    );
+  }
+  if (input.authorizingWorker.authorityLevel !== "ELEVATED") {
+    throw new InvalidServiceCatalogAdmissionError(
+      `authorizingWorker must have authorityLevel "ELEVATED" (got "${input.authorizingWorker.authorityLevel}") - only elevated-authority workers may admit a trusted service catalog entry`,
+    );
+  }
   const evidenceRef = requireNonEmptyString(input.evidenceRef, "evidenceRef");
-  const admittedAt = requireNonEmptyString(input.admittedAt, "admittedAt");
+  const admittedAt = requireValidTimestamp(input.admittedAt, "admittedAt");
   return {
     serviceRef: input.catalogEntry.serviceRef,
     blueprintId: input.catalogEntry.blueprintId,
     blueprintVersion: input.catalogEntry.blueprintVersion,
     recipeId: input.catalogEntry.recipeId,
     status: "ADMITTED",
-    admittedByAuthorityId,
+    admittedByAuthorityId: input.authorizingWorker.workerId,
     evidenceRef,
-    admittedAt,
+    admittedAt: admittedAt.raw,
   };
 }
 
@@ -110,9 +145,10 @@ export function revokeServiceCatalogAdmission(input: {
       "admission is already REVOKED",
     );
   }
-  const revokedAt = requireNonEmptyString(input.revokedAt, "revokedAt");
+  const revokedAt = requireValidTimestamp(input.revokedAt, "revokedAt");
+  const admittedAt = requireValidTimestamp(input.admission.admittedAt, "admission.admittedAt");
   const reason = requireNonEmptyString(input.reason, "reason");
-  if (revokedAt < input.admission.admittedAt) {
+  if (revokedAt.ms < admittedAt.ms) {
     throw new InvalidServiceCatalogAdmissionTransitionError(
       "revokedAt must not be before admittedAt",
     );
@@ -120,7 +156,7 @@ export function revokeServiceCatalogAdmission(input: {
   return {
     ...input.admission,
     status: "REVOKED",
-    revokedAt,
+    revokedAt: revokedAt.raw,
     revokedReason: reason,
   };
 }
