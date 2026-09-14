@@ -63,6 +63,22 @@ type ClosureApprovalId = string & { readonly __brand: "ClosureApprovalId" };
  * to retroactively close the bare-transition path, since doing so would
  * be a material behavior change to an already Brain-verified primitive,
  * outside this checkpoint's delegated envelope.
+ *
+ * Rev111 correction: `approverRef`/`approvedAt` are a caller-supplied
+ * reference/label only, never independently verified against a real
+ * customer-approval or admission system - no such primitive exists
+ * anywhere in this repository, and inventing one here would be an
+ * unreviewed, cross-domain second IAM concept, which this checkpoint's
+ * delegated envelope does not permit. This module's own
+ * `isClosureApprovalValidForJob` therefore proves scope-binding only
+ * (this reference is for this exact tenant/customer/project/job), never
+ * that a real, admitted approval decision was made. The application
+ * boundary (`authorizedCloseOutcomeJobWithApproval` in
+ * `src/application/authorized-outcome-job-operations.ts`) additionally
+ * requires real protected-action authorization before this function is
+ * ever reached, so a bare fabricated `approverRef` is never, by itself,
+ * sufficient to close a job. Real customer-approval-identity admission
+ * remains explicitly open, not fabricated.
  */
 export interface ClosureApprovalReference {
   readonly closureApprovalId: ClosureApprovalId;
