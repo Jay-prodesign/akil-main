@@ -16,7 +16,13 @@ import {
 import {
   authorizedTransitionOutcomeJob,
   authorizedVerifyOutcomeJob,
+  authorizedCloseOutcomeJobWithApproval,
+  ClosureRequiresApprovalGateError,
 } from "../src/application/authorized-outcome-job-operations.js";
+import {
+  createClosureApprovalReference,
+  OutcomeJobClosureNotApprovedError,
+} from "../src/domain/outcome-job-closure-approval.js";
 import type { TenantScope } from "../src/domain/tenant-scope.js";
 
 const tenantScope = createTenantScope("tenant-a");
@@ -188,6 +194,73 @@ test("T2 / EI-4: full-permission authority for a different tenant cannot verify 
         job,
         passingVerificationResultFor(job),
       ),
+    CrossTenantAuthorityError,
+  );
+});
+
+function verifiedJob(): OutcomeJob {
+  const job = jobAtVerifying();
+  return authorizedVerifyOutcomeJob(fullProtectedAuthority(), job, passingVerificationResultFor(job));
+}
+
+function validApprovalFor(job: OutcomeJob) {
+  return createClosureApprovalReference({
+    job,
+    closureApprovalId: "closure-approval-1",
+    approvedAt: "2026-09-12T00:00:00.000Z",
+    approverRef: "approver-1",
+  });
+}
+
+test("Rev111 F1: authorizedTransitionOutcomeJob rejects CLOSED even with full WRITE authority - closure must use the approval gate", () => {
+  const job = verifiedJob();
+  assert.throws(
+    () => authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "CLOSED"),
+    ClosureRequiresApprovalGateError,
+  );
+  assert.equal(job.state, "VERIFIED");
+});
+
+test("Rev111 F1 adversarial: authorizedTransitionOutcomeJob rejects CLOSED even with full protected authority (EXECUTE + canPerformProtectedActions) - only the dedicated closure path may close a job", () => {
+  const job = verifiedJob();
+  assert.throws(
+    () => authorizedTransitionOutcomeJob(fullProtectedAuthority(), job, "CLOSED"),
+    ClosureRequiresApprovalGateError,
+  );
+});
+
+test("Rev111: EXECUTE without protected-action authorization cannot close a job even with a valid approval", () => {
+  const job = verifiedJob();
+  assert.throws(
+    () =>
+      authorizedCloseOutcomeJobWithApproval(
+        executeWithoutProtectedAuthority(),
+        job,
+        validApprovalFor(job),
+      ),
+    ProtectedActionNotAuthorizedError,
+  );
+});
+
+test("Rev111 F2 adversarial: full protected authority alone cannot close a job without a valid ClosureApprovalReference - protected-action authority does not substitute for approval", () => {
+  const job = verifiedJob();
+  assert.throws(
+    () => authorizedCloseOutcomeJobWithApproval(fullProtectedAuthority(), job, undefined),
+    OutcomeJobClosureNotApprovedError,
+  );
+});
+
+test("Rev111: full protected authority with a valid, exactly-matching approval closes the job", () => {
+  const job = verifiedJob();
+  const closed = authorizedCloseOutcomeJobWithApproval(fullProtectedAuthority(), job, validApprovalFor(job));
+  assert.equal(closed.state, "CLOSED");
+});
+
+test("Rev111 / T2 adversarial: full protected authority for a different tenant cannot close this job even with an approval built from this job's own real fields", () => {
+  const job = verifiedJob();
+  const crossTenantAuthority = fullProtectedAuthority(otherTenantScope);
+  assert.throws(
+    () => authorizedCloseOutcomeJobWithApproval(crossTenantAuthority, job, validApprovalFor(job)),
     CrossTenantAuthorityError,
   );
 });
