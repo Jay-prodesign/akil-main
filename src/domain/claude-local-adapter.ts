@@ -37,15 +37,42 @@ function requireNonEmptyString(value: unknown, field: string): string {
  */
 
 /**
- * ADR-0003: today's policy check is POLICY_SAFE for local, single-
- * machine, officially-authenticated CLI automation - but the packet's
- * own §21 requires this be represented as a structural, re-checkable
- * admission gate, not just this ADR's prose. `checkedAt` is caller-
- * supplied (this module never reads the system clock), so a caller must
- * re-check and re-supply a fresh disposition rather than relying on a
- * stale cached value forever.
+ * Rev110 correction: this type previously admitted only two values, and
+ * ADR-0003 concluded an unconditional `POLICY_SAFE` for AKILTA's
+ * intended local orchestration use. Independently re-verified directly
+ * against the official Claude Code Legal and Compliance documentation
+ * (`code.claude.com/docs/en/legal-and-compliance`, fetched 2026-09-12):
+ * "unless we've mutually agreed otherwise, preinstalling or running
+ * Claude Code in your products or services (e.g. in hosted sandboxes or
+ * other agent infrastructure) requires agreeing to our Commercial Terms
+ * of Service" plus conditions (unmodified binary; no reselling/
+ * intermediating usage; each end user authenticates with their own
+ * credential). That same page also carves out an end user "signing in
+ * to the unmodified Claude Code binary with their own Claude
+ * subscription." Whether AKILTA's own Local Execution feature (each
+ * staff member's device running the official, unmodified CLI under
+ * their own account) falls inside that end-user carve-out or counts as
+ * "running Claude Code in your product/service" requiring Anthropic's
+ * Commercial Terms is a business/use-case classification this ADR
+ * cannot resolve from documentation alone - it is not a fact this
+ * module may assert either way.
+ *
+ * `"POLICY_REVIEW_REQUIRED"` represents exactly that unresolved state,
+ * and is treated identically to `"POLICY_BLOCKED"` by every fail-closed
+ * check in this module (see `resolveClaudeRunReadiness`/
+ * `resolveClaudeAdapterCapabilityReadiness` below) - an unresolved
+ * commercial-terms/use-case question is never silently treated as safe.
+ * `checkedAt` remains caller-supplied (this module never reads the
+ * system clock), so a caller must re-check and re-supply a fresh
+ * disposition rather than relying on a stale cached value forever.
  */
-export type ClaudeAdapterPolicyDisposition = "POLICY_SAFE" | "POLICY_BLOCKED";
+export type ClaudeAdapterPolicyDisposition = "POLICY_SAFE" | "POLICY_REVIEW_REQUIRED" | "POLICY_BLOCKED";
+
+const RECOGNIZED_POLICY_DISPOSITIONS: ReadonlySet<string> = new Set([
+  "POLICY_SAFE",
+  "POLICY_REVIEW_REQUIRED",
+  "POLICY_BLOCKED",
+]);
 
 export interface ClaudeAdapterPolicyCheck {
   readonly disposition: ClaudeAdapterPolicyDisposition;
@@ -58,11 +85,13 @@ export function resolveClaudeAdapterPolicyCheck(input: {
   checkedAt: unknown;
   reason: unknown;
 }): ClaudeAdapterPolicyCheck {
-  if (input.disposition !== "POLICY_SAFE" && input.disposition !== "POLICY_BLOCKED") {
-    throw new InvalidClaudeAdapterError('disposition must be "POLICY_SAFE" or "POLICY_BLOCKED"');
+  if (typeof input.disposition !== "string" || !RECOGNIZED_POLICY_DISPOSITIONS.has(input.disposition)) {
+    throw new InvalidClaudeAdapterError(
+      'disposition must be one of "POLICY_SAFE", "POLICY_REVIEW_REQUIRED", "POLICY_BLOCKED"',
+    );
   }
   return {
-    disposition: input.disposition,
+    disposition: input.disposition as ClaudeAdapterPolicyDisposition,
     checkedAt: requireNonEmptyString(input.checkedAt, "checkedAt"),
     reason: requireNonEmptyString(input.reason, "reason"),
   };
@@ -120,9 +149,11 @@ export interface ClaudeRunReadiness {
 
 /**
  * ADR-0003: the policy check is consulted strictly before auth
- * readiness - a `POLICY_BLOCKED` disposition can never be bypassed by an
- * otherwise-valid authenticated session, and this ordering is itself the
- * "capability admission gate" the packet requires.
+ * readiness - only `POLICY_SAFE` can ever proceed past this gate; both
+ * `POLICY_BLOCKED` and `POLICY_REVIEW_REQUIRED` (Rev110: an unresolved
+ * commercial-terms/use-case question is never silently treated as safe)
+ * fail closed here, and this ordering is itself the "capability
+ * admission gate" the packet requires.
  */
 export function resolveClaudeRunReadiness(input: {
   policyCheck: ClaudeAdapterPolicyCheck;
@@ -130,6 +161,9 @@ export function resolveClaudeRunReadiness(input: {
 }): ClaudeRunReadiness {
   if (input.policyCheck.disposition === "POLICY_BLOCKED") {
     return { status: "NOT_READY", reason: `policy blocked: ${input.policyCheck.reason}` };
+  }
+  if (input.policyCheck.disposition === "POLICY_REVIEW_REQUIRED") {
+    return { status: "NOT_READY", reason: `policy review required: ${input.policyCheck.reason}` };
   }
   if (
     typeof input.authReadiness !== "string" ||
@@ -354,15 +388,21 @@ export function createClaudeCheckpointRecord(input: {
  * disposition into L0's own existing, unmodified `DeviceCapabilityReadiness`
  * value set - that floor's own contract already reserved `POLICY_BLOCKED`
  * for exactly this situation, so this function produces no new readiness
- * vocabulary. Checked in the same fail-closed order as
- * `resolveClaudeRunReadiness`: policy first, then auth, then usage.
+ * vocabulary. Rev110: `POLICY_REVIEW_REQUIRED` (this module's own
+ * disposition, not an L0 value) also projects onto the existing
+ * `POLICY_BLOCKED` readiness state - L0 has no separate "pending review"
+ * value, and honestly representing an unresolved commercial-terms/
+ * use-case question as anything other than currently-unavailable would
+ * overclaim readiness this checkpoint cannot prove. Checked in the same
+ * fail-closed order as `resolveClaudeRunReadiness`: policy first, then
+ * auth, then usage.
  */
 export function resolveClaudeAdapterCapabilityReadiness(input: {
   policyCheck: ClaudeAdapterPolicyCheck;
   authReadiness: unknown;
   usageLimitStatus?: ClaudeUsageLimitStatus;
 }): DeviceCapabilityReadiness {
-  if (input.policyCheck.disposition === "POLICY_BLOCKED") {
+  if (input.policyCheck.disposition !== "POLICY_SAFE") {
     return "POLICY_BLOCKED";
   }
   if (

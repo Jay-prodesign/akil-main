@@ -91,11 +91,24 @@ function blockedPolicyCheck(): ClaudeAdapterPolicyCheck {
   });
 }
 
+function reviewRequiredPolicyCheck(): ClaudeAdapterPolicyCheck {
+  return resolveClaudeAdapterPolicyCheck({
+    disposition: "POLICY_REVIEW_REQUIRED",
+    checkedAt: "2026-09-12T00:00:00.000Z",
+    reason: "ADR-0003 Rev110: unresolved commercial-terms/use-case classification",
+  });
+}
+
 // --- resolveClaudeAdapterPolicyCheck ---
 
 test("P1: resolveClaudeAdapterPolicyCheck builds a valid POLICY_SAFE check", () => {
   const check = safePolicyCheck();
   assert.equal(check.disposition, "POLICY_SAFE");
+});
+
+test("P1b (Rev110): resolveClaudeAdapterPolicyCheck builds a valid POLICY_REVIEW_REQUIRED check", () => {
+  const check = reviewRequiredPolicyCheck();
+  assert.equal(check.disposition, "POLICY_REVIEW_REQUIRED");
 });
 
 test("P2 (adversarial): resolveClaudeAdapterPolicyCheck rejects an unrecognized disposition", () => {
@@ -166,6 +179,24 @@ test("C6b (ADR-0003 adversarial): resolveClaudeRunReadiness returns the policy-b
   });
   assert.equal(readiness.status, "NOT_READY");
   assert.match(readiness.reason, /policy blocked/);
+});
+
+test("C6c (Rev110 adversarial): resolveClaudeRunReadiness is NOT_READY when the policy check is POLICY_REVIEW_REQUIRED, even with a fully authenticated session - an unresolved commercial-terms/use-case question is never silently treated as safe", () => {
+  const readiness = resolveClaudeRunReadiness({
+    policyCheck: reviewRequiredPolicyCheck(),
+    authReadiness: "READY_SUBSCRIPTION_SESSION",
+  });
+  assert.equal(readiness.status, "NOT_READY");
+  assert.match(readiness.reason, /policy review required/);
+});
+
+test("C6d (Rev110 adversarial): resolveClaudeRunReadiness returns the review-required NOT_READY result without even validating a malformed authReadiness", () => {
+  const readiness = resolveClaudeRunReadiness({
+    policyCheck: reviewRequiredPolicyCheck(),
+    authReadiness: "totally-malformed-value",
+  });
+  assert.equal(readiness.status, "NOT_READY");
+  assert.match(readiness.reason, /policy review required/);
 });
 
 // --- createClaudeRunRequest ---
@@ -395,6 +426,23 @@ test("C29 (ADR-0003): resolveClaudeAdapterCapabilityReadiness is POLICY_BLOCKED 
 test("C29b (ADR-0003 adversarial): resolveClaudeAdapterCapabilityReadiness returns POLICY_BLOCKED without validating a malformed authReadiness at all - policy short-circuits before auth shape is inspected", () => {
   const readiness = resolveClaudeAdapterCapabilityReadiness({
     policyCheck: blockedPolicyCheck(),
+    authReadiness: "totally-malformed-value",
+  });
+  assert.equal(readiness, "POLICY_BLOCKED");
+});
+
+test("C29c (Rev110): resolveClaudeAdapterCapabilityReadiness is POLICY_BLOCKED when the policy check is POLICY_REVIEW_REQUIRED, before any other dimension is even consulted", () => {
+  const readiness = resolveClaudeAdapterCapabilityReadiness({
+    policyCheck: reviewRequiredPolicyCheck(),
+    authReadiness: "READY_SUBSCRIPTION_SESSION",
+    usageLimitStatus: { windowKind: "FIVE_HOUR", remainingFraction: 0.5 },
+  });
+  assert.equal(readiness, "POLICY_BLOCKED");
+});
+
+test("C29d (Rev110 adversarial): resolveClaudeAdapterCapabilityReadiness returns POLICY_BLOCKED for POLICY_REVIEW_REQUIRED without validating a malformed authReadiness at all - policy short-circuits before auth shape is inspected", () => {
+  const readiness = resolveClaudeAdapterCapabilityReadiness({
+    policyCheck: reviewRequiredPolicyCheck(),
     authReadiness: "totally-malformed-value",
   });
   assert.equal(readiness, "POLICY_BLOCKED");
