@@ -7,9 +7,13 @@ import type {
   DeviceCapabilitySnapshot,
   DeviceCapabilityReadiness,
   LocalWorkerRegistration,
+  LocalTaskLease,
 } from "./local-execution.js";
 import { resolveEligibleLocalWorkers } from "./local-execution.js";
 import type { AdmittedWorker } from "./worker-routing-policy.js";
+import type { AuthorityContext } from "./authority.js";
+import { requireSameTenant, requireProtectedActionAuthorization } from "./authority.js";
+import type { ExternalEffectAttemptState } from "./external-effect-envelope.js";
 
 export class InvalidLocalExecutionHardeningError extends Error {
   constructor(reason: string) {
@@ -98,6 +102,9 @@ export interface LocalExecutionKillSwitch {
   readonly engaged: boolean;
   readonly engagedAt?: string;
   readonly engagedReason?: string;
+  readonly disengagedAt?: string;
+  readonly disengagedByRef?: string;
+  readonly disengagedReason?: string;
 }
 
 /** A kill switch is always born disengaged - no caller can construct an already-engaged one. */
@@ -105,6 +112,13 @@ export function createLocalExecutionKillSwitch(tenantScope: TenantScope): LocalE
   return { tenantId: tenantScope.tenantId, engaged: false };
 }
 
+/**
+ * Engaging never requires elevated authority - it can only ever tighten
+ * the gate (turn local execution OFF for the tenant), mirroring this
+ * codebase's own established asymmetric-authority precedent (Rev117/120:
+ * the direction that can only restrict never needs protected-action
+ * authority; the direction that opens something back up does).
+ */
 export function engageLocalExecutionKillSwitch(input: {
   killSwitch: LocalExecutionKillSwitch;
   engagedAt: unknown;
@@ -118,13 +132,47 @@ export function engageLocalExecutionKillSwitch(input: {
   return { tenantId: input.killSwitch.tenantId, engaged: true, engagedAt, engagedReason };
 }
 
-export function disengageLocalExecutionKillSwitch(
-  killSwitch: LocalExecutionKillSwitch,
-): LocalExecutionKillSwitch {
-  if (!killSwitch.engaged) {
+/**
+ * Brain Rev125 correction: disengagement was previously freely callable by
+ * anyone holding a reference to the switch - the exact opposite direction
+ * from engagement (it re-opens local-worker eligibility for the whole
+ * tenant), so it is the one that must require elevated authority, mirroring
+ * `admitManualExecutionAllowedFromServiceCatalogAdmission`/Rev117's own
+ * "the direction that opens the gate needs protected-action authority"
+ * precedent. Reuses the existing `AuthorityContext`/
+ * `requireProtectedActionAuthorization` primitive (`authority.ts`) rather
+ * than inventing a second IAM. `AuthorityContext` itself carries no
+ * individual-actor identity (it is a tenant/permission-scope object, not a
+ * session/identity resolver - see its own doc comment), so `disengagedByRef`
+ * is a caller-supplied, non-empty auditable release-provenance string,
+ * mirroring `ClosureApprovalReference.approverRef`'s own established,
+ * honestly-disclosed limit: authority proves the caller *may* release the
+ * switch, `disengagedByRef` records *who* they claimed to be, and a bare
+ * fabricated ref is not, by itself, proof of identity - the same limit this
+ * repository already accepted for every other approver-ref-shaped field.
+ */
+export function disengageLocalExecutionKillSwitch(input: {
+  killSwitch: LocalExecutionKillSwitch;
+  authority: AuthorityContext;
+  disengagedAt: unknown;
+  disengagedByRef: unknown;
+  reason: unknown;
+}): LocalExecutionKillSwitch {
+  if (!input.killSwitch.engaged) {
     throw new InvalidKillSwitchTransitionError("kill switch is already disengaged");
   }
-  return { tenantId: killSwitch.tenantId, engaged: false };
+  requireSameTenant(input.authority, input.killSwitch.tenantId);
+  requireProtectedActionAuthorization(input.authority, "DISENGAGE_LOCAL_EXECUTION_KILL_SWITCH");
+  const disengagedAt = requireValidTimestamp(input.disengagedAt, "disengagedAt").raw;
+  const disengagedByRef = requireNonEmptyString(input.disengagedByRef, "disengagedByRef");
+  const disengagedReason = requireNonEmptyString(input.reason, "reason");
+  return {
+    tenantId: input.killSwitch.tenantId,
+    engaged: false,
+    disengagedAt,
+    disengagedByRef,
+    disengagedReason,
+  };
 }
 
 /**
@@ -229,9 +277,48 @@ export interface ExecutionModeTransitionPlan {
   readonly disclosure: string;
 }
 
+/**
+ * `LocalTaskLease` statuses with an empty transition set in
+ * `local-execution.ts`'s own `LEASE_TRANSITIONS` map - a lease in any other
+ * status is still active work that a narrowing transition could orphan.
+ */
+const TERMINAL_LEASE_STATUSES: ReadonlySet<string> = new Set(["SUCCEEDED", "FAILED", "CANCELLED"]);
+
+/**
+ * Brain Rev125 correction: this preflight was previously pure
+ * classification - its own NARROWING disclosure admitted outright that
+ * "any task already leased to a local worker is unaffected by this
+ * preflight alone," i.e. it computed a label but enforced nothing. Required
+ * correction: either compose existing lease/checkpoint/effect/readiness
+ * facts to fail closed on unsafe transitions, or honestly narrow the claim.
+ * This composes the two real, already-tested facts that actually determine
+ * whether narrowing is unsafe: `LocalTaskLease.status` (L0, unmodified -
+ * `CHECKPOINTED` is itself one of the non-terminal statuses this already
+ * covers, so a checkpointed-but-unfinished task is caught the same way a
+ * running one is) and `ExternalEffectAttemptState` (V4-EFF-001, unmodified),
+ * mirroring `local-execution-collaboration.ts`'s own
+ * `resolveLocalExecutionFailover` precedent of refusing to act while an
+ * effect's real-world outcome is `UNKNOWN`. A NARROWING transition now
+ * fails closed if any supplied lease is still non-terminal (would be
+ * orphaned by removing local-worker eligibility) or any supplied external
+ * effect state is `UNKNOWN` (narrowing away the only worker able to verify
+ * an in-flight effect is exactly the risk `resolveLocalExecutionFailover`
+ * already refuses to take). Honest limit disclosed, not fabricated as
+ * closed: this module never fetches leases/effects itself (it has no
+ * store/transport dependency anywhere, matching this checkpoint's own
+ * "pure domain composition" boundary) - the check is only as complete as
+ * the leases/effect states the caller actually supplies. Omitting either
+ * parameter is not itself unsafe (a caller narrowing a mode with
+ * genuinely zero local activity supplies empty arrays and the check
+ * passes vacuously), but a caller that fails to enumerate real active work
+ * before calling this can still bypass the intent of the check - this is
+ * named explicitly rather than claimed away.
+ */
 export function planExecutionModeTransition(input: {
   from: unknown;
   to: unknown;
+  activeLeases?: ReadonlyArray<LocalTaskLease>;
+  externalEffectStates?: ReadonlyArray<ExternalEffectAttemptState>;
 }): ExecutionModeTransitionPlan {
   if (!isRecognizedExecutionMode(input.from) || !isRecognizedExecutionMode(input.to)) {
     throw new InvalidExecutionModeTransitionError("from/to must both be recognized ExecutionMode values");
@@ -257,13 +344,31 @@ export function planExecutionModeTransition(input: {
     };
   }
   if (toRank < fromRank) {
+    const activeLeases = input.activeLeases ?? [];
+    const orphanedLease = activeLeases.find((lease) => !TERMINAL_LEASE_STATUSES.has(lease.status));
+    if (orphanedLease !== undefined) {
+      throw new InvalidExecutionModeTransitionError(
+        `cannot narrow from ${from} to ${to} while lease "${orphanedLease.leaseId}" is still active ` +
+          `(status ${orphanedLease.status}) - narrowing would orphan work already leased to a local worker`,
+      );
+    }
+    const externalEffectStates = input.externalEffectStates ?? [];
+    if (externalEffectStates.includes("UNKNOWN")) {
+      throw new InvalidExecutionModeTransitionError(
+        `cannot narrow from ${from} to ${to} while an external effect's real-world outcome is UNKNOWN - ` +
+          `narrowing away local-worker eligibility while an in-flight effect cannot yet be verified is unsafe`,
+      );
+    }
     return {
       from,
       to,
       direction: "NARROWING",
       disclosure:
-        `Moving from ${from} to ${to} removes local workers from routing eligibility going forward; ` +
-        `any task already leased to a local worker is unaffected by this preflight alone. ${collaborationDisclosure}`,
+        `Moving from ${from} to ${to} removes local workers from routing eligibility going forward. ` +
+        `Checked against the ${activeLeases.length} lease(s) and ${externalEffectStates.length} external-effect ` +
+        `state(s) supplied to this call: none are active/unterminated and none are UNKNOWN. This module does not ` +
+        `itself fetch leases or effect states - the caller must supply every currently-relevant one for this check ` +
+        `to be meaningful. ${collaborationDisclosure}`,
     };
   }
   return {

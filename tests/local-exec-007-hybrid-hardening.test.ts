@@ -8,6 +8,8 @@ import {
   createLocalWorkerRegistration,
   createDeviceCapabilitySnapshot,
   createExecutionPolicy,
+  createLocalTaskLease,
+  transitionLocalTaskLease,
 } from "../src/domain/local-execution.js";
 import {
   createLocalExecutionKillSwitch,
@@ -21,6 +23,11 @@ import {
   InvalidExecutionModeTransitionError,
   InvalidLocalExecutionHardeningError,
 } from "../src/domain/local-execution-hardening.js";
+import {
+  createAuthorityContext,
+  ProtectedActionNotAuthorizedError,
+  CrossTenantAuthorityError,
+} from "../src/domain/authority.js";
 
 const tenantScope = createTenantScope("tenant-a");
 const otherTenantScope = createTenantScope("tenant-b");
@@ -63,6 +70,22 @@ function privateWorker(device = onlineDevice()) {
   });
 }
 
+function protectedAuthority(scope = tenantScope) {
+  return createAuthorityContext({
+    tenantScope: scope,
+    permissions: ["READ", "WRITE", "EXECUTE"],
+    canPerformProtectedActions: true,
+  });
+}
+
+function unprotectedAuthority(scope = tenantScope) {
+  return createAuthorityContext({
+    tenantScope: scope,
+    permissions: ["READ", "WRITE", "EXECUTE"],
+    canPerformProtectedActions: false,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Kill switch
 // ---------------------------------------------------------------------------
@@ -96,22 +119,95 @@ test("K3: engaging an already-engaged kill switch throws", () => {
   );
 });
 
-test("K4: disengageLocalExecutionKillSwitch clears engaged state", () => {
+test("K4: disengageLocalExecutionKillSwitch clears engaged state and records auditable release provenance, given protected authority", () => {
   const engaged = engageLocalExecutionKillSwitch({
     killSwitch: createLocalExecutionKillSwitch(tenantScope),
     engagedAt: "2026-09-15T12:00:00.000Z",
     reason: "incident",
   });
-  const disengaged = disengageLocalExecutionKillSwitch(engaged);
+  const disengaged = disengageLocalExecutionKillSwitch({
+    killSwitch: engaged,
+    authority: protectedAuthority(),
+    disengagedAt: "2026-09-15T13:00:00.000Z",
+    disengagedByRef: "staff:incident-commander-1",
+    reason: "incident resolved, fleet re-verified clean",
+  });
   assert.equal(disengaged.engaged, false);
   assert.equal("engagedAt" in disengaged, false);
   assert.equal("engagedReason" in disengaged, false);
+  assert.equal(disengaged.disengagedAt, "2026-09-15T13:00:00.000Z");
+  assert.equal(disengaged.disengagedByRef, "staff:incident-commander-1");
+  assert.equal(disengaged.disengagedReason, "incident resolved, fleet re-verified clean");
 });
 
 test("K5: disengaging an already-disengaged kill switch throws", () => {
   assert.throws(
-    () => disengageLocalExecutionKillSwitch(createLocalExecutionKillSwitch(tenantScope)),
+    () =>
+      disengageLocalExecutionKillSwitch({
+        killSwitch: createLocalExecutionKillSwitch(tenantScope),
+        authority: protectedAuthority(),
+        disengagedAt: "2026-09-15T13:00:00.000Z",
+        disengagedByRef: "staff:incident-commander-1",
+        reason: "incident resolved",
+      }),
     InvalidKillSwitchTransitionError,
+  );
+});
+
+test("K9 (Brain Rev125 adversarial): disengageLocalExecutionKillSwitch fails closed without protected-action authorization - an ordinary WRITE/EXECUTE caller cannot release a tenant-wide kill switch", () => {
+  const engaged = engageLocalExecutionKillSwitch({
+    killSwitch: createLocalExecutionKillSwitch(tenantScope),
+    engagedAt: "2026-09-15T12:00:00.000Z",
+    reason: "incident",
+  });
+  assert.throws(
+    () =>
+      disengageLocalExecutionKillSwitch({
+        killSwitch: engaged,
+        authority: unprotectedAuthority(),
+        disengagedAt: "2026-09-15T13:00:00.000Z",
+        disengagedByRef: "staff:someone",
+        reason: "trying to release without protected authority",
+      }),
+    ProtectedActionNotAuthorizedError,
+  );
+});
+
+test("K10 (Brain Rev125 adversarial): disengageLocalExecutionKillSwitch fails closed for a cross-tenant authority even with protected-action authorization", () => {
+  const engaged = engageLocalExecutionKillSwitch({
+    killSwitch: createLocalExecutionKillSwitch(tenantScope),
+    engagedAt: "2026-09-15T12:00:00.000Z",
+    reason: "incident",
+  });
+  assert.throws(
+    () =>
+      disengageLocalExecutionKillSwitch({
+        killSwitch: engaged,
+        authority: protectedAuthority(otherTenantScope),
+        disengagedAt: "2026-09-15T13:00:00.000Z",
+        disengagedByRef: "staff:someone",
+        reason: "cross-tenant attempt",
+      }),
+    CrossTenantAuthorityError,
+  );
+});
+
+test("K11 (Brain Rev125 adversarial): disengageLocalExecutionKillSwitch requires a non-empty disengagedByRef even with protected authority", () => {
+  const engaged = engageLocalExecutionKillSwitch({
+    killSwitch: createLocalExecutionKillSwitch(tenantScope),
+    engagedAt: "2026-09-15T12:00:00.000Z",
+    reason: "incident",
+  });
+  assert.throws(
+    () =>
+      disengageLocalExecutionKillSwitch({
+        killSwitch: engaged,
+        authority: protectedAuthority(),
+        disengagedAt: "2026-09-15T13:00:00.000Z",
+        disengagedByRef: "   ",
+        reason: "incident resolved",
+      }),
+    InvalidLocalExecutionHardeningError,
   );
 });
 
@@ -228,6 +324,86 @@ test("M9: every transition's disclosure states CollaborationMode is never altere
   const plan = planExecutionModeTransition({ from: "CLOUD_NORMAL", to: "HYBRID" });
   assert.match(plan.disclosure, /CollaborationMode is a fully independent dimension/);
   assert.equal("collaborationMode" in plan, false);
+});
+
+test("M10 (Brain Rev125): a NARROWING transition with no active leases and no external-effect states supplied succeeds vacuously", () => {
+  const plan = planExecutionModeTransition({ from: "TEAM_LOCAL", to: "PERSONAL_LOCAL", activeLeases: [], externalEffectStates: [] });
+  assert.equal(plan.direction, "NARROWING");
+});
+
+test("M11 (Brain Rev125 adversarial): a NARROWING transition fails closed while a supplied lease is still active (RUNNING) - narrowing would orphan work already leased to a local worker", () => {
+  const device = onlineDevice();
+  const worker = privateWorker(device);
+  const lease = transitionLocalTaskLease({
+    lease: createLocalTaskLease({ leaseId: "lease-1", taskRef: "task-1", worker, device }),
+    to: "LEASED",
+  });
+  const runningLease = transitionLocalTaskLease({ lease, to: "RUNNING" });
+  assert.throws(
+    () =>
+      planExecutionModeTransition({
+        from: "TEAM_LOCAL",
+        to: "PERSONAL_LOCAL",
+        activeLeases: [runningLease],
+      }),
+    InvalidExecutionModeTransitionError,
+  );
+});
+
+test("M12 (Brain Rev125): a NARROWING transition succeeds when every supplied lease has already reached a terminal status (SUCCEEDED/FAILED/CANCELLED)", () => {
+  const device = onlineDevice();
+  const worker = privateWorker(device);
+  const leased = transitionLocalTaskLease({
+    lease: createLocalTaskLease({ leaseId: "lease-2", taskRef: "task-2", worker, device }),
+    to: "LEASED",
+  });
+  const running = transitionLocalTaskLease({ lease: leased, to: "RUNNING" });
+  const succeeded = transitionLocalTaskLease({ lease: running, to: "SUCCEEDED" });
+  const plan = planExecutionModeTransition({
+    from: "TEAM_LOCAL",
+    to: "PERSONAL_LOCAL",
+    activeLeases: [succeeded],
+  });
+  assert.equal(plan.direction, "NARROWING");
+});
+
+test("M13 (Brain Rev125 adversarial): a NARROWING transition fails closed while a supplied external-effect state is UNKNOWN, even with no active leases at all", () => {
+  assert.throws(
+    () =>
+      planExecutionModeTransition({
+        from: "TEAM_LOCAL",
+        to: "PERSONAL_LOCAL",
+        activeLeases: [],
+        externalEffectStates: ["UNKNOWN"],
+      }),
+    InvalidExecutionModeTransitionError,
+  );
+});
+
+test("M14 (Brain Rev125): WIDENING and LATERAL transitions are never blocked by active leases or UNKNOWN effect states - only NARROWING carries this safety check", () => {
+  const device = onlineDevice();
+  const worker = privateWorker(device);
+  const running = transitionLocalTaskLease({
+    lease: transitionLocalTaskLease({
+      lease: createLocalTaskLease({ leaseId: "lease-3", taskRef: "task-3", worker, device }),
+      to: "LEASED",
+    }),
+    to: "RUNNING",
+  });
+  const widening = planExecutionModeTransition({
+    from: "CLOUD_NORMAL",
+    to: "PERSONAL_LOCAL",
+    activeLeases: [running],
+    externalEffectStates: ["UNKNOWN"],
+  });
+  assert.equal(widening.direction, "WIDENING");
+  const lateral = planExecutionModeTransition({
+    from: "TEAM_LOCAL",
+    to: "HYBRID",
+    activeLeases: [running],
+    externalEffectStates: ["UNKNOWN"],
+  });
+  assert.equal(lateral.direction, "LATERAL");
 });
 
 // ---------------------------------------------------------------------------

@@ -40,6 +40,35 @@ test("LOCAL-EXEC-007: a kill switch is only ever constructed disengaged - no exp
   assert.match(fnBody, /engaged:\s*false/);
 });
 
+test("LOCAL-EXEC-007 (Brain Rev125 correction): disengageLocalExecutionKillSwitch requires requireSameTenant and requireProtectedActionAuthorization before ever mutating the switch - disengagement is no longer freely callable", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  const fnStart = content.indexOf("export function disengageLocalExecutionKillSwitch");
+  assert.ok(fnStart >= 0, "disengageLocalExecutionKillSwitch not found");
+  const bodyStart = content.indexOf("): LocalExecutionKillSwitch {", fnStart);
+  assert.ok(bodyStart >= 0, "disengageLocalExecutionKillSwitch's body opening not found");
+  const fnBody = content.slice(bodyStart, content.indexOf("\n}", bodyStart));
+  const tenantCheckIndex = fnBody.indexOf("requireSameTenant(");
+  const authorityCheckIndex = fnBody.indexOf("requireProtectedActionAuthorization(");
+  const returnIndex = fnBody.indexOf("return {");
+  assert.ok(tenantCheckIndex >= 0, "expected an explicit requireSameTenant check");
+  assert.ok(authorityCheckIndex >= 0, "expected an explicit requireProtectedActionAuthorization check");
+  assert.ok(returnIndex >= 0, "expected the disengaged switch to be returned");
+  assert.ok(
+    tenantCheckIndex < returnIndex && authorityCheckIndex < returnIndex,
+    "both the tenant and protected-action authority checks must run before the switch is ever disengaged",
+  );
+  assert.match(content, /import\s*\{\s*requireSameTenant,\s*requireProtectedActionAuthorization\s*\}\s*from\s*["']\.\/authority\.js["']/);
+});
+
+test("LOCAL-EXEC-007: engageLocalExecutionKillSwitch requires no AuthorityContext/protected-action authorization at all - only the narrowing direction (disengage) needs it, mirroring this codebase's own established asymmetric-authority precedent", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  const fnStart = content.indexOf("export function engageLocalExecutionKillSwitch");
+  assert.ok(fnStart >= 0, "engageLocalExecutionKillSwitch not found");
+  const nextExportIndex = content.indexOf("export function", fnStart + 1);
+  const fnBody = content.slice(fnStart, nextExportIndex >= 0 ? nextExportIndex : undefined);
+  assert.doesNotMatch(fnBody, /requireProtectedActionAuthorization\(/);
+});
+
 test("LOCAL-EXEC-007 (independent-review fix): planExecutionModeTransition validates from/to via an equality-based Set membership check (isRecognizedExecutionMode) before ever indexing the EXECUTION_MODE_RANK object literal, so a prototype-chain key (e.g. 'constructor') cannot bypass fail-closed validation", () => {
   const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
   const fnStart = content.indexOf("export function planExecutionModeTransition");
@@ -56,6 +85,26 @@ test("LOCAL-EXEC-007 (independent-review fix): planExecutionModeTransition valid
   assert.ok(guardFnStart >= 0, "isRecognizedExecutionMode not found");
   const guardFnBody = content.slice(guardFnStart, content.indexOf("\n}", guardFnStart));
   assert.match(guardFnBody, /RECOGNIZED_EXECUTION_MODES\.has\(/, "expected a Set.has() membership check, not an object-key existence check");
+});
+
+test("LOCAL-EXEC-007 (Brain Rev125 correction): planExecutionModeTransition's NARROWING branch checks supplied activeLeases for non-terminal status and externalEffectStates for UNKNOWN before ever returning a NARROWING plan - it is no longer pure classification", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  const bodyStart = content.indexOf("): ExecutionModeTransitionPlan {", content.indexOf("export function planExecutionModeTransition"));
+  assert.ok(bodyStart >= 0, "planExecutionModeTransition's body opening not found");
+  const fnBody = content.slice(bodyStart, content.indexOf("\n}", bodyStart));
+  const narrowingBranchStart = fnBody.indexOf('if (toRank < fromRank) {');
+  assert.ok(narrowingBranchStart >= 0, "expected the toRank < fromRank (NARROWING) branch");
+  const narrowingBranch = fnBody.slice(narrowingBranchStart);
+  const leaseCheckIndex = narrowingBranch.indexOf("TERMINAL_LEASE_STATUSES.has(lease.status)");
+  const effectCheckIndex = narrowingBranch.indexOf('externalEffectStates.includes("UNKNOWN")');
+  const narrowingReturnIndex = narrowingBranch.indexOf('direction: "NARROWING"');
+  assert.ok(leaseCheckIndex >= 0, "expected an explicit non-terminal lease check");
+  assert.ok(effectCheckIndex >= 0, "expected an explicit UNKNOWN external-effect-state check");
+  assert.ok(narrowingReturnIndex >= 0, "expected a NARROWING plan to be returned");
+  assert.ok(
+    leaseCheckIndex < narrowingReturnIndex && effectCheckIndex < narrowingReturnIndex,
+    "both safety checks must run before a NARROWING plan is ever returned",
+  );
 });
 
 test("LOCAL-EXEC-007: planExecutionModeTransition's return type carries no collaborationMode field - it cannot alter CollaborationMode even by construction", () => {
