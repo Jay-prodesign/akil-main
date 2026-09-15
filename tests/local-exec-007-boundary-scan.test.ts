@@ -107,6 +107,29 @@ test("LOCAL-EXEC-007 (Brain Rev125 correction): planExecutionModeTransition's NA
   );
 });
 
+test("LOCAL-EXEC-007 (Brain Rev129 correction): ExecutionModeTransitionPlan.safetyCheckScope is NOT_APPLICABLE for every direction except NARROWING, and CHECKED_SUPPLIED_FACTS_ONLY (never a stronger/authoritative-sounding value) for NARROWING - the honest limit is structural, not only prose", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  const ifaceStart = content.indexOf("export interface ExecutionModeTransitionPlan");
+  assert.ok(ifaceStart >= 0, "ExecutionModeTransitionPlan not found");
+  const ifaceBody = content.slice(ifaceStart, content.indexOf("}", ifaceStart));
+  assert.match(ifaceBody, /safetyCheckScope:\s*ExecutionModeSafetyCheckScope/, "expected a safetyCheckScope field typed as ExecutionModeSafetyCheckScope");
+  const typeStart = content.indexOf("export type ExecutionModeSafetyCheckScope");
+  assert.ok(typeStart >= 0, "ExecutionModeSafetyCheckScope not found");
+  const typeLine = content.slice(typeStart, content.indexOf(";", typeStart));
+  assert.match(typeLine, /"NOT_APPLICABLE"/);
+  assert.match(typeLine, /"CHECKED_SUPPLIED_FACTS_ONLY"/);
+  const bodyStart = content.indexOf("): ExecutionModeTransitionPlan {", content.indexOf("export function planExecutionModeTransition"));
+  const fnBody = content.slice(bodyStart, content.indexOf("\n}", bodyStart));
+  const unchangedReturn = fnBody.slice(fnBody.indexOf('direction: "UNCHANGED"'), fnBody.indexOf('direction: "UNCHANGED"') + 200);
+  const wideningReturn = fnBody.slice(fnBody.indexOf('direction: "WIDENING"'), fnBody.indexOf('direction: "WIDENING"') + 200);
+  const lateralReturn = fnBody.slice(fnBody.indexOf('direction: "LATERAL"'), fnBody.indexOf('direction: "LATERAL"') + 200);
+  const narrowingReturn = fnBody.slice(fnBody.indexOf('direction: "NARROWING"'), fnBody.indexOf('direction: "NARROWING"') + 200);
+  assert.match(unchangedReturn, /safetyCheckScope:\s*"NOT_APPLICABLE"/);
+  assert.match(wideningReturn, /safetyCheckScope:\s*"NOT_APPLICABLE"/);
+  assert.match(lateralReturn, /safetyCheckScope:\s*"NOT_APPLICABLE"/);
+  assert.match(narrowingReturn, /safetyCheckScope:\s*"CHECKED_SUPPLIED_FACTS_ONLY"/);
+});
+
 test("LOCAL-EXEC-007: planExecutionModeTransition's return type carries no collaborationMode field - it cannot alter CollaborationMode even by construction", () => {
   const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
   const ifaceStart = content.indexOf("export interface ExecutionModeTransitionPlan");

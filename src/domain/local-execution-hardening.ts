@@ -86,6 +86,19 @@ function requireValidTimestamp(value: unknown, field: string): { raw: string; ms
  * precedent of building a read-model rather than a rendered surface); the
  * ExecutionMode preflight and health read-model below are this checkpoint's
  * honest, wireable substitute for that UI's own required data.
+ *
+ * Brain Rev129 correction to the "safe switch/migration preflight" claim
+ * above: `planExecutionModeTransition` composes real `LocalTaskLease`/
+ * `ExternalEffectAttemptState` facts to fail closed on a NARROWING
+ * transition, but only over whatever facts the caller actually supplies -
+ * this repository has no durable lease/effect store for it to query an
+ * authoritative, complete active set. This is real, structurally-disclosed
+ * (`ExecutionModeTransitionPlan.safetyCheckScope`), and useful when a
+ * caller does supply accurate data, but it is explicitly NOT the complete
+ * "safe switch/migration preflight" §21 names - closing that fully requires
+ * a real durable lease/effect store this checkpoint does not build, per
+ * Rev129's own authorized narrowing (rather than fabricating one to claim
+ * completeness that does not exist).
  */
 
 // ---------------------------------------------------------------------------
@@ -270,10 +283,22 @@ function isRecognizedExecutionMode(value: unknown): value is ExecutionMode {
 
 export type ExecutionModeTransitionDirection = "WIDENING" | "NARROWING" | "LATERAL" | "UNCHANGED";
 
+/**
+ * Brain Rev129 correction: names, structurally (not just in prose), exactly
+ * what safety verification actually happened for this plan - `"NOT_APPLICABLE"`
+ * for every direction except `NARROWING` (no safety question exists for
+ * WIDENING/LATERAL/UNCHANGED), and `"CHECKED_SUPPLIED_FACTS_ONLY"` for
+ * `NARROWING` - never a value implying an authoritative, complete guarantee.
+ * See `planExecutionModeTransition`'s own doc comment for why no stronger
+ * value is honestly available.
+ */
+export type ExecutionModeSafetyCheckScope = "NOT_APPLICABLE" | "CHECKED_SUPPLIED_FACTS_ONLY";
+
 export interface ExecutionModeTransitionPlan {
   readonly from: ExecutionMode;
   readonly to: ExecutionMode;
   readonly direction: ExecutionModeTransitionDirection;
+  readonly safetyCheckScope: ExecutionModeSafetyCheckScope;
   readonly disclosure: string;
 }
 
@@ -291,28 +316,42 @@ const TERMINAL_LEASE_STATUSES: ReadonlySet<string> = new Set(["SUCCEEDED", "FAIL
  * preflight alone," i.e. it computed a label but enforced nothing. Required
  * correction: either compose existing lease/checkpoint/effect/readiness
  * facts to fail closed on unsafe transitions, or honestly narrow the claim.
- * This composes the two real, already-tested facts that actually determine
- * whether narrowing is unsafe: `LocalTaskLease.status` (L0, unmodified -
- * `CHECKPOINTED` is itself one of the non-terminal statuses this already
- * covers, so a checkpointed-but-unfinished task is caught the same way a
- * running one is) and `ExternalEffectAttemptState` (V4-EFF-001, unmodified),
- * mirroring `local-execution-collaboration.ts`'s own
- * `resolveLocalExecutionFailover` precedent of refusing to act while an
- * effect's real-world outcome is `UNKNOWN`. A NARROWING transition now
- * fails closed if any supplied lease is still non-terminal (would be
- * orphaned by removing local-worker eligibility) or any supplied external
- * effect state is `UNKNOWN` (narrowing away the only worker able to verify
- * an in-flight effect is exactly the risk `resolveLocalExecutionFailover`
- * already refuses to take). Honest limit disclosed, not fabricated as
- * closed: this module never fetches leases/effects itself (it has no
- * store/transport dependency anywhere, matching this checkpoint's own
- * "pure domain composition" boundary) - the check is only as complete as
- * the leases/effect states the caller actually supplies. Omitting either
- * parameter is not itself unsafe (a caller narrowing a mode with
- * genuinely zero local activity supplies empty arrays and the check
- * passes vacuously), but a caller that fails to enumerate real active work
- * before calling this can still bypass the intent of the check - this is
- * named explicitly rather than claimed away.
+ * Added a real, composed check: a NARROWING transition fails closed if any
+ * supplied `LocalTaskLease` is still non-terminal, or any supplied
+ * `ExternalEffectAttemptState` is `UNKNOWN`, mirroring
+ * `resolveLocalExecutionFailover`'s own precedent of refusing to act while
+ * an effect's real-world outcome is unverified.
+ *
+ * Brain Rev129 correction (independent exact-head review of the Rev125 fix):
+ * that check is still not an authoritative safe-switch preflight, because
+ * `activeLeases`/`externalEffectStates` are optional caller inputs - a
+ * caller that omits real active work evades the check entirely, and the
+ * function's own prior disclosure text obscured this by describing the
+ * omission case as passing "vacuously" rather than naming the gap plainly.
+ * Rev129 authorized two fixes: compose a *complete*, authoritative
+ * lease/effect snapshot (closing the gap for real), or honestly narrow the
+ * claim and leave real safe-switch preflight explicitly OPEN. A repo-wide
+ * check found no durable `LocalTaskLease`/effect-state store exists
+ * anywhere in this repository - only in-memory construction/transition
+ * functions (`local-execution.ts`) - so "compose a complete snapshot" would
+ * mean inventing a new persistence/store dependency this module has never
+ * had (violating its own "pure domain composition, no store/transport
+ * dependency anywhere" boundary, verified by its own boundary-scan test).
+ * Building that store now would be exactly the kind of fabricated
+ * infrastructure this corridor's own discipline forbids, not "the
+ * narrowest honest adapter."
+ *
+ * Taking Rev129's second, pre-authorized path instead: the claim is now
+ * honestly narrowed, structurally as well as in prose.
+ * `ExecutionModeTransitionPlan.safetyCheckScope` is
+ * `"CHECKED_SUPPLIED_FACTS_ONLY"` for every `NARROWING` plan - never a value
+ * implying completeness or an authoritative guarantee - and the disclosure
+ * text states plainly that a caller omitting real active leases/effects
+ * bypasses the check, rather than describing that omission as a benign
+ * "vacuous pass." Real, authoritative safe-switch/migration preflight
+ * enforcement (independent of what a caller chooses to supply) remains an
+ * explicitly named OPEN gap, not fabricated as closed - it requires a real
+ * durable lease/effect store this repository does not have.
  */
 export function planExecutionModeTransition(input: {
   from: unknown;
@@ -331,13 +370,20 @@ export function planExecutionModeTransition(input: {
     "CollaborationMode is a fully independent dimension and is never altered by this transition.";
 
   if (from === to) {
-    return { from, to, direction: "UNCHANGED", disclosure: `${from} to ${to} is not a mode change.` };
+    return {
+      from,
+      to,
+      direction: "UNCHANGED",
+      safetyCheckScope: "NOT_APPLICABLE",
+      disclosure: `${from} to ${to} is not a mode change.`,
+    };
   }
   if (toRank > fromRank) {
     return {
       from,
       to,
       direction: "WIDENING",
+      safetyCheckScope: "NOT_APPLICABLE",
       disclosure:
         `Moving from ${from} to ${to} newly admits local workers into routing eligibility ` +
         `(per resolveEligibleLocalWorkers's own pool/ownership gate). ${collaborationDisclosure}`,
@@ -363,18 +409,22 @@ export function planExecutionModeTransition(input: {
       from,
       to,
       direction: "NARROWING",
+      safetyCheckScope: "CHECKED_SUPPLIED_FACTS_ONLY",
       disclosure:
         `Moving from ${from} to ${to} removes local workers from routing eligibility going forward. ` +
-        `Checked against the ${activeLeases.length} lease(s) and ${externalEffectStates.length} external-effect ` +
-        `state(s) supplied to this call: none are active/unterminated and none are UNKNOWN. This module does not ` +
-        `itself fetch leases or effect states - the caller must supply every currently-relevant one for this check ` +
-        `to be meaningful. ${collaborationDisclosure}`,
+        `This is NOT an authoritative safe-switch preflight: it only checked the ${activeLeases.length} lease(s) ` +
+        `and ${externalEffectStates.length} external-effect state(s) actually supplied to this call (none were ` +
+        `active/unterminated and none were UNKNOWN), because this repository has no durable lease/effect store ` +
+        `this module can query for the complete active set. A caller that omits real active leases or effect ` +
+        `states bypasses this check entirely - real, authoritative safe-switch preflight enforcement remains an ` +
+        `explicitly open gap, not a guarantee this plan makes. ${collaborationDisclosure}`,
     };
   }
   return {
     from,
     to,
     direction: "LATERAL",
+    safetyCheckScope: "NOT_APPLICABLE",
     disclosure:
       `Moving from ${from} to ${to} does not change which local workers are eligible ` +
       `(resolveEligibleLocalWorkers treats both identically); whether normal remote/API workers are also ` +

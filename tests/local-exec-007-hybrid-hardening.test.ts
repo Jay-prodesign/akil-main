@@ -326,9 +326,10 @@ test("M9: every transition's disclosure states CollaborationMode is never altere
   assert.equal("collaborationMode" in plan, false);
 });
 
-test("M10 (Brain Rev125): a NARROWING transition with no active leases and no external-effect states supplied succeeds vacuously", () => {
+test("M10 (Brain Rev125): a NARROWING transition with no active leases and no external-effect states supplied succeeds, since there is nothing supplied to fail closed on", () => {
   const plan = planExecutionModeTransition({ from: "TEAM_LOCAL", to: "PERSONAL_LOCAL", activeLeases: [], externalEffectStates: [] });
   assert.equal(plan.direction, "NARROWING");
+  assert.equal(plan.safetyCheckScope, "CHECKED_SUPPLIED_FACTS_ONLY");
 });
 
 test("M11 (Brain Rev125 adversarial): a NARROWING transition fails closed while a supplied lease is still active (RUNNING) - narrowing would orphan work already leased to a local worker", () => {
@@ -365,6 +366,7 @@ test("M12 (Brain Rev125): a NARROWING transition succeeds when every supplied le
     activeLeases: [succeeded],
   });
   assert.equal(plan.direction, "NARROWING");
+  assert.equal(plan.safetyCheckScope, "CHECKED_SUPPLIED_FACTS_ONLY");
 });
 
 test("M13 (Brain Rev125 adversarial): a NARROWING transition fails closed while a supplied external-effect state is UNKNOWN, even with no active leases at all", () => {
@@ -404,6 +406,25 @@ test("M14 (Brain Rev125): WIDENING and LATERAL transitions are never blocked by 
     externalEffectStates: ["UNKNOWN"],
   });
   assert.equal(lateral.direction, "LATERAL");
+});
+
+test("M15 (Brain Rev129): WIDENING, LATERAL, and UNCHANGED plans always report safetyCheckScope NOT_APPLICABLE - no safety question exists for those directions", () => {
+  assert.equal(planExecutionModeTransition({ from: "CLOUD_NORMAL", to: "PERSONAL_LOCAL" }).safetyCheckScope, "NOT_APPLICABLE");
+  assert.equal(planExecutionModeTransition({ from: "TEAM_LOCAL", to: "HYBRID" }).safetyCheckScope, "NOT_APPLICABLE");
+  assert.equal(planExecutionModeTransition({ from: "CLOUD_NORMAL", to: "CLOUD_NORMAL" }).safetyCheckScope, "NOT_APPLICABLE");
+});
+
+test("M16 (Brain Rev129): every NARROWING plan reports safetyCheckScope CHECKED_SUPPLIED_FACTS_ONLY - never a value implying an authoritative/complete guarantee", () => {
+  const plan = planExecutionModeTransition({ from: "TEAM_LOCAL", to: "PERSONAL_LOCAL" });
+  assert.equal(plan.direction, "NARROWING");
+  assert.equal(plan.safetyCheckScope, "CHECKED_SUPPLIED_FACTS_ONLY");
+});
+
+test("M17 (Brain Rev129): a NARROWING plan's disclosure states plainly that this is not an authoritative safe-switch preflight and that a caller omitting real active leases/effects bypasses the check - the prior 'vacuous pass' framing that obscured this gap is gone", () => {
+  const plan = planExecutionModeTransition({ from: "TEAM_LOCAL", to: "PERSONAL_LOCAL" });
+  assert.match(plan.disclosure, /NOT an authoritative safe-switch preflight/);
+  assert.match(plan.disclosure, /bypasses this check entirely/);
+  assert.doesNotMatch(plan.disclosure, /vacuously/i);
 });
 
 // ---------------------------------------------------------------------------
