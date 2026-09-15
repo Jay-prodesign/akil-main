@@ -40,6 +40,24 @@ test("LOCAL-EXEC-007: a kill switch is only ever constructed disengaged - no exp
   assert.match(fnBody, /engaged:\s*false/);
 });
 
+test("LOCAL-EXEC-007 (independent-review fix): planExecutionModeTransition validates from/to via an equality-based Set membership check (isRecognizedExecutionMode) before ever indexing the EXECUTION_MODE_RANK object literal, so a prototype-chain key (e.g. 'constructor') cannot bypass fail-closed validation", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  const fnStart = content.indexOf("export function planExecutionModeTransition");
+  assert.ok(fnStart >= 0, "planExecutionModeTransition not found");
+  const bodyStart = content.indexOf("): ExecutionModeTransitionPlan {", fnStart);
+  assert.ok(bodyStart >= 0, "planExecutionModeTransition's body opening not found");
+  const fnBody = content.slice(bodyStart, content.indexOf("\n}", bodyStart));
+  const guardCheckIndex = fnBody.indexOf("isRecognizedExecutionMode(input.from)");
+  const rankIndexIndex = fnBody.indexOf("EXECUTION_MODE_RANK[from]");
+  assert.ok(guardCheckIndex >= 0, "expected an explicit isRecognizedExecutionMode guard");
+  assert.ok(rankIndexIndex >= 0, "expected EXECUTION_MODE_RANK to be indexed after validation");
+  assert.ok(guardCheckIndex < rankIndexIndex, "the recognized-mode guard must run before the rank table is ever indexed");
+  const guardFnStart = content.indexOf("function isRecognizedExecutionMode");
+  assert.ok(guardFnStart >= 0, "isRecognizedExecutionMode not found");
+  const guardFnBody = content.slice(guardFnStart, content.indexOf("\n}", guardFnStart));
+  assert.match(guardFnBody, /RECOGNIZED_EXECUTION_MODES\.has\(/, "expected a Set.has() membership check, not an object-key existence check");
+});
+
 test("LOCAL-EXEC-007: planExecutionModeTransition's return type carries no collaborationMode field - it cannot alter CollaborationMode even by construction", () => {
   const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
   const ifaceStart = content.indexOf("export interface ExecutionModeTransitionPlan");

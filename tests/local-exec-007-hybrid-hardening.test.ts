@@ -209,6 +209,21 @@ test("M8 adversarial: an unrecognized ExecutionMode value fails closed", () => {
   );
 });
 
+test("M8b adversarial (prototype-pollution guard): Object.prototype-shaped keys ('constructor', 'toString', 'hasOwnProperty', '__proto__') fail closed rather than resolving through the prototype chain to an inherited function value", () => {
+  for (const bogus of ["constructor", "toString", "hasOwnProperty", "valueOf", "isPrototypeOf", "__proto__"]) {
+    assert.throws(
+      () => planExecutionModeTransition({ from: "CLOUD_NORMAL", to: bogus }),
+      InvalidExecutionModeTransitionError,
+      `expected "${bogus}" as "to" to fail closed`,
+    );
+    assert.throws(
+      () => planExecutionModeTransition({ from: bogus, to: "CLOUD_NORMAL" }),
+      InvalidExecutionModeTransitionError,
+      `expected "${bogus}" as "from" to fail closed`,
+    );
+  }
+});
+
 test("M9: every transition's disclosure states CollaborationMode is never altered - the return type itself carries no collaborationMode field", () => {
   const plan = planExecutionModeTransition({ from: "CLOUD_NORMAL", to: "HYBRID" });
   assert.match(plan.disclosure, /CollaborationMode is a fully independent dimension/);

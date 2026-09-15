@@ -194,6 +194,32 @@ const EXECUTION_MODE_RANK: Readonly<Record<ExecutionMode, number>> = {
   HYBRID: 2,
 };
 
+/**
+ * Independent code review of this checkpoint found that indexing
+ * `EXECUTION_MODE_RANK` directly with an untrusted `unknown` value is
+ * bypassable: a plain object literal's lookup walks the prototype chain,
+ * so a caller-supplied string like `"constructor"` or `"toString"`
+ * resolves to an inherited `Object.prototype` function value instead of
+ * `undefined`, defeating the `=== undefined` fail-closed check entirely
+ * (live-reproduced: `planExecutionModeTransition({from:"constructor",
+ * to:"toString"})` returned a fabricated `WIDENING` plan instead of
+ * throwing). Mirrors `worker-routing-policy.ts`'s own Rev60 F1 fix for
+ * the identical class of bug (`AUTHORITY_RANK` there): a real value must
+ * pass an explicit equality-based `Set` membership check - which only
+ * ever matches its own declared members and cannot resolve through the
+ * prototype chain - *before* the rank table is ever indexed.
+ */
+const RECOGNIZED_EXECUTION_MODES: ReadonlySet<string> = new Set<string>([
+  "CLOUD_NORMAL",
+  "PERSONAL_LOCAL",
+  "TEAM_LOCAL",
+  "HYBRID",
+]);
+
+function isRecognizedExecutionMode(value: unknown): value is ExecutionMode {
+  return typeof value === "string" && RECOGNIZED_EXECUTION_MODES.has(value);
+}
+
 export type ExecutionModeTransitionDirection = "WIDENING" | "NARROWING" | "LATERAL" | "UNCHANGED";
 
 export interface ExecutionModeTransitionPlan {
@@ -207,13 +233,13 @@ export function planExecutionModeTransition(input: {
   from: unknown;
   to: unknown;
 }): ExecutionModeTransitionPlan {
-  const fromRank = EXECUTION_MODE_RANK[input.from as ExecutionMode];
-  const toRank = EXECUTION_MODE_RANK[input.to as ExecutionMode];
-  if (fromRank === undefined || toRank === undefined) {
+  if (!isRecognizedExecutionMode(input.from) || !isRecognizedExecutionMode(input.to)) {
     throw new InvalidExecutionModeTransitionError("from/to must both be recognized ExecutionMode values");
   }
-  const from = input.from as ExecutionMode;
-  const to = input.to as ExecutionMode;
+  const from = input.from;
+  const to = input.to;
+  const fromRank = EXECUTION_MODE_RANK[from];
+  const toRank = EXECUTION_MODE_RANK[to];
   const collaborationDisclosure =
     "CollaborationMode is a fully independent dimension and is never altered by this transition.";
 
