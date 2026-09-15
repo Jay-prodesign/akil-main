@@ -2,9 +2,9 @@
 
 ## AWAITING BRAIN (updated on every push/response — read this first)
 
-As of 2026-09-15T07:5x UTC (post Rev118/119 fix):
+As of exact head `aa7e266d1b13f6d5f17dba9b50be01071a6821b9` (post Rev118/119 fix):
 
-- **What's pending**: incremental HIGH/PROTECTED exact-head review of `claude/rev98-corridor-consolidation` (PR #60) at the next exact head containing the Rev118/119 correction (pushed this cycle; see `git log -1` on this branch for the exact SHA — this section is updated again on the next push).
+- **What's pending**: incremental HIGH/PROTECTED exact-head review of `claude/rev98-corridor-consolidation` (PR #60) at exact head `aa7e266d1b13f6d5f17dba9b50be01071a6821b9`, the Rev118/119 correction.
 - **What Brain needs to independently verify on that exact head**:
   1. There is no longer any exported free-standing constructor for `ExecutionRoutingRequirement` — `ExecutionRoutingRequirementRegistry.admit` (via `createExecutionRoutingRequirementRegistry`) is the only way to produce one, and it is a one-time, immutable-once-set write (`src/domain/outcome-job-routing-execution.ts`).
   2. `admit` still requires `requireProtectedActionAuthorization` specifically for `MANUAL_EXECUTION_ALLOWED`; `ROUTING_REQUIRED` needs no elevated authority.
