@@ -110,12 +110,17 @@ function outcomeJobSpecFor(job: OutcomeJob): OutcomeJobSpec {
   };
 }
 
-function admittedCatalogFor(spec: OutcomeJobSpec, workerId = "catalog-admin"): ServiceCatalogAdmission {
+function admittedCatalogFor(
+  spec: OutcomeJobSpec,
+  workerId = "catalog-admin",
+  executionRoutingPolicy: ServiceCatalogEntry["executionRoutingPolicy"] = "MANUAL_EXECUTION_ALLOWED",
+): ServiceCatalogAdmission {
   const catalogEntry: ServiceCatalogEntry = {
     serviceRef: "service:website-build",
     blueprintId: spec.sourceBlueprintId,
     blueprintVersion: spec.sourceBlueprintVersion,
     recipeId: testRecipe.recipeId,
+    executionRoutingPolicy,
   };
   return admitServiceCatalogEntry({
     catalogEntry,
@@ -462,6 +467,79 @@ test("Brain Rev122: admitManualExecutionAllowedFromServiceCatalogAdmission succe
     admittedAt: "2026-09-15T00:00:00.000Z",
   });
   assert.equal(requirement.policy, "MANUAL_EXECUTION_ALLOWED");
+});
+
+test("Brain Rev123/124 adversarial: a ServiceCatalogAdmission whose own catalog entry declares ROUTING_REQUIRED can never admit MANUAL_EXECUTION_ALLOWED for this job, even with a matching spec/blueprint and a fully trusted, currently-ADMITTED admission - catalog trust alone does not imply manual execution is permitted", () => {
+  const job = readyJob();
+  const registry = createExecutionRoutingRequirementRegistry();
+  const spec = outcomeJobSpecFor(job);
+  const routingRequiredAdmission = admittedCatalogFor(spec, "catalog-admin", "ROUTING_REQUIRED");
+  assert.throws(
+    () =>
+      registry.admitManualExecutionAllowedFromServiceCatalogAdmission({
+        job,
+        spec,
+        admission: routingRequiredAdmission,
+        admittedAt: "2026-09-15T00:00:00.000Z",
+      }),
+    InvalidExecutionRoutingRequirementError,
+  );
+});
+
+test("Brain Rev123/124: an authoritative MANUAL_EXECUTION_ALLOWED admission (catalog entry explicitly declares it) permits ordinary execution via authorizedTransitionOutcomeJob", () => {
+  const job = readyJob();
+  const registry = createExecutionRoutingRequirementRegistry();
+  const spec = outcomeJobSpecFor(job);
+  const manualAdmission = admittedCatalogFor(spec, "catalog-admin", "MANUAL_EXECUTION_ALLOWED");
+  const requirement = registry.admitManualExecutionAllowedFromServiceCatalogAdmission({
+    job,
+    spec,
+    admission: manualAdmission,
+    admittedAt: "2026-09-15T00:00:00.000Z",
+  });
+  assert.equal(requirement.policy, "MANUAL_EXECUTION_ALLOWED");
+  const executing = authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING", registry);
+  assert.equal(executing.state, "EXECUTING");
+});
+
+test("Brain Rev123/124 adversarial: a ROUTING_REQUIRED admission still only reaches EXECUTING through a matching RoutedExecutionAssignment, never through the ordinary authorizedTransitionOutcomeJob path", () => {
+  const job = readyJob();
+  const registry = createExecutionRoutingRequirementRegistry();
+  registry.admitRoutingRequiredFromAssignment({
+    job,
+    assignment: routedAssignmentFor(job),
+    admittedAt: "2026-09-15T00:00:00.000Z",
+  });
+  assert.throws(
+    () => authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING", registry),
+    ExecutionRequiresRoutingGateError,
+  );
+  const executing = authorizedTransitionOutcomeJobToExecutingViaRouting(
+    fullWriteAuthority(),
+    job,
+    routedAssignmentFor(job),
+  );
+  assert.equal(executing.state, "EXECUTING");
+});
+
+test("Brain Rev123/124 adversarial: an admission with a missing/unrecognized executionRoutingPolicy fails closed rather than defaulting to MANUAL_EXECUTION_ALLOWED", () => {
+  const job = readyJob();
+  const registry = createExecutionRoutingRequirementRegistry();
+  const spec = outcomeJobSpecFor(job);
+  const malformedAdmission = {
+    ...admittedCatalogFor(spec),
+    executionRoutingPolicy: "BOGUS",
+  } as unknown as ServiceCatalogAdmission;
+  assert.throws(
+    () =>
+      registry.admitManualExecutionAllowedFromServiceCatalogAdmission({
+        job,
+        spec,
+        admission: malformedAdmission,
+        admittedAt: "2026-09-15T00:00:00.000Z",
+      }),
+    InvalidExecutionRoutingRequirementError,
+  );
 });
 
 test("Brain Rev122 adversarial (first-writer elevated-worker bypass, closed): a spec belonging to a DIFFERENT job cannot be used to admit MANUAL_EXECUTION_ALLOWED for this job, even with a real ADMITTED catalog admission", () => {

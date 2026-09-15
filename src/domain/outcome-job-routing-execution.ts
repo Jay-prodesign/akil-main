@@ -459,6 +459,35 @@ function executionRoutingRequirementKey(scope: {
  * per-service routing-vs-manual flag remains a candidate for a future
  * correction if Brain judges the current binding insufficient.
  *
+ * Brain Rev123/124 correction (independent exact-head review of head
+ * `b3c5b1d`, the Rev122 fix): `ServiceCatalogAdmission` proved trusted/
+ * admitted blueprint provenance, but nothing stated whether *this exact
+ * admitted service* actually requires routed worker assignment or permits
+ * direct manual execution - `admitManualExecutionAllowedFromServiceCatalogAdmission`
+ * inferred `MANUAL_EXECUTION_ALLOWED` from catalog trust alone, so an
+ * admission covering a service whose own real policy requires routing
+ * could still first-admit the weaker classification (and, since admission
+ * is immutable-once-set, freeze the wrong policy for that job). Required
+ * correction: extend the narrowest trusted service/plan/job admission
+ * surface - `ServiceCatalogEntry`/`ServiceCatalogAdmission`
+ * (`commercial-order.ts`/`service-catalog-admission.ts`) - to carry an
+ * explicit `executionRoutingPolicy: ServiceExecutionRoutingPolicy`
+ * discriminator, then derive this registry's policy from that fact rather
+ * than from admission status alone. `admitManualExecutionAllowedFromServiceCatalogAdmission`
+ * now additionally requires `admission.executionRoutingPolicy ===
+ * "MANUAL_EXECUTION_ALLOWED"` - an admission whose own catalog entry
+ * declares `"ROUTING_REQUIRED"` can never satisfy this, regardless of how
+ * trusted/evidenced/blueprint-matched it otherwise is. The discriminator
+ * lives on the catalog entry itself (what the service actually is), not
+ * asserted fresh at admission or execution time, so it is carried
+ * verbatim from `catalogEntry` onto the resulting `ServiceCatalogAdmission`
+ * exactly like `blueprintId`/`blueprintVersion`/`recipeId` already are -
+ * no new IAM/authority system, reusing the same admission boundary Family
+ * 1 already established. `admitRoutingRequiredFromAssignment`'s own
+ * exact-job `RoutedExecutionAssignment` binding is unchanged and remains
+ * independently sufficient for the ROUTING side (Brain Rev123 confirmed
+ * this resolved).
+ *
  * `admit*` are the only ways to produce an `ExecutionRoutingRequirement` -
  * there is no other exported constructor. Called once, at admission
  * time, structurally separate from whatever later calls
@@ -538,6 +567,11 @@ export function createExecutionRoutingRequirementRegistry(): ExecutionRoutingReq
       if (input.admission.status !== "ADMITTED") {
         throw new InvalidExecutionRoutingRequirementError(
           `admission.status must be "ADMITTED" to admit MANUAL_EXECUTION_ALLOWED (got ${JSON.stringify(input.admission.status)}) - a revoked service catalog admission cannot vouch for this job's execution policy`,
+        );
+      }
+      if (input.admission.executionRoutingPolicy !== "MANUAL_EXECUTION_ALLOWED") {
+        throw new InvalidExecutionRoutingRequirementError(
+          `admission.executionRoutingPolicy must be "MANUAL_EXECUTION_ALLOWED" to admit MANUAL_EXECUTION_ALLOWED (got ${JSON.stringify(input.admission.executionRoutingPolicy)}) - catalog trust alone does not imply manual execution is permitted; a service whose own admitted catalog entry declares ROUTING_REQUIRED can never vouch for this job's manual-execution policy`,
         );
       }
       if (
