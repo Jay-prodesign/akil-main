@@ -25,7 +25,7 @@ Combined with `family-12-sale-service-routing-convergence`'s own prior merges (`
 | Family | Description | Status |
 |---|---|---|
 | 1 | Trusted canonical service/delivery knowledge boundary | IMPLEMENTED/EVIDENCED (SVC-ADM-001, via Family 12 branch) |
-| 2 | Final authenticated authority ingress + internal/staff boundary | IMPLEMENTED/EVIDENCED (merged to `main` separately, consumed by Family 10/LOCAL-EXEC-004) |
+| 2 | Final authenticated authority ingress + internal/staff boundary | IMPLEMENTED/EVIDENCED (Brain Rev115/116 truth-surface correction: present in this tree via the Family-10 stack, PR #53, not landed on `main` - `main` does not contain it; consumed by Family 10/LOCAL-EXEC-004) |
 | 3 | V5 partner-routing completion (reason/owner/fallback) | IMPLEMENTED/EVIDENCED (V5-PTN-002b, via Family 12 branch) |
 | 4 | V4 generic approval/effect/recovery/readback envelope | IMPLEMENTED/EVIDENCED (V4-EFF-001, via Family 8 stack) |
 | 5 | V4 reference service-specific control-adapter floor | IMPLEMENTED/EVIDENCED (via Family 8 stack) |
@@ -35,7 +35,7 @@ Combined with `family-12-sale-service-routing-convergence`'s own prior merges (`
 | 9 | V4 account-manager + automation operating integration | IMPLEMENTED/EVIDENCED (AUT-OPS-001) |
 | 10 | V4 H + V5 J frontend convergence | IMPLEMENTED/EVIDENCED (via Family 10 stack) |
 | 11 | V5 infrastructure/provider/domain/DNS orchestration | IMPLEMENTED/EVIDENCED (DEP-ORCH-001, via DEP-ORCH stack; no live effects — that remains a protected gate) |
-| 12 | Website Build Cold-Start end-to-end convergence | IMPLEMENTED/EVIDENCED (this checkpoint + Family-12 branch's own routing↔execution glue and closure-approval-gate fix on PR #58) |
+| 12 | Website Build Cold-Start end-to-end convergence | IMPLEMENTED/EVIDENCED (Brain Rev114/115/116-corrected: PR #58's closure-approval-gate correction is now actually composed into this tree — not merely cited — and the routing↔execution glue now requires an explicit `ExecutionRoutingRequirement` for every `EXECUTING` transition, closing the bypass Rev114 found; see the "Brain Rev114/115/116" commit on this branch) |
 
 Every family is now IMPLEMENTED/EVIDENCED and resides in one coherent, tested tree. No family here reports `BLOCKED_BY_EXACT_GATE`, `TRIGGER_NOT_MET`, or `OUTSIDE_CURRENT_AUTHORITY` — those classifications remain reserved for genuinely protected edges (real credential/account activation, spend, DNS, production deploy/publication, MAIN merge/mutation), none of which this consolidation crosses.
 
@@ -55,4 +55,6 @@ Every family is now IMPLEMENTED/EVIDENCED and resides in one coherent, tested tr
 
 ## Status
 
-**IMPLEMENTED / SELF-VALIDATED** — pending independent verification per canonical Handoff Rev105. This is the largest-blast-radius composition this session has performed (it touches every gap family's own auth/authority/tenant/deployment-adjacent surface transitively), so it remains `SAFE_MERGE`-excluded pending explicit Brain classification, matching every other checkpoint's own established convention — if anything, more conservatively so given its scope. `MERGE_DISPOSITION: HOLD_MERGE`. This branch's own eventual PR should be reviewed as the single consolidated end-of-batch review packet Rev95's own "FINAL RETURN" text calls for, superseding the need to review each of PR #37/#38/#39/#40/#41/#42/#43/#45/#46/#47/#48/#50/#51/#52/#53/#54/#55/#56/#57/#58 individually — every one of them is now represented, unmodified in their own logic, inside this one tree.
+**IMPLEMENTED / SELF-VALIDATED** — pending independent verification per canonical Handoff Rev105. This is the largest-blast-radius composition this session has performed (it touches every gap family's own auth/authority/tenant/deployment-adjacent surface transitively), so it remains `SAFE_MERGE`-excluded pending explicit Brain classification, matching every other checkpoint's own established convention — if anything, more conservatively so given its scope. `MERGE_DISPOSITION: HOLD_MERGE`.
+
+Brain Rev115/116 F3 correction (narrowing an earlier overclaim in this section): this branch's own eventual PR is the preferred consolidated review surface for PR #37/#38/#39/#40/#41/#42/#43/#45/#46/#47/#48/#50/#51/#52/#53/#54/#55/#56/#57/#58 — every one of them is represented, unmodified in their own logic, inside this one tree — but merely merging them here does not itself transfer or supersede independent verification of any exact-head finding still open on those PRs, nor does a clean composition/regression count convert inherited, not-yet-independently-reviewed work into PASS by ancestry. Prior accepted Brain evidence for invariants unaffected by this consolidation's own merges remains reusable under the incremental-review contract; only the materially changed correction delta and directly affected HIGH/PROTECTED invariants require fresh review after each push to this branch.
