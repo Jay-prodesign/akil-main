@@ -68,7 +68,7 @@ function jobAtVerifying(businessObjective?: string): OutcomeJob {
     fullWriteAuthority(),
     job,
     "EXECUTING",
-    createExecutionRoutingRequirement({ job, policy: "MANUAL_EXECUTION_ALLOWED" }),
+    createExecutionRoutingRequirement({ job, policy: "MANUAL_EXECUTION_ALLOWED", authority: fullProtectedAuthority() }),
   );
   job = authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "VERIFYING");
   return job;
@@ -324,6 +324,7 @@ test("Brain Rev114/115/116 F1 adversarial: authorizedTransitionOutcomeJob to EXE
   const mismatchedRequirement = createExecutionRoutingRequirement({
     job: otherDraft,
     policy: "MANUAL_EXECUTION_ALLOWED",
+    authority: fullProtectedAuthority(),
   });
   assert.throws(
     () => authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING", mismatchedRequirement),
@@ -333,7 +334,7 @@ test("Brain Rev114/115/116 F1 adversarial: authorizedTransitionOutcomeJob to EXE
 
 test("Brain Rev114/115/116 F1: a ROUTING_REQUIRED job can never reach EXECUTING through the ordinary authorizedTransitionOutcomeJob path, even with full WRITE authority", () => {
   const job = readyJob();
-  const requirement = createExecutionRoutingRequirement({ job, policy: "ROUTING_REQUIRED" });
+  const requirement = createExecutionRoutingRequirement({ job, policy: "ROUTING_REQUIRED", authority: fullWriteAuthority() });
   assert.throws(
     () => authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING", requirement),
     ExecutionRequiresRoutingGateError,
@@ -353,9 +354,31 @@ test("Brain Rev114/115/116 F1: a ROUTING_REQUIRED job succeeds only through auth
 
 test("Brain Rev114/115/116 F1: an explicitly MANUAL_EXECUTION_ALLOWED job preserves the ordinary authorizedTransitionOutcomeJob path with no routing assignment at all", () => {
   const job = readyJob();
-  const requirement = createExecutionRoutingRequirement({ job, policy: "MANUAL_EXECUTION_ALLOWED" });
+  const requirement = createExecutionRoutingRequirement({ job, policy: "MANUAL_EXECUTION_ALLOWED", authority: fullProtectedAuthority() });
   const executing = authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING", requirement);
   assert.equal(executing.state, "EXECUTING");
+});
+
+test("Brain Rev117: ordinary WRITE authority (no protected-action grant) cannot construct a MANUAL_EXECUTION_ALLOWED requirement - the execution caller cannot self-classify a routing-required job as manual to bypass the gate", () => {
+  const job = readyJob();
+  assert.throws(
+    () => createExecutionRoutingRequirement({ job, policy: "MANUAL_EXECUTION_ALLOWED", authority: fullWriteAuthority() }),
+    ProtectedActionNotAuthorizedError,
+  );
+});
+
+test("Brain Rev117: EXECUTE permission without protected-action authorization still cannot construct a MANUAL_EXECUTION_ALLOWED requirement", () => {
+  const job = readyJob();
+  assert.throws(
+    () => createExecutionRoutingRequirement({ job, policy: "MANUAL_EXECUTION_ALLOWED", authority: executeWithoutProtectedAuthority() }),
+    ProtectedActionNotAuthorizedError,
+  );
+});
+
+test("Brain Rev117: ordinary WRITE authority CAN construct a ROUTING_REQUIRED requirement - asserting the stricter classification never needs elevated authority", () => {
+  const job = readyJob();
+  const requirement = createExecutionRoutingRequirement({ job, policy: "ROUTING_REQUIRED", authority: fullWriteAuthority() });
+  assert.equal(requirement.policy, "ROUTING_REQUIRED");
 });
 
 function verifiedJob(): OutcomeJob {

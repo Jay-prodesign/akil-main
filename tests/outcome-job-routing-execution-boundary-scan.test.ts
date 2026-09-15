@@ -48,6 +48,19 @@ test("outcome-job-routing-execution: createRoutedExecutionAssignment rejects any
   assert.match(fnBody, /decision\.status\s*!==\s*["']ROUTED["']/);
 });
 
+test("Brain Rev117: createExecutionRoutingRequirement requires protected-action authorization before ever constructing a MANUAL_EXECUTION_ALLOWED requirement - the check runs before the object is returned", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  const fnStart = content.indexOf("export function createExecutionRoutingRequirement");
+  assert.ok(fnStart >= 0, "createExecutionRoutingRequirement not found");
+  const nextFnStart = content.indexOf("export function", fnStart + 1);
+  const fnBody = content.slice(fnStart, nextFnStart >= 0 ? nextFnStart : undefined);
+  const protectedCheckIndex = fnBody.indexOf("requireProtectedActionAuthorization(");
+  const returnIndex = fnBody.indexOf("return {");
+  assert.ok(protectedCheckIndex >= 0, "expected an explicit requireProtectedActionAuthorization call");
+  assert.ok(returnIndex >= 0, "expected the constructed requirement to be returned");
+  assert.ok(protectedCheckIndex < returnIndex, "protected-action authorization must be required before the requirement object is ever constructed");
+});
+
 test("outcome-job-routing-execution: module exports exactly the expected surface", () => {
   const exportedKeys = Object.keys(OutcomeJobRoutingExecution).sort();
   assert.deepEqual(exportedKeys, [

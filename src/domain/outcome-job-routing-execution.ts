@@ -3,6 +3,7 @@ import type { Customer } from "./customer.js";
 import type { Project } from "./project.js";
 import { transitionOutcomeJob, type OutcomeJob } from "./outcome-job.js";
 import type { WorkerRoutingDecision } from "./worker-routing-policy.js";
+import { requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";
 
 export class InvalidRoutedExecutionAssignmentError extends Error {
   constructor(reason: string) {
@@ -216,13 +217,41 @@ export class InvalidExecutionRoutingRequirementError extends Error {
  * nothing to do with, `ExecutionRoutingRequirement` is the smallest
  * addition that makes the true caller-side classification explicit,
  * scope-bound, and impossible to silently omit for `EXECUTING`
- * specifically - mirroring exactly the same honesty `ClosureApprovalReference`
- * already discloses for `approverRef` (Rev111 F2): this is the caller's
- * own admitted-policy classification for this exact job, not an
- * independently re-derived fact, and the module's contract is only that
- * a `ROUTING_REQUIRED` classification can never be satisfied by the
- * ordinary path - never that this repository independently proves which
- * jobs truly require routing.
+ * specifically.
+ *
+ * Brain Rev117 correction: the reasoning immediately above ("mirrors the
+ * same honesty `ClosureApprovalReference` discloses for `approverRef`")
+ * was insufficient here, for a reason that does not apply to
+ * `approverRef`. `approverRef` is a caller-supplied *label* - it never by
+ * itself decides whether an action is permitted; `requireProtectedActionAuthorization`
+ * does that work regardless of what the label says. `ExecutionRoutingRequirement.policy`
+ * is different: it IS the permission decision. If any WRITE-level caller
+ * could freely construct `MANUAL_EXECUTION_ALLOWED` for a job whose real
+ * admitted policy is `ROUTING_REQUIRED`, the gate is self-defeating - the
+ * exact caller trying to bypass routing simply relabels their own
+ * request. Rev117 found precisely this: "a caller holding a
+ * routing-required Family-12 job can construct MANUAL_EXECUTION_ALLOWED
+ * for the same job and still take the ordinary EXECUTING path."
+ *
+ * The fix narrows who may assert the *weaker* classification, not who
+ * may assert the stronger one: asserting `ROUTING_REQUIRED` only ever
+ * tightens the gate (an ordinary WRITE-level caller cannot use it to
+ * bypass anything, so no elevated authority is required to assert it),
+ * but asserting `MANUAL_EXECUTION_ALLOWED` - the classification that
+ * actually opens the ordinary path - now requires the same
+ * `requireProtectedActionAuthorization` tier this repository already
+ * requires for `authorizedCloseOutcomeJobWithApproval`/`authorizedVerifyOutcomeJob`.
+ * An ordinary WRITE-only execution caller (the routing-worker/automation
+ * identity this checkpoint is actually defending against) can no longer
+ * manufacture a valid `MANUAL_EXECUTION_ALLOWED` requirement at all.
+ * This does not claim to independently re-derive which jobs truly
+ * require routing (that remains real admitted-policy provenance this
+ * repository does not yet compose - see the module doc comment above),
+ * and a protected-authority holder can still assert either
+ * classification, exactly the same honest limit already accepted for
+ * `ClosureApprovalReference.approverRef` (Rev111 F2) - protected
+ * authority is this repository's one consistent trust ceiling
+ * throughout, not a gap unique to this module.
  */
 export type ExecutionRoutingPolicy = "ROUTING_REQUIRED" | "MANUAL_EXECUTION_ALLOWED";
 
@@ -237,11 +266,15 @@ export interface ExecutionRoutingRequirement {
 export function createExecutionRoutingRequirement(input: {
   job: OutcomeJob;
   policy: ExecutionRoutingPolicy;
+  authority: AuthorityContext;
 }): ExecutionRoutingRequirement {
   if (input.policy !== "ROUTING_REQUIRED" && input.policy !== "MANUAL_EXECUTION_ALLOWED") {
     throw new InvalidExecutionRoutingRequirementError(
       `policy must be "ROUTING_REQUIRED" or "MANUAL_EXECUTION_ALLOWED"; got ${JSON.stringify(input.policy)}`,
     );
+  }
+  if (input.policy === "MANUAL_EXECUTION_ALLOWED") {
+    requireProtectedActionAuthorization(input.authority, "declareManualExecutionAllowed");
   }
   return {
     tenantId: input.job.tenantId,
