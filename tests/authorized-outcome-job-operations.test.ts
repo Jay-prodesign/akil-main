@@ -36,6 +36,13 @@ import {
   OutcomeJobClosureNotApprovedError,
 } from "../src/domain/outcome-job-closure-approval.js";
 import type { TenantScope } from "../src/domain/tenant-scope.js";
+import type { OutcomeJobSpec } from "../src/domain/outcome-job-spec.js";
+import {
+  admitServiceCatalogEntry,
+  type ServiceCatalogAdmission,
+} from "../src/domain/service-catalog-admission.js";
+import type { ServiceCatalogEntry } from "../src/domain/commercial-order.js";
+import { createDeliveryRecipe } from "../src/domain/delivery-recipe.js";
 
 const tenantScope = createTenantScope("tenant-a");
 const otherTenantScope = createTenantScope("tenant-b");
@@ -78,12 +85,54 @@ function elevatedAdmittedWorker(workerId: string): AdmittedWorker {
   };
 }
 
+const testRecipe = createDeliveryRecipe({
+  recipeId: "recipe-1",
+  version: 1,
+  jobFamily: "onboarding",
+  gates: [],
+  evidenceRequirements: [],
+  steps: [{ stepId: "step-1", recovery: "NO_EXTERNAL_EFFECT" }],
+});
+
+function outcomeJobSpecFor(job: OutcomeJob): OutcomeJobSpec {
+  return {
+    tenantId: job.tenantId,
+    projectId: job.projectId,
+    planId: "plan-1" as OutcomeJobSpec["planId"],
+    planVersion: 1,
+    specId: job.jobId as unknown as OutcomeJobSpec["specId"],
+    requirementId: "req-1" as OutcomeJobSpec["requirementId"],
+    jobFamily: job.jobFamily,
+    intendedOutcome: job.businessObjective,
+    prerequisites: [],
+    sourceBlueprintId: "blueprint-1" as OutcomeJobSpec["sourceBlueprintId"],
+    sourceBlueprintVersion: "1",
+  };
+}
+
+function admittedCatalogFor(spec: OutcomeJobSpec, workerId = "catalog-admin"): ServiceCatalogAdmission {
+  const catalogEntry: ServiceCatalogEntry = {
+    serviceRef: "service:website-build",
+    blueprintId: spec.sourceBlueprintId,
+    blueprintVersion: spec.sourceBlueprintVersion,
+    recipeId: testRecipe.recipeId,
+  };
+  return admitServiceCatalogEntry({
+    catalogEntry,
+    recipe: testRecipe,
+    authorizingWorker: elevatedAdmittedWorker(workerId),
+    evidenceRef: "evidence:catalog-admission-1",
+    admittedAt: "2026-09-15T00:00:00.000Z",
+  });
+}
+
 function admitManualExecutionRegistry(job: OutcomeJob): ExecutionRoutingRequirementRegistry {
   const registry = createExecutionRoutingRequirementRegistry();
-  registry.admitManualExecutionAllowedByAdmittedWorker({
+  const spec = outcomeJobSpecFor(job);
+  registry.admitManualExecutionAllowedFromServiceCatalogAdmission({
     job,
-    admittingWorker: elevatedAdmittedWorker("admin-worker"),
-    evidenceRef: "evidence:manual-admission-1",
+    spec,
+    admission: admittedCatalogFor(spec),
     admittedAt: "2026-09-15T00:00:00.000Z",
   });
   return registry;
@@ -362,10 +411,11 @@ test("Brain Rev114/115/116 F1 adversarial: authorizedTransitionOutcomeJob to EXE
     businessObjective: "Verify tenant isolation kernel end to end",
   });
   const registry = createExecutionRoutingRequirementRegistry();
-  registry.admitManualExecutionAllowedByAdmittedWorker({
+  const otherSpec = outcomeJobSpecFor(otherDraft);
+  registry.admitManualExecutionAllowedFromServiceCatalogAdmission({
     job: otherDraft,
-    admittingWorker: elevatedAdmittedWorker("admin-worker"),
-    evidenceRef: "evidence:other-job-admission",
+    spec: otherSpec,
+    admission: admittedCatalogFor(otherSpec),
     admittedAt: "2026-09-15T00:00:00.000Z",
   });
   assert.throws(
@@ -401,32 +451,76 @@ test("Brain Rev114/115/116 F1: an admitted MANUAL_EXECUTION_ALLOWED job preserve
   assert.equal(executing.state, "EXECUTING");
 });
 
-test("Brain Rev117/120: a STANDARD-authority AdmittedWorker (not ELEVATED) cannot admit a MANUAL_EXECUTION_ALLOWED requirement - the execution caller cannot self-classify a routing-required job as manual with an insufficiently-authoritative admitted identity", () => {
+test("Brain Rev122: admitManualExecutionAllowedFromServiceCatalogAdmission succeeds when the spec is the job's own (specId === jobId) and the admission covers the spec's own blueprint", () => {
   const job = readyJob();
   const registry = createExecutionRoutingRequirementRegistry();
+  const spec = outcomeJobSpecFor(job);
+  const requirement = registry.admitManualExecutionAllowedFromServiceCatalogAdmission({
+    job,
+    spec,
+    admission: admittedCatalogFor(spec),
+    admittedAt: "2026-09-15T00:00:00.000Z",
+  });
+  assert.equal(requirement.policy, "MANUAL_EXECUTION_ALLOWED");
+});
+
+test("Brain Rev122 adversarial (first-writer elevated-worker bypass, closed): a spec belonging to a DIFFERENT job cannot be used to admit MANUAL_EXECUTION_ALLOWED for this job, even with a real ADMITTED catalog admission", () => {
+  const job = readyJob();
+  const otherDraft = createOutcomeJob({
+    tenantScope,
+    customer,
+    project,
+    jobId: "job-5",
+    jobFamily: "onboarding",
+    businessObjective: "Verify tenant isolation kernel end to end",
+  });
+  const registry = createExecutionRoutingRequirementRegistry();
+  const otherSpec = outcomeJobSpecFor(otherDraft);
   assert.throws(
-    () => registry.admitManualExecutionAllowedByAdmittedWorker({
+    () => registry.admitManualExecutionAllowedFromServiceCatalogAdmission({
       job,
-      admittingWorker: admittedWorker("standard-worker"),
-      evidenceRef: "evidence:standard-worker-attempt",
+      spec: otherSpec,
+      admission: admittedCatalogFor(otherSpec),
       admittedAt: "2026-09-15T00:00:00.000Z",
     }),
     InvalidExecutionRoutingRequirementError,
   );
 });
 
-test("Brain Rev121: an UNTRUSTED/REVOKED AdmittedWorker with authorityLevel ELEVATED still cannot admit a MANUAL_EXECUTION_ALLOWED requirement - trustStatus === ADMITTED is required in addition to ELEVATED authority, mirroring admitServiceCatalogEntry's own double-check", () => {
+test("Brain Rev122 adversarial: a REVOKED ServiceCatalogAdmission cannot admit MANUAL_EXECUTION_ALLOWED even though it was created by a real ELEVATED+ADMITTED worker", () => {
   const job = readyJob();
   const registry = createExecutionRoutingRequirementRegistry();
-  const revokedElevatedWorker: AdmittedWorker = {
-    ...elevatedAdmittedWorker("rogue-elevated-worker"),
-    trustStatus: "REVOKED",
+  const spec = outcomeJobSpecFor(job);
+  const revokedAdmission: ServiceCatalogAdmission = {
+    ...admittedCatalogFor(spec),
+    status: "REVOKED",
+    revokedAt: "2026-09-15T00:00:01.000Z",
+    revokedReason: "test revocation",
   };
   assert.throws(
-    () => registry.admitManualExecutionAllowedByAdmittedWorker({
+    () => registry.admitManualExecutionAllowedFromServiceCatalogAdmission({
       job,
-      admittingWorker: revokedElevatedWorker,
-      evidenceRef: "evidence:revoked-elevated-attempt",
+      spec,
+      admission: revokedAdmission,
+      admittedAt: "2026-09-15T00:00:00.000Z",
+    }),
+    InvalidExecutionRoutingRequirementError,
+  );
+});
+
+test("Brain Rev122 adversarial: an ADMITTED catalog admission covering a DIFFERENT blueprint version cannot admit MANUAL_EXECUTION_ALLOWED for this job's own spec", () => {
+  const job = readyJob();
+  const registry = createExecutionRoutingRequirementRegistry();
+  const spec = outcomeJobSpecFor(job);
+  const mismatchedAdmission: ServiceCatalogAdmission = {
+    ...admittedCatalogFor(spec),
+    blueprintVersion: "999",
+  };
+  assert.throws(
+    () => registry.admitManualExecutionAllowedFromServiceCatalogAdmission({
+      job,
+      spec,
+      admission: mismatchedAdmission,
       admittedAt: "2026-09-15T00:00:00.000Z",
     }),
     InvalidExecutionRoutingRequirementError,
@@ -470,14 +564,15 @@ test("Brain Rev121 adversarial (unrelated-routing-decision): a RoutedExecutionAs
   );
 });
 
-test("Brain Rev118/119: once a job is admitted ROUTING_REQUIRED, a SECOND admission attempt claiming MANUAL_EXECUTION_ALLOWED throws even with a real elevated AdmittedWorker - the execution-time caller cannot retroactively relabel an already-admitted routing-required job", () => {
+test("Brain Rev118/119: once a job is admitted ROUTING_REQUIRED, a SECOND admission attempt claiming MANUAL_EXECUTION_ALLOWED throws even with a real ServiceCatalogAdmission - the execution-time caller cannot retroactively relabel an already-admitted routing-required job", () => {
   const job = readyJob();
   const registry = admitRoutingRequiredRegistry(job);
+  const spec = outcomeJobSpecFor(job);
   assert.throws(
-    () => registry.admitManualExecutionAllowedByAdmittedWorker({
+    () => registry.admitManualExecutionAllowedFromServiceCatalogAdmission({
       job,
-      admittingWorker: elevatedAdmittedWorker("admin-worker"),
-      evidenceRef: "evidence:relabel-attempt",
+      spec,
+      admission: admittedCatalogFor(spec),
       admittedAt: "2026-09-15T00:00:01.000Z",
     }),
     ExecutionRoutingRequirementAlreadyAdmittedError,

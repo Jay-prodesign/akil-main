@@ -2,7 +2,9 @@ import type { TenantScope } from "./tenant-scope.js";
 import type { Customer } from "./customer.js";
 import type { Project } from "./project.js";
 import { transitionOutcomeJob, type OutcomeJob } from "./outcome-job.js";
-import type { WorkerRoutingDecision, AdmittedWorker } from "./worker-routing-policy.js";
+import type { WorkerRoutingDecision } from "./worker-routing-policy.js";
+import type { OutcomeJobSpec } from "./outcome-job-spec.js";
+import type { ServiceCatalogAdmission } from "./service-catalog-admission.js";
 
 export class InvalidRoutedExecutionAssignmentError extends Error {
   constructor(reason: string) {
@@ -396,17 +398,66 @@ function executionRoutingRequirementKey(scope: {
  *   requires a real, already-vetted worker identity, not merely a
  *   permission flag.
  *
- * Honest limit carried forward: neither path yet independently derives
- * policy from a real *service/plan-level* "this job requires/does not
- * require routing" fact composed from `service-catalog-admission.ts`/
- * `commercial-order.ts`/plan-admission - Brain's own Rev120 note names
- * that as the eventual real source of truth, and this checkpoint does
- * not fabricate it. What this closes is the two concrete gaps Rev120
- * found: a bare WRITE-only caller can no longer admit `ROUTING_REQUIRED`
- * without a real routing decision to back it, and no caller can admit
- * `MANUAL_EXECUTION_ALLOWED` without a real, elevated, already-admitted
- * worker identity vouching for it - generic protected-action authority
- * alone is no longer sufficient for either.
+ * Honest limit carried forward from Rev120: neither path independently
+ * derived policy from a real *service/plan-level* "this job requires/does
+ * not require routing" fact composed from `service-catalog-admission.ts`/
+ * `commercial-order.ts`/plan-admission.
+ *
+ * Brain Rev122 correction (independent exact-head review of head `dca29bd`,
+ * the Rev121 fix): confirmed the ROUTING side resolved (`admitRoutingRequiredFromAssignment`'s
+ * job-bound `RoutedExecutionAssignment` requirement is sufficient), but the
+ * MANUAL side was not: `admitManualExecutionAllowedByAdmittedWorker`'s
+ * `trustStatus`/`authorityLevel`/`evidenceRef` checks prove an admitted,
+ * elevated worker made *some* evidenced decision, but that worker and that
+ * evidence have zero required connection to *this exact job* - any
+ * ADMITTED+ELEVATED worker with a caller-supplied `evidenceRef` string can
+ * still first-admit `MANUAL_EXECUTION_ALLOWED` for an arbitrary job. Brain's
+ * required correction: bind MANUAL admission to a provenance-bearing
+ * authoritative exact-job execution-policy fact derived/reused from the
+ * trusted service/catalog + commercial order/plan/job admission chain - and
+ * if the required job↔service/plan binding does not yet exist, implement
+ * the smallest honest adapter rather than continue deferring it.
+ *
+ * `admitManualExecutionAllowedByAdmittedWorker` is therefore replaced by
+ * `admitManualExecutionAllowedFromServiceCatalogAdmission`, which no longer
+ * accepts a bare worker/evidenceRef pair at all. It requires:
+ *
+ * - `spec: OutcomeJobSpec` - the exact plan-compilation record this runtime
+ *   job was wired from. `outcome-job-wiring.ts`'s own `wireAdmittedOutcomeJobs`
+ *   derives `OutcomeJob.jobId` deterministically and verbatim from
+ *   `OutcomeJobSpec.specId` (Rev62 AUD-DEL-02's own uniqueness fix), so
+ *   `spec.specId === job.jobId` is real proof this spec is the one this
+ *   exact job came from, not a caller-asserted label - a spec belonging to
+ *   any other job can never satisfy this check.
+ * - `admission: ServiceCatalogAdmission` (`service-catalog-admission.ts`,
+ *   Family 1, already Brain-reviewed at Rev102) - a real admission is only
+ *   ever producible via `admitServiceCatalogEntry`, which itself already
+ *   requires `trustStatus: "ADMITTED"` *and* `authorityLevel: "ELEVATED"`
+ *   plus a non-empty `evidenceRef` (the exact pair Rev122 found this
+ *   module's own worker-vouching path was missing the job-binding half of).
+ *   This function additionally requires `admission.status === "ADMITTED"`
+ *   (a `REVOKED` admission can never vouch for anything) and
+ *   `admission.blueprintId`/`admission.blueprintVersion` to match
+ *   `spec.sourceBlueprintId`/`spec.sourceBlueprintVersion` exactly - the
+ *   admitted catalog entry must actually cover the same blueprint version
+ *   this job's own requirement was compiled from, not merely exist
+ *   somewhere in the tenant's catalog.
+ *
+ * Chained together, these two checks are the smallest honest adapter Brain
+ * asked for: `job` -> (by construction) `spec` -> (by blueprint match)
+ * `admission` -> (by construction) the ELEVATED+ADMITTED authority that
+ * created it. No caller-supplied `evidenceRef`/worker is accepted directly
+ * any more - the resulting requirement's `admittedByAuthorityId`/`evidenceRef`
+ * are copied verbatim from the real `admission` record itself, so the
+ * provenance is the catalog admission's own, not a fresh claim invented at
+ * this call site. Honest limit still disclosed: `ServiceCatalogAdmission`
+ * itself carries no explicit "requires routing vs. manual" boolean - this
+ * proves the job's originating requirement traces to a real, currently
+ * trusted, evidenced service/catalog entry (the same "canonical service
+ * boundary" Family 1 already established), which this checkpoint treats as
+ * the legitimacy fact for non-routed manual execution; a still-more precise
+ * per-service routing-vs-manual flag remains a candidate for a future
+ * correction if Brain judges the current binding insufficient.
  *
  * `admit*` are the only ways to produce an `ExecutionRoutingRequirement` -
  * there is no other exported constructor. Called once, at admission
@@ -423,10 +474,10 @@ export interface ExecutionRoutingRequirementRegistry {
     assignment: RoutedExecutionAssignment;
     admittedAt: unknown;
   }): ExecutionRoutingRequirement;
-  admitManualExecutionAllowedByAdmittedWorker(input: {
+  admitManualExecutionAllowedFromServiceCatalogAdmission(input: {
     job: OutcomeJob;
-    admittingWorker: AdmittedWorker;
-    evidenceRef: unknown;
+    spec: OutcomeJobSpec;
+    admission: ServiceCatalogAdmission;
     admittedAt: unknown;
   }): ExecutionRoutingRequirement;
   lookup(job: OutcomeJob): ExecutionRoutingRequirement | undefined;
@@ -473,21 +524,33 @@ export function createExecutionRoutingRequirementRegistry(): ExecutionRoutingReq
       }
       return admit(input.job, "ROUTING_REQUIRED", input.admittedAt);
     },
-    admitManualExecutionAllowedByAdmittedWorker(input) {
-      if (input.admittingWorker.trustStatus !== "ADMITTED") {
+    admitManualExecutionAllowedFromServiceCatalogAdmission(input) {
+      if ((input.spec.specId as string) !== (input.job.jobId as string)) {
         throw new InvalidExecutionRoutingRequirementError(
-          `admittingWorker.trustStatus must be "ADMITTED" to admit MANUAL_EXECUTION_ALLOWED (got ${JSON.stringify(input.admittingWorker.trustStatus)}) - an unproven/untrusted worker identity cannot vouch for this job's execution policy, mirroring service-catalog-admission.ts's own admitServiceCatalogEntry boundary`,
+          "spec.specId must equal job.jobId - the supplied OutcomeJobSpec must be the exact spec this runtime job was wired from, not a spec for a different job",
         );
       }
-      if (input.admittingWorker.authorityLevel !== "ELEVATED") {
+      if (input.spec.tenantId !== input.job.tenantId || input.spec.projectId !== input.job.projectId) {
         throw new InvalidExecutionRoutingRequirementError(
-          `admittingWorker.authorityLevel must be "ELEVATED" to admit MANUAL_EXECUTION_ALLOWED; got ${JSON.stringify(input.admittingWorker.authorityLevel)}`,
+          "spec.tenantId/projectId must match job.tenantId/projectId",
         );
       }
-      const evidenceRef = requireNonEmptyExecutionRoutingField(input.evidenceRef, "evidenceRef");
+      if (input.admission.status !== "ADMITTED") {
+        throw new InvalidExecutionRoutingRequirementError(
+          `admission.status must be "ADMITTED" to admit MANUAL_EXECUTION_ALLOWED (got ${JSON.stringify(input.admission.status)}) - a revoked service catalog admission cannot vouch for this job's execution policy`,
+        );
+      }
+      if (
+        input.admission.blueprintId !== input.spec.sourceBlueprintId ||
+        input.admission.blueprintVersion !== input.spec.sourceBlueprintVersion
+      ) {
+        throw new InvalidExecutionRoutingRequirementError(
+          "admission.blueprintId/blueprintVersion must match spec.sourceBlueprintId/sourceBlueprintVersion - an admission covering a different blueprint version can never vouch for this job's own requirement",
+        );
+      }
       return admit(input.job, "MANUAL_EXECUTION_ALLOWED", input.admittedAt, {
-        admittedByAuthorityId: input.admittingWorker.workerId,
-        evidenceRef,
+        admittedByAuthorityId: input.admission.admittedByAuthorityId,
+        evidenceRef: input.admission.evidenceRef,
       });
     },
     lookup(job) {

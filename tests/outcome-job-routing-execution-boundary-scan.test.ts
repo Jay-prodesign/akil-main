@@ -63,24 +63,28 @@ test("Brain Rev121: createExecutionRoutingRequirementRegistry's admitRoutingRequ
   assert.ok(validityCheckIndex < admitCallIndex, "the assignment-validity check must run before the requirement is ever admitted");
 });
 
-test("Brain Rev121: createExecutionRoutingRequirementRegistry's admitManualExecutionAllowedByAdmittedWorker requires trustStatus === ADMITTED (mirroring service-catalog-admission.ts's own admitServiceCatalogEntry double-check), not just authorityLevel === ELEVATED alone", () => {
+test("Brain Rev122: createExecutionRoutingRequirementRegistry's admitManualExecutionAllowedFromServiceCatalogAdmission requires spec.specId === job.jobId, admission.status === ADMITTED, and admission.blueprintId/blueprintVersion to match spec.sourceBlueprintId/sourceBlueprintVersion - not a bare worker/evidenceRef pair - before ever delegating to the shared admit helper (which performs the map write)", () => {
   const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
   const fnStart = content.indexOf("export function createExecutionRoutingRequirementRegistry");
   const nextFnStart = content.indexOf("export function", fnStart + 1);
   const fnBody = content.slice(fnStart, nextFnStart >= 0 ? nextFnStart : undefined);
-  const methodStart = fnBody.indexOf("admitManualExecutionAllowedByAdmittedWorker(input) {");
-  assert.ok(methodStart >= 0, "admitManualExecutionAllowedByAdmittedWorker not found");
+  const methodStart = fnBody.indexOf("admitManualExecutionAllowedFromServiceCatalogAdmission(input) {");
+  assert.ok(methodStart >= 0, "admitManualExecutionAllowedFromServiceCatalogAdmission not found");
   const methodEnd = fnBody.indexOf("\n    },", methodStart);
   const methodBody = fnBody.slice(methodStart, methodEnd >= 0 ? methodEnd : undefined);
-  const trustCheckIndex = methodBody.indexOf('trustStatus !== "ADMITTED"');
-  const elevatedCheckIndex = methodBody.indexOf('authorityLevel !== "ELEVATED"');
-  const evidenceCheckIndex = methodBody.indexOf('requireNonEmptyExecutionRoutingField(input.evidenceRef, "evidenceRef")');
+  const specIdCheckIndex = methodBody.indexOf("input.spec.specId");
+  const statusCheckIndex = methodBody.indexOf('input.admission.status !== "ADMITTED"');
+  const blueprintCheckIndex = methodBody.indexOf("input.admission.blueprintId !== input.spec.sourceBlueprintId");
   const admitCallIndex = methodBody.indexOf("return admit(");
-  assert.ok(trustCheckIndex >= 0, "expected an explicit trustStatus === ADMITTED check");
-  assert.ok(elevatedCheckIndex >= 0, "expected an explicit authorityLevel === ELEVATED check");
-  assert.ok(evidenceCheckIndex >= 0, "expected a required non-empty evidenceRef");
+  assert.ok(specIdCheckIndex >= 0, "expected an explicit spec.specId === job.jobId check");
+  assert.ok(statusCheckIndex >= 0, "expected an explicit admission.status === ADMITTED check");
+  assert.ok(blueprintCheckIndex >= 0, "expected an explicit blueprint match check");
   assert.ok(admitCallIndex >= 0, "expected this method to delegate to the shared admit helper");
-  assert.ok(trustCheckIndex < admitCallIndex && elevatedCheckIndex < admitCallIndex && evidenceCheckIndex < admitCallIndex, "every authoritative-fact check must run before delegating to admit (which writes the map)");
+  assert.ok(
+    specIdCheckIndex < admitCallIndex && statusCheckIndex < admitCallIndex && blueprintCheckIndex < admitCallIndex,
+    "every authoritative-fact check must run before delegating to admit (which writes the map)",
+  );
+  assert.doesNotMatch(methodBody.slice(0, admitCallIndex), /admittingWorker/, "the new method must not accept a bare worker parameter at all");
 });
 
 test("Brain Rev120: this module no longer imports AuthorityContext/requireProtectedActionAuthorization from authority.js - the initial policy is bound to WorkerRoutingDecision/AdmittedWorker, not a generic tenant-level authority check", () => {
