@@ -17,12 +17,21 @@ import {
   authorizedTransitionOutcomeJob,
   authorizedVerifyOutcomeJob,
   authorizedTransitionOutcomeJobToExecutingViaRouting,
+  authorizedCloseOutcomeJobWithApproval,
+  ClosureRequiresApprovalGateError,
+  MissingExecutionRoutingRequirementError,
+  ExecutionRequiresRoutingGateError,
 } from "../src/application/authorized-outcome-job-operations.js";
 import {
   createRoutedExecutionAssignment,
+  createExecutionRoutingRequirement,
   OutcomeJobExecutionNotRoutedError,
 } from "../src/domain/outcome-job-routing-execution.js";
 import { resolveWorkerRoute, type AdmittedWorker } from "../src/domain/worker-routing-policy.js";
+import {
+  createClosureApprovalReference,
+  OutcomeJobClosureNotApprovedError,
+} from "../src/domain/outcome-job-closure-approval.js";
 import type { TenantScope } from "../src/domain/tenant-scope.js";
 
 const tenantScope = createTenantScope("tenant-a");
@@ -55,7 +64,12 @@ function jobAtVerifying(businessObjective?: string): OutcomeJob {
   let job = draftJob(businessObjective);
   job = authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "QUALIFIED");
   job = authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "READY");
-  job = authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING");
+  job = authorizedTransitionOutcomeJob(
+    fullWriteAuthority(),
+    job,
+    "EXECUTING",
+    createExecutionRoutingRequirement({ job, policy: "MANUAL_EXECUTION_ALLOWED" }),
+  );
   job = authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "VERIFYING");
   return job;
 }
@@ -285,6 +299,128 @@ test("Rev98 Family 12 (routing glue) / T2: full-permission authority for a diffe
   const crossTenantAuthority = fullWriteAuthority(otherTenantScope);
   assert.throws(
     () => authorizedTransitionOutcomeJobToExecutingViaRouting(crossTenantAuthority, job, routedAssignmentFor(job)),
+    CrossTenantAuthorityError,
+  );
+});
+
+test("Brain Rev114/115/116 F1: authorizedTransitionOutcomeJob to EXECUTING fails closed with no ExecutionRoutingRequirement at all - a READY job never reaches EXECUTING through the ordinary path by default", () => {
+  const job = readyJob();
+  assert.throws(
+    () => authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING"),
+    MissingExecutionRoutingRequirementError,
+  );
+});
+
+test("Brain Rev114/115/116 F1 adversarial: authorizedTransitionOutcomeJob to EXECUTING fails closed with an ExecutionRoutingRequirement bound to a different job", () => {
+  const job = readyJob();
+  const otherDraft = createOutcomeJob({
+    tenantScope,
+    customer,
+    project,
+    jobId: "job-3",
+    jobFamily: "onboarding",
+    businessObjective: "Verify tenant isolation kernel end to end",
+  });
+  const mismatchedRequirement = createExecutionRoutingRequirement({
+    job: otherDraft,
+    policy: "MANUAL_EXECUTION_ALLOWED",
+  });
+  assert.throws(
+    () => authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING", mismatchedRequirement),
+    MissingExecutionRoutingRequirementError,
+  );
+});
+
+test("Brain Rev114/115/116 F1: a ROUTING_REQUIRED job can never reach EXECUTING through the ordinary authorizedTransitionOutcomeJob path, even with full WRITE authority", () => {
+  const job = readyJob();
+  const requirement = createExecutionRoutingRequirement({ job, policy: "ROUTING_REQUIRED" });
+  assert.throws(
+    () => authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING", requirement),
+    ExecutionRequiresRoutingGateError,
+  );
+  assert.equal(job.state, "READY");
+});
+
+test("Brain Rev114/115/116 F1: a ROUTING_REQUIRED job succeeds only through authorizedTransitionOutcomeJobToExecutingViaRouting with a matching ROUTED assignment", () => {
+  const job = readyJob();
+  const executing = authorizedTransitionOutcomeJobToExecutingViaRouting(
+    fullWriteAuthority(),
+    job,
+    routedAssignmentFor(job),
+  );
+  assert.equal(executing.state, "EXECUTING");
+});
+
+test("Brain Rev114/115/116 F1: an explicitly MANUAL_EXECUTION_ALLOWED job preserves the ordinary authorizedTransitionOutcomeJob path with no routing assignment at all", () => {
+  const job = readyJob();
+  const requirement = createExecutionRoutingRequirement({ job, policy: "MANUAL_EXECUTION_ALLOWED" });
+  const executing = authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING", requirement);
+  assert.equal(executing.state, "EXECUTING");
+});
+
+function verifiedJob(): OutcomeJob {
+  const job = jobAtVerifying();
+  return authorizedVerifyOutcomeJob(fullProtectedAuthority(), job, passingVerificationResultFor(job));
+}
+
+function validApprovalFor(job: OutcomeJob) {
+  return createClosureApprovalReference({
+    job,
+    closureApprovalId: "closure-approval-1",
+    approvedAt: "2026-09-12T00:00:00.000Z",
+    approverRef: "approver-1",
+  });
+}
+
+test("Rev111 F1: authorizedTransitionOutcomeJob rejects CLOSED even with full WRITE authority - closure must use the approval gate", () => {
+  const job = verifiedJob();
+  assert.throws(
+    () => authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "CLOSED"),
+    ClosureRequiresApprovalGateError,
+  );
+  assert.equal(job.state, "VERIFIED");
+});
+
+test("Rev111 F1 adversarial: authorizedTransitionOutcomeJob rejects CLOSED even with full protected authority (EXECUTE + canPerformProtectedActions) - only the dedicated closure path may close a job", () => {
+  const job = verifiedJob();
+  assert.throws(
+    () => authorizedTransitionOutcomeJob(fullProtectedAuthority(), job, "CLOSED"),
+    ClosureRequiresApprovalGateError,
+  );
+});
+
+test("Rev111: EXECUTE without protected-action authorization cannot close a job even with a valid approval", () => {
+  const job = verifiedJob();
+  assert.throws(
+    () =>
+      authorizedCloseOutcomeJobWithApproval(
+        executeWithoutProtectedAuthority(),
+        job,
+        validApprovalFor(job),
+      ),
+    ProtectedActionNotAuthorizedError,
+  );
+});
+
+test("Rev111 F2 adversarial: full protected authority alone cannot close a job without a valid ClosureApprovalReference - protected-action authority does not substitute for approval", () => {
+  const job = verifiedJob();
+  assert.throws(
+    () => authorizedCloseOutcomeJobWithApproval(fullProtectedAuthority(), job, undefined),
+    OutcomeJobClosureNotApprovedError,
+  );
+});
+
+test("Rev111: full protected authority with a valid, exactly-matching approval closes the job", () => {
+  const job = verifiedJob();
+  const closed = authorizedCloseOutcomeJobWithApproval(fullProtectedAuthority(), job, validApprovalFor(job));
+  assert.equal(closed.state, "CLOSED");
+});
+
+test("Rev111 / T2 adversarial: full protected authority for a different tenant cannot close this job even with an approval built from this job's own real fields", () => {
+  const job = verifiedJob();
+  const crossTenantAuthority = fullProtectedAuthority(otherTenantScope);
+  assert.throws(
+    () => authorizedCloseOutcomeJobWithApproval(crossTenantAuthority, job, validApprovalFor(job)),
     CrossTenantAuthorityError,
   );
 });

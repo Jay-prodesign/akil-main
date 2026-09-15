@@ -41,24 +41,32 @@ export class OutcomeJobExecutionNotRoutedError extends Error {
  * repository follows), and `authorizeOutcomeJobExecutionFromRouting`
  * requires a valid, matching assignment before delegating the actual
  * transition entirely to the existing, unmodified `transitionOutcomeJob`.
- * `outcome-job.ts` itself is untouched - the existing bare
- * `transitionOutcomeJob(readyJob, "EXECUTING")` path remains available to
- * any caller who does not opt into this stricter, dedicated path, exactly
- * mirroring how `closeOutcomeJobWithApproval` and `verifyOutcomeJob` are
- * each stricter gates layered *next to* the generic transition table
- * rather than replacing it. Narrowing `authorizedTransitionOutcomeJob`
- * itself to reject `EXECUTING` (the way the Family-12 closure-gate
- * correction narrowed it for `CLOSED`) is deliberately NOT done here: PR
- * #58's own precedent for that narrowing was a real, empirically-
- * demonstrated bypass with zero legitimate existing callers of the
- * ordinary path for that exact transition; no equivalent audit finding
- * exists yet for `EXECUTING`, and `authorizedTransitionOutcomeJob` is
- * exercised for `EXECUTING` throughout this repository's own existing,
- * already Brain-reviewed test suites (e.g. every `jobAtVerifying`-style
- * helper) as ordinary, non-routed staff-initiated work. Retroactively
- * closing that path here would be an unreviewed, overreaching behavior
- * change to already-verified callers, not a bounded addition - exactly
- * the discipline this checkpoint's own governing `CLAUDE.md` forbids.
+ * `outcome-job.ts` itself is untouched.
+ *
+ * Brain Rev114/115/116 correction (superseding the original reasoning
+ * that used to appear in this comment): narrowing
+ * `authorizedTransitionOutcomeJob` itself to reject `EXECUTING`
+ * unconditionally, the way the Family-12 closure-gate correction
+ * narrowed it for `CLOSED`, was deliberately NOT done here at first,
+ * reasoning that no equivalent empirically-demonstrated bypass existed
+ * yet and that `authorizedTransitionOutcomeJob` is exercised for
+ * `EXECUTING` throughout this repository's own existing, already
+ * Brain-reviewed test suites (e.g. every `jobAtVerifying`-style helper)
+ * as ordinary, non-routed staff-initiated work. Brain's review found
+ * this incomplete: leaving `EXECUTING` universally open meant a
+ * routing-required Family-12/Cold-Start job could bypass
+ * `RoutedExecutionAssignment` entirely through the same ordinary path -
+ * structurally identical to the `CLOSED` bypass, just for a job whose
+ * own admitted policy actually requires routing. The corrected
+ * disposition (see `ExecutionRoutingRequirement` below and
+ * `authorized-outcome-job-operations.ts`'s own updated doc comment) is
+ * neither "always open" nor "always narrowed": `EXECUTING` now requires
+ * an explicit, scope-bound `ExecutionRoutingRequirement` for every
+ * caller, and only a `ROUTING_REQUIRED` classification forces the
+ * dedicated routed path - `MANUAL_EXECUTION_ALLOWED` preserves the
+ * legitimate non-routed path exactly as before, so existing
+ * Brain-reviewed callers are not retroactively broken, only required to
+ * state which kind of job they hold.
  *
  * `PartnerRoutingDecision` (`partner-routing-decision.ts`) is a distinct,
  * separately-scoped routing concept (external partner-organization
@@ -175,4 +183,89 @@ export function authorizeOutcomeJobExecutionFromRouting(input: {
     throw new OutcomeJobExecutionNotRoutedError(input.job.jobId);
   }
   return transitionOutcomeJob(input.job, "EXECUTING");
+}
+
+export class InvalidExecutionRoutingRequirementError extends Error {
+  constructor(reason: string) {
+    super(`Invalid ExecutionRoutingRequirement: ${reason}`);
+    this.name = "InvalidExecutionRoutingRequirementError";
+  }
+}
+
+/**
+ * Brain Rev114/115/116 (independent exact-head review of this checkpoint):
+ * the reasoning above for why `authorizedTransitionOutcomeJob`'s ordinary
+ * `EXECUTING` path is left open was correct for the *general* case
+ * (non-routed staff-initiated work genuinely exists and must keep
+ * working), but incomplete: it left every `EXECUTING` transition -
+ * including jobs whose own admitted policy actually requires routing -
+ * reachable through that same ordinary path with no way to tell the two
+ * apart at the enforcement boundary. A routing-required Family-12/
+ * Cold-Start job could still bypass `RoutedExecutionAssignment` entirely
+ * by calling the plain `authorizedTransitionOutcomeJob(job, "EXECUTING")`
+ * - structurally the same opt-in/bypass class Rev111 already found (and
+ * fixed) for approval -> closure.
+ *
+ * No existing primitive in this repository already, honestly represents
+ * whether a given `OutcomeJob` requires routed execution (`OutcomeJob`
+ * itself carries only a free-form `jobFamily` label; `ServiceCatalogAdmission`/
+ * `commercial-order.ts` describe *what* service was ordered, never
+ * whether its fulfillment must go through admitted worker routing).
+ * Rather than fabricate that policy inside this module, or force every
+ * non-EXECUTING transition through a new mandatory parameter it has
+ * nothing to do with, `ExecutionRoutingRequirement` is the smallest
+ * addition that makes the true caller-side classification explicit,
+ * scope-bound, and impossible to silently omit for `EXECUTING`
+ * specifically - mirroring exactly the same honesty `ClosureApprovalReference`
+ * already discloses for `approverRef` (Rev111 F2): this is the caller's
+ * own admitted-policy classification for this exact job, not an
+ * independently re-derived fact, and the module's contract is only that
+ * a `ROUTING_REQUIRED` classification can never be satisfied by the
+ * ordinary path - never that this repository independently proves which
+ * jobs truly require routing.
+ */
+export type ExecutionRoutingPolicy = "ROUTING_REQUIRED" | "MANUAL_EXECUTION_ALLOWED";
+
+export interface ExecutionRoutingRequirement {
+  readonly tenantId: TenantScope["tenantId"];
+  readonly customerId: Customer["customerId"];
+  readonly projectId: Project["projectId"];
+  readonly jobId: OutcomeJob["jobId"];
+  readonly policy: ExecutionRoutingPolicy;
+}
+
+export function createExecutionRoutingRequirement(input: {
+  job: OutcomeJob;
+  policy: ExecutionRoutingPolicy;
+}): ExecutionRoutingRequirement {
+  if (input.policy !== "ROUTING_REQUIRED" && input.policy !== "MANUAL_EXECUTION_ALLOWED") {
+    throw new InvalidExecutionRoutingRequirementError(
+      `policy must be "ROUTING_REQUIRED" or "MANUAL_EXECUTION_ALLOWED"; got ${JSON.stringify(input.policy)}`,
+    );
+  }
+  return {
+    tenantId: input.job.tenantId,
+    customerId: input.job.customerId,
+    projectId: input.job.projectId,
+    jobId: input.job.jobId,
+    policy: input.policy,
+  };
+}
+
+/**
+ * Fail-closed on every scoping dimension, identical discipline to
+ * `isRoutedExecutionAssignmentValidForJob`: a requirement declared for
+ * one tenant/customer/project/job never silently validates a different
+ * one.
+ */
+export function isExecutionRoutingRequirementValidForJob(
+  requirement: ExecutionRoutingRequirement,
+  job: OutcomeJob,
+): boolean {
+  return (
+    requirement.tenantId === job.tenantId &&
+    requirement.customerId === job.customerId &&
+    requirement.projectId === job.projectId &&
+    requirement.jobId === job.jobId
+  );
 }

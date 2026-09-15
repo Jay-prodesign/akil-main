@@ -51,10 +51,13 @@ test("outcome-job-routing-execution: createRoutedExecutionAssignment rejects any
 test("outcome-job-routing-execution: module exports exactly the expected surface", () => {
   const exportedKeys = Object.keys(OutcomeJobRoutingExecution).sort();
   assert.deepEqual(exportedKeys, [
+    "InvalidExecutionRoutingRequirementError",
     "InvalidRoutedExecutionAssignmentError",
     "OutcomeJobExecutionNotRoutedError",
     "authorizeOutcomeJobExecutionFromRouting",
+    "createExecutionRoutingRequirement",
     "createRoutedExecutionAssignment",
+    "isExecutionRoutingRequirementValidForJob",
     "isRoutedExecutionAssignmentValidForJob",
   ]);
 });
