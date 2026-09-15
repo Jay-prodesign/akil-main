@@ -87,6 +87,25 @@ test("Brain Rev122: createExecutionRoutingRequirementRegistry's admitManualExecu
   assert.doesNotMatch(methodBody.slice(0, admitCallIndex), /admittingWorker/, "the new method must not accept a bare worker parameter at all");
 });
 
+test("Brain Rev123/124: admitManualExecutionAllowedFromServiceCatalogAdmission requires admission.executionRoutingPolicy === MANUAL_EXECUTION_ALLOWED before ever delegating to the shared admit helper - catalog trust (status/blueprint match) alone is not sufficient", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  const fnStart = content.indexOf("export function createExecutionRoutingRequirementRegistry");
+  const nextFnStart = content.indexOf("export function", fnStart + 1);
+  const fnBody = content.slice(fnStart, nextFnStart >= 0 ? nextFnStart : undefined);
+  const methodStart = fnBody.indexOf("admitManualExecutionAllowedFromServiceCatalogAdmission(input) {");
+  assert.ok(methodStart >= 0, "admitManualExecutionAllowedFromServiceCatalogAdmission not found");
+  const methodEnd = fnBody.indexOf("\n    },", methodStart);
+  const methodBody = fnBody.slice(methodStart, methodEnd >= 0 ? methodEnd : undefined);
+  const routingPolicyCheckIndex = methodBody.indexOf('input.admission.executionRoutingPolicy !== "MANUAL_EXECUTION_ALLOWED"');
+  const admitCallIndex = methodBody.indexOf("return admit(");
+  assert.ok(routingPolicyCheckIndex >= 0, "expected an explicit admission.executionRoutingPolicy === MANUAL_EXECUTION_ALLOWED check");
+  assert.ok(admitCallIndex >= 0, "expected this method to delegate to the shared admit helper");
+  assert.ok(
+    routingPolicyCheckIndex < admitCallIndex,
+    "the executionRoutingPolicy discriminator check must run before the requirement is ever admitted",
+  );
+});
+
 test("Brain Rev120: this module no longer imports AuthorityContext/requireProtectedActionAuthorization from authority.js - the initial policy is bound to WorkerRoutingDecision/AdmittedWorker, not a generic tenant-level authority check", () => {
   const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
   assert.doesNotMatch(content, /from\s*["']\.\/authority\.js["']/);

@@ -104,6 +104,7 @@ test("resolveDeclaredServiceFromOrder resolves a serviceRef present in the catal
       blueprintId: WEBSITE_BUILD_V1_BLUEPRINT.blueprintId,
       blueprintVersion: WEBSITE_BUILD_V1_BLUEPRINT.version,
       recipeId: WEBSITE_BUILD_V1_RECIPE.recipeId,
+      executionRoutingPolicy: "MANUAL_EXECUTION_ALLOWED",
     },
   ];
   const resolution = resolveDeclaredServiceFromOrder(order, catalog);
@@ -130,6 +131,7 @@ test("resolveDeclaredServiceFromOrder returns UNRESOLVED_SERVICE, never a fabric
       blueprintId: WEBSITE_BUILD_V1_BLUEPRINT.blueprintId,
       blueprintVersion: WEBSITE_BUILD_V1_BLUEPRINT.version,
       recipeId: WEBSITE_BUILD_V1_RECIPE.recipeId,
+      executionRoutingPolicy: "MANUAL_EXECUTION_ALLOWED",
     },
   ];
   const resolution = resolveDeclaredServiceFromOrder(order, catalog);
@@ -165,12 +167,14 @@ test("resolveDeclaredServiceFromOrder throws (never guesses) on an ambiguous cat
       blueprintId: WEBSITE_BUILD_V1_BLUEPRINT.blueprintId,
       blueprintVersion: WEBSITE_BUILD_V1_BLUEPRINT.version,
       recipeId: WEBSITE_BUILD_V1_RECIPE.recipeId,
+      executionRoutingPolicy: "MANUAL_EXECUTION_ALLOWED",
     },
     {
       serviceRef: "service:dup",
       blueprintId: WEBSITE_BUILD_V1_BLUEPRINT.blueprintId,
       blueprintVersion: "2.0.0",
       recipeId: WEBSITE_BUILD_V1_RECIPE.recipeId,
+      executionRoutingPolicy: "MANUAL_EXECUTION_ALLOWED",
     },
   ];
   assert.throws(
@@ -193,6 +197,7 @@ test("resolveDeclaredServiceFromOrder never substitutes a different serviceRef's
       blueprintId: WEBSITE_BUILD_V1_BLUEPRINT.blueprintId,
       blueprintVersion: WEBSITE_BUILD_V1_BLUEPRINT.version,
       recipeId: WEBSITE_BUILD_V1_RECIPE.recipeId,
+      executionRoutingPolicy: "MANUAL_EXECUTION_ALLOWED",
     },
   ];
   const resolution = resolveDeclaredServiceFromOrder(order, catalog);
@@ -216,6 +221,7 @@ test("Rev74 F1 (honest boundary disclosure): resolveDeclaredServiceFromOrder has
       blueprintId: "forged-blueprint-id" as OfferBlueprintVersion["blueprintId"],
       blueprintVersion: "forged-version" as OfferBlueprintVersion["version"],
       recipeId: "forged-recipe-id" as DeliveryRecipe["recipeId"],
+      executionRoutingPolicy: "MANUAL_EXECUTION_ALLOWED",
     },
   ];
   const resolution = resolveDeclaredServiceFromOrder(order, forgedCatalog);

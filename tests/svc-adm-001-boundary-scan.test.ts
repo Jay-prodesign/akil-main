@@ -12,7 +12,7 @@ test("SVC-ADM-001: imports only sibling domain modules by type - no filesystem, 
   const content = readFileSync(join(REPO_ROOT, SVC_ADM_FILE), "utf8");
   const importLines = content.split("\n").filter((line) => /^\s*import\b/.test(line));
   assert.deepEqual(importLines, [
-    'import type { CommercialOrder, ServiceCatalogEntry, DeclaredServiceLookupResult } from "./commercial-order.js";',
+    'import type { CommercialOrder, ServiceCatalogEntry, DeclaredServiceLookupResult, ServiceExecutionRoutingPolicy } from "./commercial-order.js";',
     'import type { OfferBlueprintVersion } from "./offer-blueprint.js";',
     'import type { DeliveryRecipe } from "./delivery-recipe.js";',
     'import type { AdmittedWorker } from "./worker-routing-policy.js";',
