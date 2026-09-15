@@ -64,8 +64,11 @@ function requireValidTimestamp(value: unknown, field: string): { raw: string; ms
  *
  * This checkpoint implements the three dimensions that are honestly
  * buildable as domain contracts today - a tenant-level kill switch, an
- * ExecutionMode transition preflight, and a device/worker health
- * read-model - composing L0's (`local-execution.ts`) unmodified
+ * ExecutionMode transition classification/read-model with supplied-facts
+ * safety checks (Brain Rev132: not an authoritative safe-switch/migration
+ * preflight - see the Rev129 correction below for why that remains
+ * explicitly OPEN), and a device/worker health read-model - composing L0's
+ * (`local-execution.ts`) unmodified
  * `ExecutionMode`/`ExecutionPolicy`/`DeviceRegistration`/
  * `DeviceCapabilitySnapshot`/`DeviceCapabilityReadiness`/
  * `LocalWorkerRegistration`/`resolveEligibleLocalWorkers` and mirrors
@@ -84,11 +87,13 @@ function requireValidTimestamp(value: unknown, field: string): { raw: string; ms
  * anywhere in this backend-only repository (matching every other LOCAL-EXEC
  * phase's own "no UI, no live wiring" scope discipline, and Family 10's own
  * precedent of building a read-model rather than a rendered surface); the
- * ExecutionMode preflight and health read-model below are this checkpoint's
- * honest, wireable substitute for that UI's own required data.
+ * ExecutionMode transition classification/read-model and health read-model
+ * below are this checkpoint's honest, wireable substitute for that UI's own
+ * required data.
  *
  * Brain Rev129 correction to the "safe switch/migration preflight" claim
- * above: `planExecutionModeTransition` composes real `LocalTaskLease`/
+ * above (further renamed per Brain Rev132 below): `planExecutionModeTransition`
+ * composes real `LocalTaskLease`/
  * `ExternalEffectAttemptState` facts to fail closed on a NARROWING
  * transition, but only over whatever facts the caller actually supplies -
  * this repository has no durable lease/effect store for it to query an
@@ -99,6 +104,18 @@ function requireValidTimestamp(value: unknown, field: string): { raw: string; ms
  * a real durable lease/effect store this checkpoint does not build, per
  * Rev129's own authorized narrowing (rather than fabricating one to claim
  * completeness that does not exist).
+ *
+ * Brain Rev132 correction (docs/metadata truth-surface only, no source
+ * behavior change): Rev129 corrected the disclosure text and added the
+ * structural `safetyCheckScope` field, but this module's own leading,
+ * current-facing capability description above still flatly named the
+ * result an "ExecutionMode transition preflight" / "safe switch/migration
+ * preflight," which conflicts with the Rev129 correction it precedes. That
+ * leading description is now renamed to "ExecutionMode transition
+ * classification/read-model with supplied-facts safety checks." Real,
+ * authoritative safe-switch/migration preflight enforcement - independent
+ * of what a caller chooses to supply - remains explicitly OPEN; it is not,
+ * and has never been, something this module actually provides.
  */
 
 // ---------------------------------------------------------------------------
@@ -224,13 +241,16 @@ export function resolveEligibleLocalWorkersUnderKillSwitch(input: {
 }
 
 // ---------------------------------------------------------------------------
-// ExecutionMode transition preflight ("safe switch/migration preflight"),
-// mirroring `local-execution-collaboration.ts`'s own
-// `planCollaborationModeTransition` shape for the CollaborationMode
-// dimension. §3: "Local Mode must never automatically enable Team Pool or
-// Shared Repo" - this preflight's own return type carries no
-// `collaborationMode` field at all, so it cannot alter that dimension even
-// by construction.
+// ExecutionMode transition classification/read-model with supplied-facts
+// safety checks (Brain Rev132: renamed from "ExecutionMode transition
+// preflight" / "safe switch/migration preflight" - real, authoritative
+// safe-switch/migration preflight enforcement remains explicitly OPEN, see
+// the Rev129/Rev132 correction above), mirroring
+// `local-execution-collaboration.ts`'s own `planCollaborationModeTransition`
+// shape for the CollaborationMode dimension. §3: "Local Mode must never
+// automatically enable Team Pool or Shared Repo" - this module's own return
+// type carries no `collaborationMode` field at all, so it cannot alter that
+// dimension even by construction.
 // ---------------------------------------------------------------------------
 
 /**
