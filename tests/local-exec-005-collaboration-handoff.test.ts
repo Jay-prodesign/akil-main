@@ -183,6 +183,33 @@ test("C4: unrecognized CollaborationMode fails closed", () => {
   );
 });
 
+test("C4b adversarial (prototype-pollution guard): Object.prototype-shaped keys ('constructor', 'toString', 'hasOwnProperty', '__proto__') fail closed rather than resolving through the prototype chain to an inherited function value", () => {
+  for (const bogus of ["constructor", "toString", "hasOwnProperty", "valueOf", "isPrototypeOf", "__proto__"]) {
+    assert.throws(
+      () =>
+        planCollaborationModeTransition({
+          from: "PRIVATE",
+          to: bogus as never,
+          newlyVisibleToRefs: ["x"],
+          visibleResourceRefs: ["y"],
+        }),
+      InvalidCollaborationTransitionError,
+      `expected "${bogus}" as "to" to fail closed`,
+    );
+    assert.throws(
+      () =>
+        planCollaborationModeTransition({
+          from: bogus as never,
+          to: "PRIVATE",
+          newlyVisibleToRefs: ["x"],
+          visibleResourceRefs: ["y"],
+        }),
+      InvalidCollaborationTransitionError,
+      `expected "${bogus}" as "from" to fail closed`,
+    );
+  }
+});
+
 // --- WorkspaceBinding ---
 
 test("C5: LOCAL_FOLDER binding requires only a workspaceRootRef", () => {
