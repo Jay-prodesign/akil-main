@@ -83,6 +83,7 @@ function admitManualExecutionRegistry(job: OutcomeJob): ExecutionRoutingRequirem
   registry.admitManualExecutionAllowedByAdmittedWorker({
     job,
     admittingWorker: elevatedAdmittedWorker("admin-worker"),
+    evidenceRef: "evidence:manual-admission-1",
     admittedAt: "2026-09-15T00:00:00.000Z",
   });
   return registry;
@@ -281,7 +282,7 @@ function routedAssignmentFor(job: OutcomeJob) {
 
 function admitRoutingRequiredRegistry(job: OutcomeJob): ExecutionRoutingRequirementRegistry {
   const registry = createExecutionRoutingRequirementRegistry();
-  registry.admitRoutingRequiredFromDecision({ job, decision: routingDecisionFor(), admittedAt: "2026-09-15T00:00:00.000Z" });
+  registry.admitRoutingRequiredFromAssignment({ job, assignment: routedAssignmentFor(job), admittedAt: "2026-09-15T00:00:00.000Z" });
   return registry;
 }
 
@@ -364,6 +365,7 @@ test("Brain Rev114/115/116 F1 adversarial: authorizedTransitionOutcomeJob to EXE
   registry.admitManualExecutionAllowedByAdmittedWorker({
     job: otherDraft,
     admittingWorker: elevatedAdmittedWorker("admin-worker"),
+    evidenceRef: "evidence:other-job-admission",
     admittedAt: "2026-09-15T00:00:00.000Z",
   });
   assert.throws(
@@ -406,30 +408,62 @@ test("Brain Rev117/120: a STANDARD-authority AdmittedWorker (not ELEVATED) canno
     () => registry.admitManualExecutionAllowedByAdmittedWorker({
       job,
       admittingWorker: admittedWorker("standard-worker"),
+      evidenceRef: "evidence:standard-worker-attempt",
       admittedAt: "2026-09-15T00:00:00.000Z",
     }),
     InvalidExecutionRoutingRequirementError,
   );
 });
 
-test("Brain Rev117/120: ordinary WRITE authority CAN admit a ROUTING_REQUIRED requirement backed by a real WorkerRoutingDecision - asserting the stricter classification never needs elevated authority", () => {
+test("Brain Rev121: an UNTRUSTED/REVOKED AdmittedWorker with authorityLevel ELEVATED still cannot admit a MANUAL_EXECUTION_ALLOWED requirement - trustStatus === ADMITTED is required in addition to ELEVATED authority, mirroring admitServiceCatalogEntry's own double-check", () => {
   const job = readyJob();
   const registry = createExecutionRoutingRequirementRegistry();
-  const requirement = registry.admitRoutingRequiredFromDecision({
+  const revokedElevatedWorker: AdmittedWorker = {
+    ...elevatedAdmittedWorker("rogue-elevated-worker"),
+    trustStatus: "REVOKED",
+  };
+  assert.throws(
+    () => registry.admitManualExecutionAllowedByAdmittedWorker({
+      job,
+      admittingWorker: revokedElevatedWorker,
+      evidenceRef: "evidence:revoked-elevated-attempt",
+      admittedAt: "2026-09-15T00:00:00.000Z",
+    }),
+    InvalidExecutionRoutingRequirementError,
+  );
+});
+
+test("Brain Rev121: ordinary WRITE authority CAN admit a ROUTING_REQUIRED requirement backed by a real, job-bound RoutedExecutionAssignment - asserting the stricter classification never needs elevated authority", () => {
+  const job = readyJob();
+  const registry = createExecutionRoutingRequirementRegistry();
+  const requirement = registry.admitRoutingRequiredFromAssignment({
     job,
-    decision: routingDecisionFor(),
+    assignment: routedAssignmentFor(job),
     admittedAt: "2026-09-15T00:00:00.000Z",
   });
   assert.equal(requirement.policy, "ROUTING_REQUIRED");
 });
 
-test("Brain Rev120: admitRoutingRequiredFromDecision rejects a malformed decision object with neither ROUTED nor REJECTED status - it cannot be used to fabricate ROUTING_REQUIRED without a real decision", () => {
+test("Brain Rev121 adversarial (unrelated-routing-decision): a RoutedExecutionAssignment bound to a DIFFERENT job cannot be used to admit this job's ROUTING_REQUIRED requirement", () => {
   const job = readyJob();
+  const otherDraft = createOutcomeJob({
+    tenantScope,
+    customer,
+    project,
+    jobId: "job-4",
+    jobFamily: "onboarding",
+    businessObjective: "Verify tenant isolation kernel end to end",
+  });
+  const otherJob = authorizedTransitionOutcomeJob(
+    fullWriteAuthority(),
+    authorizedTransitionOutcomeJob(fullWriteAuthority(), otherDraft, "QUALIFIED"),
+    "READY",
+  );
   const registry = createExecutionRoutingRequirementRegistry();
   assert.throws(
-    () => registry.admitRoutingRequiredFromDecision({
+    () => registry.admitRoutingRequiredFromAssignment({
       job,
-      decision: { status: "BOGUS" } as unknown as ReturnType<typeof resolveWorkerRoute>,
+      assignment: routedAssignmentFor(otherJob),
       admittedAt: "2026-09-15T00:00:00.000Z",
     }),
     InvalidExecutionRoutingRequirementError,
@@ -443,6 +477,7 @@ test("Brain Rev118/119: once a job is admitted ROUTING_REQUIRED, a SECOND admiss
     () => registry.admitManualExecutionAllowedByAdmittedWorker({
       job,
       admittingWorker: elevatedAdmittedWorker("admin-worker"),
+      evidenceRef: "evidence:relabel-attempt",
       admittedAt: "2026-09-15T00:00:01.000Z",
     }),
     ExecutionRoutingRequirementAlreadyAdmittedError,
@@ -457,8 +492,8 @@ test("Brain Rev118/119: once a job is admitted ROUTING_REQUIRED, a SECOND admiss
 test("Brain Rev118/119: re-admitting the SAME policy for the same job is a harmless no-op, not an error", () => {
   const job = readyJob();
   const registry = createExecutionRoutingRequirementRegistry();
-  const first = registry.admitRoutingRequiredFromDecision({ job, decision: routingDecisionFor(), admittedAt: "2026-09-15T00:00:00.000Z" });
-  const second = registry.admitRoutingRequiredFromDecision({ job, decision: routingDecisionFor(), admittedAt: "2026-09-15T00:00:01.000Z" });
+  const first = registry.admitRoutingRequiredFromAssignment({ job, assignment: routedAssignmentFor(job), admittedAt: "2026-09-15T00:00:00.000Z" });
+  const second = registry.admitRoutingRequiredFromAssignment({ job, assignment: routedAssignmentFor(job), admittedAt: "2026-09-15T00:00:01.000Z" });
   assert.deepEqual(first, second);
 });
 

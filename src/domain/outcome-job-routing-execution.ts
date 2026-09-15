@@ -259,6 +259,68 @@ export class InvalidExecutionRoutingRequirementError extends Error {
  */
 export type ExecutionRoutingPolicy = "ROUTING_REQUIRED" | "MANUAL_EXECUTION_ALLOWED";
 
+/**
+ * Brain Rev121 correction (independent exact-head review of head c18075d):
+ * Rev120 bound each admission path to a real primitive, but neither primitive
+ * actually proved anything about *this exact job*. `WorkerRoutingDecision`
+ * (`worker-routing-policy.ts`) carries no `OutcomeJob` identity at all - it
+ * proves routing was resolved for an abstract `requiredCapabilityRef`, not
+ * that *this job's* fulfillment channel is the one that was routed. An
+ * `AdmittedWorker` with `authorityLevel: "ELEVATED"` proves that worker's own
+ * admission/authority in general, not that *this job's* policy is manual -
+ * any elevated worker anywhere in the tenant, with no connection whatsoever
+ * to this job, could admit `MANUAL_EXECUTION_ALLOWED` for it. Rev121's own
+ * framing: bind the registry to an admitted, provenance-bearing *exact-job*
+ * fact, or the narrowest adapter deriving one from existing primitives - not
+ * a fresh service/plan-level policy system (a live repo-wide check found no
+ * existing binding anywhere from `OutcomeJob` identity to
+ * `ServiceCatalogAdmission`/`CommercialOrder` - `outcome-job-wiring.ts` wires
+ * jobs from plan/blueprint-derived `OutcomeJobSpec`s alone, with no
+ * `serviceRef`/recipe reference on the runtime `OutcomeJob` at all - so
+ * building that full chain now would be inventing a new cross-cutting
+ * binding across several already-reviewed foundational modules, not "the
+ * narrowest adapter"; that remains explicitly open, named below, not
+ * fabricated).
+ *
+ * The narrowest real fix reuses what already exists:
+ *
+ * - `admitRoutingRequiredFromAssignment` (replacing `admitRoutingRequiredFromDecision`)
+ *   now requires a real `RoutedExecutionAssignment` - the one construct in
+ *   this exact module that already, honestly binds a `WorkerRoutingDecision`
+ *   to a specific job's own tenant/customer/project/jobId
+ *   (`isRoutedExecutionAssignmentValidForJob`, already Brain-reviewed at
+ *   Rev114-116). An assignment bound to a *different* job can never satisfy
+ *   this check, closing the "unrelated routing decision" gap completely and
+ *   honestly - not merely by convention. `REJECTED`-decision admission is
+ *   deliberately dropped: no existing primitive binds a `REJECTED` decision
+ *   to an exact job (`createRoutedExecutionAssignment` itself only accepts
+ *   `ROUTED`), and inventing one solely to preserve that permissive case
+ *   would be exactly the kind of new construct this correction is trying to
+ *   avoid. This is not a regression: a job with no admitted requirement at
+ *   all already fails closed at `authorizedTransitionOutcomeJob`'s
+ *   `EXECUTING` gate (`MissingExecutionRoutingRequirementError`), which is
+ *   the correct disposition for "routing was attempted and failed" until a
+ *   real `ROUTED` assignment or an authoritative manual admission exists.
+ * - `admitManualExecutionAllowedByAdmittedWorker` now additionally requires
+ *   `admittingWorker.trustStatus === "ADMITTED"` (mirroring
+ *   `service-catalog-admission.ts`'s own `admitServiceCatalogEntry` -
+ *   Rev102 F2 - which has always required *both* `trustStatus: "ADMITTED"`
+ *   *and* `authorityLevel: "ELEVATED"` together; Rev120 only carried the
+ *   second half of that already-established pair) and a non-empty
+ *   `evidenceRef`, both persisted onto the resulting `ExecutionRoutingRequirement`
+ *   as `admittedByAuthorityId`/`evidenceRef` - the same provenance shape
+ *   `ServiceCatalogAdmission` itself already carries, so the requirement
+ *   record is auditable rather than a bare policy label. Honest limit: this
+ *   still does not prove *this specific job's* real plan/service policy is
+ *   manual - no such fact exists anywhere in the domain model yet (see
+ *   above) - it proves an admitted, trusted, evidenced, ELEVATED identity
+ *   made this decision for this exact job, which is the narrowest
+ *   provenance-bearing tightening available without inventing a new
+ *   job-to-service binding. Wiring `OutcomeJob` identity through to a real
+ *   `ServiceCatalogAdmission`-derived policy fact remains the eventual real
+ *   source of truth and is named here as the next required correction, not
+ *   fabricated in this cycle.
+ */
 export interface ExecutionRoutingRequirement {
   readonly tenantId: TenantScope["tenantId"];
   readonly customerId: Customer["customerId"];
@@ -266,6 +328,8 @@ export interface ExecutionRoutingRequirement {
   readonly jobId: OutcomeJob["jobId"];
   readonly policy: ExecutionRoutingPolicy;
   readonly admittedAt: string;
+  readonly admittedByAuthorityId?: string;
+  readonly evidenceRef?: string;
 }
 
 export class ExecutionRoutingRequirementAlreadyAdmittedError extends Error {
@@ -354,14 +418,15 @@ function executionRoutingRequirementKey(scope: {
  * `ExecutionRoutingRequirementAlreadyAdmittedError` unconditionally.
  */
 export interface ExecutionRoutingRequirementRegistry {
-  admitRoutingRequiredFromDecision(input: {
+  admitRoutingRequiredFromAssignment(input: {
     job: OutcomeJob;
-    decision: WorkerRoutingDecision;
+    assignment: RoutedExecutionAssignment;
     admittedAt: unknown;
   }): ExecutionRoutingRequirement;
   admitManualExecutionAllowedByAdmittedWorker(input: {
     job: OutcomeJob;
     admittingWorker: AdmittedWorker;
+    evidenceRef: unknown;
     admittedAt: unknown;
   }): ExecutionRoutingRequirement;
   lookup(job: OutcomeJob): ExecutionRoutingRequirement | undefined;
@@ -374,6 +439,7 @@ export function createExecutionRoutingRequirementRegistry(): ExecutionRoutingReq
     job: OutcomeJob,
     policy: ExecutionRoutingPolicy,
     admittedAt: unknown,
+    provenance?: { admittedByAuthorityId: string; evidenceRef: string },
   ): ExecutionRoutingRequirement {
     const key = executionRoutingRequirementKey(job);
     const existing = admitted.get(key);
@@ -390,27 +456,39 @@ export function createExecutionRoutingRequirementRegistry(): ExecutionRoutingReq
       jobId: job.jobId,
       policy,
       admittedAt: requireNonEmptyExecutionRoutingField(admittedAt, "admittedAt"),
+      ...(provenance !== undefined
+        ? { admittedByAuthorityId: provenance.admittedByAuthorityId, evidenceRef: provenance.evidenceRef }
+        : {}),
     };
     admitted.set(key, requirement);
     return requirement;
   }
 
   return {
-    admitRoutingRequiredFromDecision(input) {
-      if (input.decision.status !== "ROUTED" && input.decision.status !== "REJECTED") {
+    admitRoutingRequiredFromAssignment(input) {
+      if (!isRoutedExecutionAssignmentValidForJob(input.assignment, input.job)) {
         throw new InvalidExecutionRoutingRequirementError(
-          `decision.status must be "ROUTED" or "REJECTED"; got ${JSON.stringify(input.decision.status)}`,
+          "assignment must be a RoutedExecutionAssignment bound to this exact job's tenant/customer/project/jobId - an assignment bound to a different job can never admit this job's routing requirement",
         );
       }
       return admit(input.job, "ROUTING_REQUIRED", input.admittedAt);
     },
     admitManualExecutionAllowedByAdmittedWorker(input) {
+      if (input.admittingWorker.trustStatus !== "ADMITTED") {
+        throw new InvalidExecutionRoutingRequirementError(
+          `admittingWorker.trustStatus must be "ADMITTED" to admit MANUAL_EXECUTION_ALLOWED (got ${JSON.stringify(input.admittingWorker.trustStatus)}) - an unproven/untrusted worker identity cannot vouch for this job's execution policy, mirroring service-catalog-admission.ts's own admitServiceCatalogEntry boundary`,
+        );
+      }
       if (input.admittingWorker.authorityLevel !== "ELEVATED") {
         throw new InvalidExecutionRoutingRequirementError(
           `admittingWorker.authorityLevel must be "ELEVATED" to admit MANUAL_EXECUTION_ALLOWED; got ${JSON.stringify(input.admittingWorker.authorityLevel)}`,
         );
       }
-      return admit(input.job, "MANUAL_EXECUTION_ALLOWED", input.admittedAt);
+      const evidenceRef = requireNonEmptyExecutionRoutingField(input.evidenceRef, "evidenceRef");
+      return admit(input.job, "MANUAL_EXECUTION_ALLOWED", input.admittedAt, {
+        admittedByAuthorityId: input.admittingWorker.workerId,
+        evidenceRef,
+      });
     },
     lookup(job) {
       return admitted.get(executionRoutingRequirementKey(job));
