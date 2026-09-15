@@ -12,9 +12,8 @@ import {
 } from "../domain/outcome-job.js";
 import {
   authorizeOutcomeJobExecutionFromRouting,
-  isExecutionRoutingRequirementValidForJob,
   type RoutedExecutionAssignment,
-  type ExecutionRoutingRequirement,
+  type ExecutionRoutingRequirementRegistry,
 } from "../domain/outcome-job-routing-execution.js";
 import {
   closeOutcomeJobWithApproval,
@@ -34,7 +33,7 @@ export class ClosureRequiresApprovalGateError extends Error {
 export class MissingExecutionRoutingRequirementError extends Error {
   constructor() {
     super(
-      "authorizedTransitionOutcomeJob to EXECUTING requires an ExecutionRoutingRequirement that exactly matches this job's tenant/customer/project/jobId",
+      "authorizedTransitionOutcomeJob to EXECUTING requires an ExecutionRoutingRequirement already admitted for this exact job in the supplied ExecutionRoutingRequirementRegistry",
     );
     this.name = "MissingExecutionRoutingRequirementError";
   }
@@ -74,35 +73,43 @@ export class ExecutionRequiresRoutingGateError extends Error {
  * admitted policy requires routed execution. Unlike `CLOSED`, `EXECUTING`
  * is not universally gated here (genuine non-routed staff-initiated work
  * exists and must keep working - see `jobAtVerifying`-style test
- * helpers) - instead every `EXECUTING` transition now requires the
- * caller to supply an `ExecutionRoutingRequirement` that exactly matches
- * this job's own tenant/customer/project/jobId (fails closed with
- * `MissingExecutionRoutingRequirementError` if absent or mismatched -
- * this is the honesty half of the fix: a caller cannot silently omit a
- * classification to get the permissive branch), and if that requirement
- * declares `ROUTING_REQUIRED`, this ordinary path fails closed with
- * `ExecutionRequiresRoutingGateError` regardless of anything else -
- * `authorizedTransitionOutcomeJobToExecutingViaRouting` becomes the only
- * authorized path for that job. `MANUAL_EXECUTION_ALLOWED` preserves the
- * ordinary path exactly as before.
+ * helpers) - instead every `EXECUTING` transition now requires an
+ * `ExecutionRoutingRequirement` that exactly matches this job's own
+ * tenant/customer/project/jobId (fails closed with
+ * `MissingExecutionRoutingRequirementError` if none was ever admitted),
+ * and if that requirement declares `ROUTING_REQUIRED`, this ordinary path
+ * fails closed with `ExecutionRequiresRoutingGateError` regardless of
+ * anything else - `authorizedTransitionOutcomeJobToExecutingViaRouting`
+ * becomes the only authorized path for that job. `MANUAL_EXECUTION_ALLOWED`
+ * preserves the ordinary path exactly as before.
+ *
+ * Brain Rev118/119 correction: the caller used to *supply* the
+ * `ExecutionRoutingRequirement` object directly, which meant an
+ * execution-time caller (ordinary or even protected-authority) could
+ * construct whichever classification suited them, per call. This is no
+ * longer possible - the caller instead supplies an
+ * `ExecutionRoutingRequirementRegistry`, and this function only ever
+ * `lookup`s the requirement that was admitted for this exact job earlier
+ * (see `outcome-job-routing-execution.ts`'s own doc comment on
+ * `ExecutionRoutingRequirementRegistry` for the full admission-vs-execution
+ * separation this closes). There is no execution-time "construct and
+ * pass" path left at all.
  */
 export function authorizedTransitionOutcomeJob(
   authority: AuthorityContext,
   job: OutcomeJob,
   to: OutcomeJobState,
-  executionRoutingRequirement?: ExecutionRoutingRequirement,
+  executionRoutingRegistry?: ExecutionRoutingRequirementRegistry,
 ): OutcomeJob {
   if (to === "CLOSED") {
     throw new ClosureRequiresApprovalGateError();
   }
   if (to === "EXECUTING") {
-    if (
-      executionRoutingRequirement === undefined ||
-      !isExecutionRoutingRequirementValidForJob(executionRoutingRequirement, job)
-    ) {
+    const requirement = executionRoutingRegistry?.lookup(job);
+    if (requirement === undefined) {
       throw new MissingExecutionRoutingRequirementError();
     }
-    if (executionRoutingRequirement.policy === "ROUTING_REQUIRED") {
+    if (requirement.policy === "ROUTING_REQUIRED") {
       throw new ExecutionRequiresRoutingGateError();
     }
   }
@@ -169,11 +176,11 @@ export function authorizedVerifyOutcomeJob(
  * `authorizedTransitionOutcomeJob`, plus a valid, exactly-matching
  * `RoutedExecutionAssignment` delegated entirely to the existing,
  * unmodified `authorizeOutcomeJobExecutionFromRouting`. This is the only
- * authorized path for a job whose `ExecutionRoutingRequirement` is
- * `ROUTING_REQUIRED` (Brain Rev114/115/116 correction above) - a caller
- * arriving here with a valid, job-matching, `ROUTED` assignment does not
- * additionally need to construct an `ExecutionRoutingRequirement`; a real
- * routed assignment is itself strictly stronger proof.
+ * authorized path for a job whose admitted `ExecutionRoutingRequirement`
+ * is `ROUTING_REQUIRED` (Brain Rev114/115/116/118/119 corrections above)
+ * - a caller arriving here with a valid, job-matching, `ROUTED` assignment
+ * does not additionally need an admitted `ExecutionRoutingRequirement`; a
+ * real routed assignment is itself strictly stronger proof.
  */
 export function authorizedTransitionOutcomeJobToExecutingViaRouting(
   authority: AuthorityContext,

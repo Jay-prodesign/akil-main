@@ -37,19 +37,22 @@ test("Rev111: this module never assigns state: \"CLOSED\" directly - every closu
   assert.doesNotMatch(content, /state:\s*["']CLOSED["']/);
 });
 
-test("Brain Rev114/115/116: authorizedTransitionOutcomeJob's own source rejects a missing/mismatched ExecutionRoutingRequirement, and rejects ROUTING_REQUIRED, both before ever calling transitionOutcomeJob", () => {
+test("Brain Rev114/115/116/118/119: authorizedTransitionOutcomeJob's own source rejects a missing (never-admitted) ExecutionRoutingRequirement, and rejects an admitted ROUTING_REQUIRED, both before ever calling transitionOutcomeJob", () => {
   const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
   const fnStart = content.indexOf("export function authorizedTransitionOutcomeJob(");
   assert.ok(fnStart >= 0, "authorizedTransitionOutcomeJob not found");
   const nextFnStart = content.indexOf("export function", fnStart + 1);
   const fnBody = content.slice(fnStart, nextFnStart >= 0 ? nextFnStart : undefined);
-  const missingCheckIndex = fnBody.indexOf("executionRoutingRequirement === undefined");
+  const lookupIndex = fnBody.indexOf("executionRoutingRegistry?.lookup(job)");
+  const missingCheckIndex = fnBody.indexOf("requirement === undefined");
   const routingRequiredCheckIndex = fnBody.indexOf('policy === "ROUTING_REQUIRED"');
   const transitionCallIndex = fnBody.indexOf("transitionOutcomeJob(job, to)");
-  assert.ok(missingCheckIndex >= 0, "expected an explicit missing/mismatched ExecutionRoutingRequirement check");
+  assert.ok(lookupIndex >= 0, "expected the requirement to be looked up from the registry, never accepted as a caller-supplied classification");
+  assert.ok(missingCheckIndex >= 0, "expected an explicit missing (never-admitted) ExecutionRoutingRequirement check");
   assert.ok(routingRequiredCheckIndex >= 0, "expected an explicit ROUTING_REQUIRED rejection check");
   assert.ok(transitionCallIndex >= 0, "expected the ordinary transition call");
-  assert.ok(missingCheckIndex < transitionCallIndex, "a missing/mismatched requirement must be rejected before the ordinary transition is ever attempted");
+  assert.ok(lookupIndex < missingCheckIndex, "the registry must be consulted before the missing check runs");
+  assert.ok(missingCheckIndex < transitionCallIndex, "a missing requirement must be rejected before the ordinary transition is ever attempted");
   assert.ok(routingRequiredCheckIndex < transitionCallIndex, "ROUTING_REQUIRED must be rejected before the ordinary transition is ever attempted");
 });
 

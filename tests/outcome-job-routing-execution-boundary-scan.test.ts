@@ -48,29 +48,45 @@ test("outcome-job-routing-execution: createRoutedExecutionAssignment rejects any
   assert.match(fnBody, /decision\.status\s*!==\s*["']ROUTED["']/);
 });
 
-test("Brain Rev117: createExecutionRoutingRequirement requires protected-action authorization before ever constructing a MANUAL_EXECUTION_ALLOWED requirement - the check runs before the object is returned", () => {
+test("Brain Rev117: createExecutionRoutingRequirementRegistry's admit requires protected-action authorization before ever admitting a MANUAL_EXECUTION_ALLOWED requirement - the check runs before the map is written", () => {
   const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
-  const fnStart = content.indexOf("export function createExecutionRoutingRequirement");
-  assert.ok(fnStart >= 0, "createExecutionRoutingRequirement not found");
+  const fnStart = content.indexOf("export function createExecutionRoutingRequirementRegistry");
+  assert.ok(fnStart >= 0, "createExecutionRoutingRequirementRegistry not found");
   const nextFnStart = content.indexOf("export function", fnStart + 1);
   const fnBody = content.slice(fnStart, nextFnStart >= 0 ? nextFnStart : undefined);
   const protectedCheckIndex = fnBody.indexOf("requireProtectedActionAuthorization(");
-  const returnIndex = fnBody.indexOf("return {");
+  const writeIndex = fnBody.indexOf("admitted.set(");
   assert.ok(protectedCheckIndex >= 0, "expected an explicit requireProtectedActionAuthorization call");
-  assert.ok(returnIndex >= 0, "expected the constructed requirement to be returned");
-  assert.ok(protectedCheckIndex < returnIndex, "protected-action authorization must be required before the requirement object is ever constructed");
+  assert.ok(writeIndex >= 0, "expected the admitted requirement to be written into the registry");
+  assert.ok(protectedCheckIndex < writeIndex, "protected-action authorization must be required before the requirement is ever admitted");
+});
+
+test("Brain Rev118/119: createExecutionRoutingRequirementRegistry has no exported free-standing constructor for ExecutionRoutingRequirement - admit (behind the registry closure) is the only way to produce one, so an execution-time caller cannot construct-and-pass a fresh classification", () => {
+  const exportedKeys = Object.keys(OutcomeJobRoutingExecution);
+  assert.ok(!exportedKeys.includes("createExecutionRoutingRequirement"), "a free-standing constructor must not be exported");
+});
+
+test("Brain Rev118/119: admit is immutable once set - attempting to admit a different policy for an already-admitted job throws before ever overwriting the map entry", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  const fnStart = content.indexOf("export function createExecutionRoutingRequirementRegistry");
+  const nextFnStart = content.indexOf("export function", fnStart + 1);
+  const fnBody = content.slice(fnStart, nextFnStart >= 0 ? nextFnStart : undefined);
+  const alreadyAdmittedThrowIndex = fnBody.indexOf("ExecutionRoutingRequirementAlreadyAdmittedError");
+  const setIndex = fnBody.indexOf("admitted.set(");
+  assert.ok(alreadyAdmittedThrowIndex >= 0, "expected an ExecutionRoutingRequirementAlreadyAdmittedError guard");
+  assert.ok(alreadyAdmittedThrowIndex < setIndex, "the already-admitted guard must run before the map is ever written");
 });
 
 test("outcome-job-routing-execution: module exports exactly the expected surface", () => {
   const exportedKeys = Object.keys(OutcomeJobRoutingExecution).sort();
   assert.deepEqual(exportedKeys, [
+    "ExecutionRoutingRequirementAlreadyAdmittedError",
     "InvalidExecutionRoutingRequirementError",
     "InvalidRoutedExecutionAssignmentError",
     "OutcomeJobExecutionNotRoutedError",
     "authorizeOutcomeJobExecutionFromRouting",
-    "createExecutionRoutingRequirement",
+    "createExecutionRoutingRequirementRegistry",
     "createRoutedExecutionAssignment",
-    "isExecutionRoutingRequirementValidForJob",
     "isRoutedExecutionAssignmentValidForJob",
   ]);
 });

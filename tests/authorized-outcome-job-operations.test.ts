@@ -24,8 +24,10 @@ import {
 } from "../src/application/authorized-outcome-job-operations.js";
 import {
   createRoutedExecutionAssignment,
-  createExecutionRoutingRequirement,
+  createExecutionRoutingRequirementRegistry,
+  ExecutionRoutingRequirementAlreadyAdmittedError,
   OutcomeJobExecutionNotRoutedError,
+  type ExecutionRoutingRequirementRegistry,
 } from "../src/domain/outcome-job-routing-execution.js";
 import { resolveWorkerRoute, type AdmittedWorker } from "../src/domain/worker-routing-policy.js";
 import {
@@ -60,6 +62,12 @@ function draftJob(businessObjective = "Verify tenant isolation kernel end to end
   });
 }
 
+function admitManualExecutionRegistry(job: OutcomeJob): ExecutionRoutingRequirementRegistry {
+  const registry = createExecutionRoutingRequirementRegistry();
+  registry.admit({ job, policy: "MANUAL_EXECUTION_ALLOWED", authority: fullProtectedAuthority(), admittedAt: "2026-09-15T00:00:00.000Z" });
+  return registry;
+}
+
 function jobAtVerifying(businessObjective?: string): OutcomeJob {
   let job = draftJob(businessObjective);
   job = authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "QUALIFIED");
@@ -68,7 +76,7 @@ function jobAtVerifying(businessObjective?: string): OutcomeJob {
     fullWriteAuthority(),
     job,
     "EXECUTING",
-    createExecutionRoutingRequirement({ job, policy: "MANUAL_EXECUTION_ALLOWED", authority: fullProtectedAuthority() }),
+    admitManualExecutionRegistry(job),
   );
   job = authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "VERIFYING");
   return job;
@@ -303,15 +311,16 @@ test("Rev98 Family 12 (routing glue) / T2: full-permission authority for a diffe
   );
 });
 
-test("Brain Rev114/115/116 F1: authorizedTransitionOutcomeJob to EXECUTING fails closed with no ExecutionRoutingRequirement at all - a READY job never reaches EXECUTING through the ordinary path by default", () => {
+test("Brain Rev114/115/116 F1: authorizedTransitionOutcomeJob to EXECUTING fails closed with no ExecutionRoutingRequirement ever admitted - a READY job never reaches EXECUTING through the ordinary path by default", () => {
   const job = readyJob();
+  const emptyRegistry = createExecutionRoutingRequirementRegistry();
   assert.throws(
-    () => authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING"),
+    () => authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING", emptyRegistry),
     MissingExecutionRoutingRequirementError,
   );
 });
 
-test("Brain Rev114/115/116 F1 adversarial: authorizedTransitionOutcomeJob to EXECUTING fails closed with an ExecutionRoutingRequirement bound to a different job", () => {
+test("Brain Rev114/115/116 F1 adversarial: authorizedTransitionOutcomeJob to EXECUTING fails closed when only a different job's requirement was admitted in the registry", () => {
   const job = readyJob();
   const otherDraft = createOutcomeJob({
     tenantScope,
@@ -321,22 +330,20 @@ test("Brain Rev114/115/116 F1 adversarial: authorizedTransitionOutcomeJob to EXE
     jobFamily: "onboarding",
     businessObjective: "Verify tenant isolation kernel end to end",
   });
-  const mismatchedRequirement = createExecutionRoutingRequirement({
-    job: otherDraft,
-    policy: "MANUAL_EXECUTION_ALLOWED",
-    authority: fullProtectedAuthority(),
-  });
+  const registry = createExecutionRoutingRequirementRegistry();
+  registry.admit({ job: otherDraft, policy: "MANUAL_EXECUTION_ALLOWED", authority: fullProtectedAuthority(), admittedAt: "2026-09-15T00:00:00.000Z" });
   assert.throws(
-    () => authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING", mismatchedRequirement),
+    () => authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING", registry),
     MissingExecutionRoutingRequirementError,
   );
 });
 
 test("Brain Rev114/115/116 F1: a ROUTING_REQUIRED job can never reach EXECUTING through the ordinary authorizedTransitionOutcomeJob path, even with full WRITE authority", () => {
   const job = readyJob();
-  const requirement = createExecutionRoutingRequirement({ job, policy: "ROUTING_REQUIRED", authority: fullWriteAuthority() });
+  const registry = createExecutionRoutingRequirementRegistry();
+  registry.admit({ job, policy: "ROUTING_REQUIRED", authority: fullWriteAuthority(), admittedAt: "2026-09-15T00:00:00.000Z" });
   assert.throws(
-    () => authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING", requirement),
+    () => authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING", registry),
     ExecutionRequiresRoutingGateError,
   );
   assert.equal(job.state, "READY");
@@ -352,33 +359,68 @@ test("Brain Rev114/115/116 F1: a ROUTING_REQUIRED job succeeds only through auth
   assert.equal(executing.state, "EXECUTING");
 });
 
-test("Brain Rev114/115/116 F1: an explicitly MANUAL_EXECUTION_ALLOWED job preserves the ordinary authorizedTransitionOutcomeJob path with no routing assignment at all", () => {
+test("Brain Rev114/115/116 F1: an admitted MANUAL_EXECUTION_ALLOWED job preserves the ordinary authorizedTransitionOutcomeJob path with no routing assignment at all", () => {
   const job = readyJob();
-  const requirement = createExecutionRoutingRequirement({ job, policy: "MANUAL_EXECUTION_ALLOWED", authority: fullProtectedAuthority() });
-  const executing = authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING", requirement);
+  const registry = admitManualExecutionRegistry(job);
+  const executing = authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING", registry);
   assert.equal(executing.state, "EXECUTING");
 });
 
-test("Brain Rev117: ordinary WRITE authority (no protected-action grant) cannot construct a MANUAL_EXECUTION_ALLOWED requirement - the execution caller cannot self-classify a routing-required job as manual to bypass the gate", () => {
+test("Brain Rev117: ordinary WRITE authority (no protected-action grant) cannot admit a MANUAL_EXECUTION_ALLOWED requirement - the execution caller cannot self-classify a routing-required job as manual to bypass the gate", () => {
   const job = readyJob();
+  const registry = createExecutionRoutingRequirementRegistry();
   assert.throws(
-    () => createExecutionRoutingRequirement({ job, policy: "MANUAL_EXECUTION_ALLOWED", authority: fullWriteAuthority() }),
+    () => registry.admit({ job, policy: "MANUAL_EXECUTION_ALLOWED", authority: fullWriteAuthority(), admittedAt: "2026-09-15T00:00:00.000Z" }),
     ProtectedActionNotAuthorizedError,
   );
 });
 
-test("Brain Rev117: EXECUTE permission without protected-action authorization still cannot construct a MANUAL_EXECUTION_ALLOWED requirement", () => {
+test("Brain Rev117: EXECUTE permission without protected-action authorization still cannot admit a MANUAL_EXECUTION_ALLOWED requirement", () => {
   const job = readyJob();
+  const registry = createExecutionRoutingRequirementRegistry();
   assert.throws(
-    () => createExecutionRoutingRequirement({ job, policy: "MANUAL_EXECUTION_ALLOWED", authority: executeWithoutProtectedAuthority() }),
+    () => registry.admit({ job, policy: "MANUAL_EXECUTION_ALLOWED", authority: executeWithoutProtectedAuthority(), admittedAt: "2026-09-15T00:00:00.000Z" }),
     ProtectedActionNotAuthorizedError,
   );
 });
 
-test("Brain Rev117: ordinary WRITE authority CAN construct a ROUTING_REQUIRED requirement - asserting the stricter classification never needs elevated authority", () => {
+test("Brain Rev117: ordinary WRITE authority CAN admit a ROUTING_REQUIRED requirement - asserting the stricter classification never needs elevated authority", () => {
   const job = readyJob();
-  const requirement = createExecutionRoutingRequirement({ job, policy: "ROUTING_REQUIRED", authority: fullWriteAuthority() });
+  const registry = createExecutionRoutingRequirementRegistry();
+  const requirement = registry.admit({ job, policy: "ROUTING_REQUIRED", authority: fullWriteAuthority(), admittedAt: "2026-09-15T00:00:00.000Z" });
   assert.equal(requirement.policy, "ROUTING_REQUIRED");
+});
+
+test("Brain Rev118/119: once a job is admitted ROUTING_REQUIRED, a SECOND admission attempt claiming MANUAL_EXECUTION_ALLOWED throws even with full protected authority - the execution-time caller cannot retroactively relabel an already-admitted routing-required job", () => {
+  const job = readyJob();
+  const registry = createExecutionRoutingRequirementRegistry();
+  registry.admit({ job, policy: "ROUTING_REQUIRED", authority: fullWriteAuthority(), admittedAt: "2026-09-15T00:00:00.000Z" });
+  assert.throws(
+    () => registry.admit({ job, policy: "MANUAL_EXECUTION_ALLOWED", authority: fullProtectedAuthority(), admittedAt: "2026-09-15T00:00:01.000Z" }),
+    ExecutionRoutingRequirementAlreadyAdmittedError,
+  );
+  // the already-admitted ROUTING_REQUIRED fact must still be the one authorizedTransitionOutcomeJob observes
+  assert.throws(
+    () => authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING", registry),
+    ExecutionRequiresRoutingGateError,
+  );
+});
+
+test("Brain Rev118/119: re-admitting the SAME policy for the same job is a harmless no-op, not an error", () => {
+  const job = readyJob();
+  const registry = createExecutionRoutingRequirementRegistry();
+  const first = registry.admit({ job, policy: "ROUTING_REQUIRED", authority: fullWriteAuthority(), admittedAt: "2026-09-15T00:00:00.000Z" });
+  const second = registry.admit({ job, policy: "ROUTING_REQUIRED", authority: fullWriteAuthority(), admittedAt: "2026-09-15T00:00:01.000Z" });
+  assert.deepEqual(first, second);
+});
+
+test("Brain Rev118/119: an authoritative-manual job whose requirement was admitted at admission time (not at execution time) succeeds via the ordinary authorizedTransitionOutcomeJob path", () => {
+  const job = readyJob();
+  const registry = createExecutionRoutingRequirementRegistry();
+  registry.admit({ job, policy: "MANUAL_EXECUTION_ALLOWED", authority: fullProtectedAuthority(), admittedAt: "2026-09-15T00:00:00.000Z" });
+  const executeCaller = fullWriteAuthority();
+  const executing = authorizedTransitionOutcomeJob(executeCaller, job, "EXECUTING", registry);
+  assert.equal(executing.state, "EXECUTING");
 });
 
 function verifiedJob(): OutcomeJob {

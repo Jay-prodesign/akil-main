@@ -207,51 +207,56 @@ export class InvalidExecutionRoutingRequirementError extends Error {
  * - structurally the same opt-in/bypass class Rev111 already found (and
  * fixed) for approval -> closure.
  *
- * No existing primitive in this repository already, honestly represents
- * whether a given `OutcomeJob` requires routed execution (`OutcomeJob`
- * itself carries only a free-form `jobFamily` label; `ServiceCatalogAdmission`/
- * `commercial-order.ts` describe *what* service was ordered, never
- * whether its fulfillment must go through admitted worker routing).
- * Rather than fabricate that policy inside this module, or force every
- * non-EXECUTING transition through a new mandatory parameter it has
- * nothing to do with, `ExecutionRoutingRequirement` is the smallest
- * addition that makes the true caller-side classification explicit,
- * scope-bound, and impossible to silently omit for `EXECUTING`
- * specifically.
+ * Brain Rev117 then found the first fix (a freely caller-constructible
+ * `ExecutionRoutingRequirement`, gated only by `requireProtectedActionAuthorization`
+ * on the `MANUAL_EXECUTION_ALLOWED` branch) was still insufficient: a
+ * protected-authority holder - not just an ordinary WRITE-level caller -
+ * could construct `MANUAL_EXECUTION_ALLOWED` fresh, per call, for any
+ * job, including one whose real admitted policy is `ROUTING_REQUIRED`.
+ * Protected-action authority proves the caller may make protected
+ * decisions in general; it does not prove the admitted execution policy
+ * for *this specific job* is manual. Rev118's own framing: "this is
+ * materially different from `ClosureApprovalReference`, where the caller
+ * label does not itself choose whether the gate applies" - here the
+ * label WAS the gate.
  *
- * Brain Rev117 correction: the reasoning immediately above ("mirrors the
- * same honesty `ClosureApprovalReference` discloses for `approverRef`")
- * was insufficient here, for a reason that does not apply to
- * `approverRef`. `approverRef` is a caller-supplied *label* - it never by
- * itself decides whether an action is permitted; `requireProtectedActionAuthorization`
- * does that work regardless of what the label says. `ExecutionRoutingRequirement.policy`
- * is different: it IS the permission decision. If any WRITE-level caller
- * could freely construct `MANUAL_EXECUTION_ALLOWED` for a job whose real
- * admitted policy is `ROUTING_REQUIRED`, the gate is self-defeating - the
- * exact caller trying to bypass routing simply relabels their own
- * request. Rev117 found precisely this: "a caller holding a
- * routing-required Family-12 job can construct MANUAL_EXECUTION_ALLOWED
- * for the same job and still take the ordinary EXECUTING path."
+ * Brain Rev118/119's required correction: source/persist the policy from
+ * an already-authoritative admission fact *before* execution authority is
+ * ever exercised, so the execution-time caller can only ever *consume* an
+ * already-admitted fact, never *choose* one. `ExecutionRoutingRequirementRegistry`
+ * is that persistence boundary: `admit` is a one-time, immutable-once-set
+ * write (mirroring `FileDurableOutcomeJobStore`'s own put-if-absent
+ * discipline for `OutcomeJob` itself, and `ClosureApprovalReference`'s own
+ * "protected authority is required to construct the weaker/opening
+ * classification" pattern) - re-admitting the *same* policy for a job is
+ * a harmless no-op, but attempting to admit a *different* policy for an
+ * already-admitted job throws `ExecutionRoutingRequirementAlreadyAdmittedError`
+ * unconditionally, regardless of the second caller's own authority level.
+ * `lookup` is the only way `authorizedTransitionOutcomeJob`'s `EXECUTING`
+ * gate consumes a requirement now - there is no execution-time
+ * "construct and pass" path left at all, so an execution caller (ordinary
+ * or protected) cannot manufacture, nor retroactively change, the
+ * classification for a job that was already admitted as `ROUTING_REQUIRED`.
  *
- * The fix narrows who may assert the *weaker* classification, not who
- * may assert the stronger one: asserting `ROUTING_REQUIRED` only ever
- * tightens the gate (an ordinary WRITE-level caller cannot use it to
- * bypass anything, so no elevated authority is required to assert it),
- * but asserting `MANUAL_EXECUTION_ALLOWED` - the classification that
- * actually opens the ordinary path - now requires the same
- * `requireProtectedActionAuthorization` tier this repository already
- * requires for `authorizedCloseOutcomeJobWithApproval`/`authorizedVerifyOutcomeJob`.
- * An ordinary WRITE-only execution caller (the routing-worker/automation
- * identity this checkpoint is actually defending against) can no longer
- * manufacture a valid `MANUAL_EXECUTION_ALLOWED` requirement at all.
- * This does not claim to independently re-derive which jobs truly
- * require routing (that remains real admitted-policy provenance this
- * repository does not yet compose - see the module doc comment above),
- * and a protected-authority holder can still assert either
- * classification, exactly the same honest limit already accepted for
- * `ClosureApprovalReference.approverRef` (Rev111 F2) - protected
- * authority is this repository's one consistent trust ceiling
- * throughout, not a gap unique to this module.
+ * `ROUTING_REQUIRED` still needs no elevated authority to admit (it only
+ * ever tightens the gate); `MANUAL_EXECUTION_ALLOWED` still requires
+ * `requireProtectedActionAuthorization` to admit, exactly as Rev117
+ * established - the difference is *when* that authority is exercised
+ * (once, at admission, immutably) rather than freely at every execution
+ * attempt.
+ *
+ * Honest limit carried forward unchanged from Rev117/Rev111 F2: this does
+ * not claim to independently re-derive which jobs truly require routing,
+ * nor does it yet wire automatic admission from `service-catalog-admission.ts`/
+ * `commercial-order.ts`/plan-admission into this registry (Brain's own
+ * "reuse the existing trusted service/catalog admission ... where
+ * semantically valid" note names that as the eventual real source of
+ * truth) - that composition is a separate, later, explicitly deferred
+ * integration step, not fabricated here. What this checkpoint closes is
+ * the structural vulnerability: whoever admits a job's routing
+ * requirement and whoever executes it are no longer required to be
+ * indistinguishable, because admission is a one-time mutation and
+ * execution is read-only consumption of it.
  */
 export type ExecutionRoutingPolicy = "ROUTING_REQUIRED" | "MANUAL_EXECUTION_ALLOWED";
 
@@ -261,44 +266,84 @@ export interface ExecutionRoutingRequirement {
   readonly projectId: Project["projectId"];
   readonly jobId: OutcomeJob["jobId"];
   readonly policy: ExecutionRoutingPolicy;
+  readonly admittedAt: string;
 }
 
-export function createExecutionRoutingRequirement(input: {
-  job: OutcomeJob;
-  policy: ExecutionRoutingPolicy;
-  authority: AuthorityContext;
-}): ExecutionRoutingRequirement {
-  if (input.policy !== "ROUTING_REQUIRED" && input.policy !== "MANUAL_EXECUTION_ALLOWED") {
-    throw new InvalidExecutionRoutingRequirementError(
-      `policy must be "ROUTING_REQUIRED" or "MANUAL_EXECUTION_ALLOWED"; got ${JSON.stringify(input.policy)}`,
+export class ExecutionRoutingRequirementAlreadyAdmittedError extends Error {
+  constructor(jobId: OutcomeJob["jobId"], existingPolicy: ExecutionRoutingPolicy, attemptedPolicy: ExecutionRoutingPolicy) {
+    super(
+      `ExecutionRoutingRequirement for OutcomeJob ${jobId} was already admitted as ${existingPolicy}; cannot re-admit as ${attemptedPolicy} - the routing requirement is immutable once admitted`,
     );
+    this.name = "ExecutionRoutingRequirementAlreadyAdmittedError";
   }
-  if (input.policy === "MANUAL_EXECUTION_ALLOWED") {
-    requireProtectedActionAuthorization(input.authority, "declareManualExecutionAllowed");
+}
+
+function requireNonEmptyExecutionRoutingField(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new InvalidExecutionRoutingRequirementError(`${field} must be a non-empty string`);
   }
-  return {
-    tenantId: input.job.tenantId,
-    customerId: input.job.customerId,
-    projectId: input.job.projectId,
-    jobId: input.job.jobId,
-    policy: input.policy,
-  };
+  return value;
+}
+
+function executionRoutingRequirementKey(scope: {
+  tenantId: TenantScope["tenantId"];
+  customerId: Customer["customerId"];
+  projectId: Project["projectId"];
+  jobId: OutcomeJob["jobId"];
+}): string {
+  return `${scope.tenantId}::${scope.customerId}::${scope.projectId}::${scope.jobId}`;
 }
 
 /**
- * Fail-closed on every scoping dimension, identical discipline to
- * `isRoutedExecutionAssignmentValidForJob`: a requirement declared for
- * one tenant/customer/project/job never silently validates a different
- * one.
+ * `admit` is the only way to produce an `ExecutionRoutingRequirement` -
+ * there is no other exported constructor. Called once, at admission
+ * time, structurally separate from whatever later calls
+ * `authorizedTransitionOutcomeJob(..., "EXECUTING")`. `lookup` never
+ * mutates and never accepts a caller-supplied classification.
  */
-export function isExecutionRoutingRequirementValidForJob(
-  requirement: ExecutionRoutingRequirement,
-  job: OutcomeJob,
-): boolean {
-  return (
-    requirement.tenantId === job.tenantId &&
-    requirement.customerId === job.customerId &&
-    requirement.projectId === job.projectId &&
-    requirement.jobId === job.jobId
-  );
+export interface ExecutionRoutingRequirementRegistry {
+  admit(input: {
+    job: OutcomeJob;
+    policy: ExecutionRoutingPolicy;
+    authority: AuthorityContext;
+    admittedAt: unknown;
+  }): ExecutionRoutingRequirement;
+  lookup(job: OutcomeJob): ExecutionRoutingRequirement | undefined;
+}
+
+export function createExecutionRoutingRequirementRegistry(): ExecutionRoutingRequirementRegistry {
+  const admitted = new Map<string, ExecutionRoutingRequirement>();
+  return {
+    admit(input) {
+      if (input.policy !== "ROUTING_REQUIRED" && input.policy !== "MANUAL_EXECUTION_ALLOWED") {
+        throw new InvalidExecutionRoutingRequirementError(
+          `policy must be "ROUTING_REQUIRED" or "MANUAL_EXECUTION_ALLOWED"; got ${JSON.stringify(input.policy)}`,
+        );
+      }
+      if (input.policy === "MANUAL_EXECUTION_ALLOWED") {
+        requireProtectedActionAuthorization(input.authority, "admitExecutionRoutingRequirement:MANUAL_EXECUTION_ALLOWED");
+      }
+      const key = executionRoutingRequirementKey(input.job);
+      const existing = admitted.get(key);
+      if (existing !== undefined) {
+        if (existing.policy !== input.policy) {
+          throw new ExecutionRoutingRequirementAlreadyAdmittedError(input.job.jobId, existing.policy, input.policy);
+        }
+        return existing;
+      }
+      const requirement: ExecutionRoutingRequirement = {
+        tenantId: input.job.tenantId,
+        customerId: input.job.customerId,
+        projectId: input.job.projectId,
+        jobId: input.job.jobId,
+        policy: input.policy,
+        admittedAt: requireNonEmptyExecutionRoutingField(input.admittedAt, "admittedAt"),
+      };
+      admitted.set(key, requirement);
+      return requirement;
+    },
+    lookup(job) {
+      return admitted.get(executionRoutingRequirementKey(job));
+    },
+  };
 }
