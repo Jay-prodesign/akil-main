@@ -48,17 +48,42 @@ test("outcome-job-routing-execution: createRoutedExecutionAssignment rejects any
   assert.match(fnBody, /decision\.status\s*!==\s*["']ROUTED["']/);
 });
 
-test("Brain Rev117: createExecutionRoutingRequirementRegistry's admit requires protected-action authorization before ever admitting a MANUAL_EXECUTION_ALLOWED requirement - the check runs before the map is written", () => {
+test("Brain Rev120: createExecutionRoutingRequirementRegistry's admitManualExecutionAllowedByAdmittedWorker requires authorityLevel === ELEVATED before ever delegating to the shared admit helper (which performs the map write)", () => {
   const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
   const fnStart = content.indexOf("export function createExecutionRoutingRequirementRegistry");
   assert.ok(fnStart >= 0, "createExecutionRoutingRequirementRegistry not found");
   const nextFnStart = content.indexOf("export function", fnStart + 1);
   const fnBody = content.slice(fnStart, nextFnStart >= 0 ? nextFnStart : undefined);
-  const protectedCheckIndex = fnBody.indexOf("requireProtectedActionAuthorization(");
-  const writeIndex = fnBody.indexOf("admitted.set(");
-  assert.ok(protectedCheckIndex >= 0, "expected an explicit requireProtectedActionAuthorization call");
-  assert.ok(writeIndex >= 0, "expected the admitted requirement to be written into the registry");
-  assert.ok(protectedCheckIndex < writeIndex, "protected-action authorization must be required before the requirement is ever admitted");
+  assert.ok(fnBody.indexOf("admitted.set(") >= 0, "expected the admit helper to write the admitted requirement into the registry");
+  const methodStart = fnBody.indexOf("admitManualExecutionAllowedByAdmittedWorker(input) {");
+  assert.ok(methodStart >= 0, "admitManualExecutionAllowedByAdmittedWorker not found");
+  const methodEnd = fnBody.indexOf("},", methodStart);
+  const methodBody = fnBody.slice(methodStart, methodEnd >= 0 ? methodEnd : undefined);
+  const elevatedCheckIndex = methodBody.indexOf('authorityLevel !== "ELEVATED"');
+  const admitCallIndex = methodBody.indexOf("return admit(");
+  assert.ok(elevatedCheckIndex >= 0, "expected an explicit authorityLevel === ELEVATED check");
+  assert.ok(admitCallIndex >= 0, "expected this method to delegate to the shared admit helper");
+  assert.ok(elevatedCheckIndex < admitCallIndex, "the ELEVATED authority check must run before delegating to admit (which writes the map)");
+});
+
+test("Brain Rev120: createExecutionRoutingRequirementRegistry's admitRoutingRequiredFromDecision requires a real WorkerRoutingDecision (ROUTED or REJECTED status) before ever admitting a ROUTING_REQUIRED requirement - it cannot be satisfied by a bare caller-selected string", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  const fnStart = content.indexOf("export function createExecutionRoutingRequirementRegistry");
+  assert.ok(fnStart >= 0, "createExecutionRoutingRequirementRegistry not found");
+  const nextFnStart = content.indexOf("export function", fnStart + 1);
+  const fnBody = content.slice(fnStart, nextFnStart >= 0 ? nextFnStart : undefined);
+  const methodStart = fnBody.indexOf("admitRoutingRequiredFromDecision(input) {");
+  assert.ok(methodStart >= 0, "admitRoutingRequiredFromDecision not found");
+  const statusCheckIndex = fnBody.indexOf('decision.status !== "ROUTED"', methodStart);
+  const admitCallIndex = fnBody.indexOf("admit(input.job,", methodStart);
+  assert.ok(statusCheckIndex >= 0, "expected an explicit decision.status validity check");
+  assert.ok(admitCallIndex >= 0, "expected the requirement to be admitted");
+  assert.ok(statusCheckIndex < admitCallIndex, "the decision-status check must run before the requirement is ever admitted");
+});
+
+test("Brain Rev120: this module no longer imports AuthorityContext/requireProtectedActionAuthorization from authority.js - the initial policy is bound to WorkerRoutingDecision/AdmittedWorker, not a generic tenant-level authority check", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  assert.doesNotMatch(content, /from\s*["']\.\/authority\.js["']/);
 });
 
 test("Brain Rev118/119: createExecutionRoutingRequirementRegistry has no exported free-standing constructor for ExecutionRoutingRequirement - admit (behind the registry closure) is the only way to produce one, so an execution-time caller cannot construct-and-pass a fresh classification", () => {

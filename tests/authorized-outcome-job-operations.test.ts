@@ -26,6 +26,7 @@ import {
   createRoutedExecutionAssignment,
   createExecutionRoutingRequirementRegistry,
   ExecutionRoutingRequirementAlreadyAdmittedError,
+  InvalidExecutionRoutingRequirementError,
   OutcomeJobExecutionNotRoutedError,
   type ExecutionRoutingRequirementRegistry,
 } from "../src/domain/outcome-job-routing-execution.js";
@@ -62,9 +63,28 @@ function draftJob(businessObjective = "Verify tenant isolation kernel end to end
   });
 }
 
+function elevatedAdmittedWorker(workerId: string): AdmittedWorker {
+  return {
+    workerId,
+    declaredCapabilityRefs: ["cap:engineering.typescript"],
+    declaredToolRefs: [],
+    declaredPolicyConstraintRefs: [],
+    trustStatus: "ADMITTED",
+    availability: "AVAILABLE",
+    maxRiskLevel: "STANDARD",
+    authorityLevel: "ELEVATED",
+    costWeight: 1,
+    evaluationEvidenceRef: `evidence:${workerId}`,
+  };
+}
+
 function admitManualExecutionRegistry(job: OutcomeJob): ExecutionRoutingRequirementRegistry {
   const registry = createExecutionRoutingRequirementRegistry();
-  registry.admit({ job, policy: "MANUAL_EXECUTION_ALLOWED", authority: fullProtectedAuthority(), admittedAt: "2026-09-15T00:00:00.000Z" });
+  registry.admitManualExecutionAllowedByAdmittedWorker({
+    job,
+    admittingWorker: elevatedAdmittedWorker("admin-worker"),
+    admittedAt: "2026-09-15T00:00:00.000Z",
+  });
   return registry;
 }
 
@@ -242,17 +262,27 @@ function admittedWorker(workerId: string): AdmittedWorker {
   };
 }
 
-function routedAssignmentFor(job: OutcomeJob) {
-  const decision = resolveWorkerRoute({
+function routingDecisionFor(input?: { executorCandidates?: AdmittedWorker[] }): ReturnType<typeof resolveWorkerRoute> {
+  return resolveWorkerRoute({
     requiredCapabilityRef: "cap:engineering.typescript",
     riskLevel: "STANDARD",
     requiredToolRefs: [],
     requiredPolicyConstraintRefs: [],
     requiredAuthorityLevel: "STANDARD",
     requiresIndependentReview: false,
-    executorCandidates: [admittedWorker("claude")],
+    executorCandidates: input?.executorCandidates ?? [admittedWorker("claude")],
   });
+}
+
+function routedAssignmentFor(job: OutcomeJob) {
+  const decision = routingDecisionFor();
   return createRoutedExecutionAssignment({ job, decision, boundAt: "2026-09-15T00:00:00.000Z" });
+}
+
+function admitRoutingRequiredRegistry(job: OutcomeJob): ExecutionRoutingRequirementRegistry {
+  const registry = createExecutionRoutingRequirementRegistry();
+  registry.admitRoutingRequiredFromDecision({ job, decision: routingDecisionFor(), admittedAt: "2026-09-15T00:00:00.000Z" });
+  return registry;
 }
 
 test("Rev98 Family 12 (routing glue): WRITE authority with a valid, matching RoutedExecutionAssignment transitions a READY job to EXECUTING", () => {
@@ -331,7 +361,11 @@ test("Brain Rev114/115/116 F1 adversarial: authorizedTransitionOutcomeJob to EXE
     businessObjective: "Verify tenant isolation kernel end to end",
   });
   const registry = createExecutionRoutingRequirementRegistry();
-  registry.admit({ job: otherDraft, policy: "MANUAL_EXECUTION_ALLOWED", authority: fullProtectedAuthority(), admittedAt: "2026-09-15T00:00:00.000Z" });
+  registry.admitManualExecutionAllowedByAdmittedWorker({
+    job: otherDraft,
+    admittingWorker: elevatedAdmittedWorker("admin-worker"),
+    admittedAt: "2026-09-15T00:00:00.000Z",
+  });
   assert.throws(
     () => authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING", registry),
     MissingExecutionRoutingRequirementError,
@@ -340,8 +374,7 @@ test("Brain Rev114/115/116 F1 adversarial: authorizedTransitionOutcomeJob to EXE
 
 test("Brain Rev114/115/116 F1: a ROUTING_REQUIRED job can never reach EXECUTING through the ordinary authorizedTransitionOutcomeJob path, even with full WRITE authority", () => {
   const job = readyJob();
-  const registry = createExecutionRoutingRequirementRegistry();
-  registry.admit({ job, policy: "ROUTING_REQUIRED", authority: fullWriteAuthority(), admittedAt: "2026-09-15T00:00:00.000Z" });
+  const registry = admitRoutingRequiredRegistry(job);
   assert.throws(
     () => authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "EXECUTING", registry),
     ExecutionRequiresRoutingGateError,
@@ -366,37 +399,52 @@ test("Brain Rev114/115/116 F1: an admitted MANUAL_EXECUTION_ALLOWED job preserve
   assert.equal(executing.state, "EXECUTING");
 });
 
-test("Brain Rev117: ordinary WRITE authority (no protected-action grant) cannot admit a MANUAL_EXECUTION_ALLOWED requirement - the execution caller cannot self-classify a routing-required job as manual to bypass the gate", () => {
+test("Brain Rev117/120: a STANDARD-authority AdmittedWorker (not ELEVATED) cannot admit a MANUAL_EXECUTION_ALLOWED requirement - the execution caller cannot self-classify a routing-required job as manual with an insufficiently-authoritative admitted identity", () => {
   const job = readyJob();
   const registry = createExecutionRoutingRequirementRegistry();
   assert.throws(
-    () => registry.admit({ job, policy: "MANUAL_EXECUTION_ALLOWED", authority: fullWriteAuthority(), admittedAt: "2026-09-15T00:00:00.000Z" }),
-    ProtectedActionNotAuthorizedError,
+    () => registry.admitManualExecutionAllowedByAdmittedWorker({
+      job,
+      admittingWorker: admittedWorker("standard-worker"),
+      admittedAt: "2026-09-15T00:00:00.000Z",
+    }),
+    InvalidExecutionRoutingRequirementError,
   );
 });
 
-test("Brain Rev117: EXECUTE permission without protected-action authorization still cannot admit a MANUAL_EXECUTION_ALLOWED requirement", () => {
+test("Brain Rev117/120: ordinary WRITE authority CAN admit a ROUTING_REQUIRED requirement backed by a real WorkerRoutingDecision - asserting the stricter classification never needs elevated authority", () => {
   const job = readyJob();
   const registry = createExecutionRoutingRequirementRegistry();
-  assert.throws(
-    () => registry.admit({ job, policy: "MANUAL_EXECUTION_ALLOWED", authority: executeWithoutProtectedAuthority(), admittedAt: "2026-09-15T00:00:00.000Z" }),
-    ProtectedActionNotAuthorizedError,
-  );
-});
-
-test("Brain Rev117: ordinary WRITE authority CAN admit a ROUTING_REQUIRED requirement - asserting the stricter classification never needs elevated authority", () => {
-  const job = readyJob();
-  const registry = createExecutionRoutingRequirementRegistry();
-  const requirement = registry.admit({ job, policy: "ROUTING_REQUIRED", authority: fullWriteAuthority(), admittedAt: "2026-09-15T00:00:00.000Z" });
+  const requirement = registry.admitRoutingRequiredFromDecision({
+    job,
+    decision: routingDecisionFor(),
+    admittedAt: "2026-09-15T00:00:00.000Z",
+  });
   assert.equal(requirement.policy, "ROUTING_REQUIRED");
 });
 
-test("Brain Rev118/119: once a job is admitted ROUTING_REQUIRED, a SECOND admission attempt claiming MANUAL_EXECUTION_ALLOWED throws even with full protected authority - the execution-time caller cannot retroactively relabel an already-admitted routing-required job", () => {
+test("Brain Rev120: admitRoutingRequiredFromDecision rejects a malformed decision object with neither ROUTED nor REJECTED status - it cannot be used to fabricate ROUTING_REQUIRED without a real decision", () => {
   const job = readyJob();
   const registry = createExecutionRoutingRequirementRegistry();
-  registry.admit({ job, policy: "ROUTING_REQUIRED", authority: fullWriteAuthority(), admittedAt: "2026-09-15T00:00:00.000Z" });
   assert.throws(
-    () => registry.admit({ job, policy: "MANUAL_EXECUTION_ALLOWED", authority: fullProtectedAuthority(), admittedAt: "2026-09-15T00:00:01.000Z" }),
+    () => registry.admitRoutingRequiredFromDecision({
+      job,
+      decision: { status: "BOGUS" } as unknown as ReturnType<typeof resolveWorkerRoute>,
+      admittedAt: "2026-09-15T00:00:00.000Z",
+    }),
+    InvalidExecutionRoutingRequirementError,
+  );
+});
+
+test("Brain Rev118/119: once a job is admitted ROUTING_REQUIRED, a SECOND admission attempt claiming MANUAL_EXECUTION_ALLOWED throws even with a real elevated AdmittedWorker - the execution-time caller cannot retroactively relabel an already-admitted routing-required job", () => {
+  const job = readyJob();
+  const registry = admitRoutingRequiredRegistry(job);
+  assert.throws(
+    () => registry.admitManualExecutionAllowedByAdmittedWorker({
+      job,
+      admittingWorker: elevatedAdmittedWorker("admin-worker"),
+      admittedAt: "2026-09-15T00:00:01.000Z",
+    }),
     ExecutionRoutingRequirementAlreadyAdmittedError,
   );
   // the already-admitted ROUTING_REQUIRED fact must still be the one authorizedTransitionOutcomeJob observes
@@ -409,15 +457,14 @@ test("Brain Rev118/119: once a job is admitted ROUTING_REQUIRED, a SECOND admiss
 test("Brain Rev118/119: re-admitting the SAME policy for the same job is a harmless no-op, not an error", () => {
   const job = readyJob();
   const registry = createExecutionRoutingRequirementRegistry();
-  const first = registry.admit({ job, policy: "ROUTING_REQUIRED", authority: fullWriteAuthority(), admittedAt: "2026-09-15T00:00:00.000Z" });
-  const second = registry.admit({ job, policy: "ROUTING_REQUIRED", authority: fullWriteAuthority(), admittedAt: "2026-09-15T00:00:01.000Z" });
+  const first = registry.admitRoutingRequiredFromDecision({ job, decision: routingDecisionFor(), admittedAt: "2026-09-15T00:00:00.000Z" });
+  const second = registry.admitRoutingRequiredFromDecision({ job, decision: routingDecisionFor(), admittedAt: "2026-09-15T00:00:01.000Z" });
   assert.deepEqual(first, second);
 });
 
-test("Brain Rev118/119: an authoritative-manual job whose requirement was admitted at admission time (not at execution time) succeeds via the ordinary authorizedTransitionOutcomeJob path", () => {
+test("Brain Rev118/119/120: an authoritative-manual job whose requirement was admitted at admission time by a real elevated AdmittedWorker (not at execution time) succeeds via the ordinary authorizedTransitionOutcomeJob path", () => {
   const job = readyJob();
-  const registry = createExecutionRoutingRequirementRegistry();
-  registry.admit({ job, policy: "MANUAL_EXECUTION_ALLOWED", authority: fullProtectedAuthority(), admittedAt: "2026-09-15T00:00:00.000Z" });
+  const registry = admitManualExecutionRegistry(job);
   const executeCaller = fullWriteAuthority();
   const executing = authorizedTransitionOutcomeJob(executeCaller, job, "EXECUTING", registry);
   assert.equal(executing.state, "EXECUTING");

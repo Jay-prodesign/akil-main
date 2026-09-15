@@ -2,8 +2,7 @@ import type { TenantScope } from "./tenant-scope.js";
 import type { Customer } from "./customer.js";
 import type { Project } from "./project.js";
 import { transitionOutcomeJob, type OutcomeJob } from "./outcome-job.js";
-import type { WorkerRoutingDecision } from "./worker-routing-policy.js";
-import { requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";
+import type { WorkerRoutingDecision, AdmittedWorker } from "./worker-routing-policy.js";
 
 export class InvalidRoutedExecutionAssignmentError extends Error {
   constructor(reason: string) {
@@ -295,17 +294,74 @@ function executionRoutingRequirementKey(scope: {
 }
 
 /**
- * `admit` is the only way to produce an `ExecutionRoutingRequirement` -
+ * Brain Rev120 correction: the registry above closed *re-labeling* (an
+ * already-admitted job's policy could never be changed), but the FIRST
+ * admission of either policy was still a bare caller-selected string -
+ * `ROUTING_REQUIRED` admitted by any WRITE authority, `MANUAL_EXECUTION_ALLOWED`
+ * admitted by any generic protected-action authority. Rev120's own
+ * framing: "generic protected-action authority is not evidence that this
+ * specific job's admitted execution policy is manual." The required
+ * correction is to bind the *initial* policy to an existing authoritative
+ * fact, reusing existing primitives, rather than accept a caller-chosen
+ * string at all.
+ *
+ * There are now two separate, narrowly-scoped admission entry points
+ * instead of one generic `admit` - each derives its policy from a real
+ * existing primitive rather than accepting `policy` as a parameter:
+ *
+ * - `admitRoutingRequiredFromDecision` derives `ROUTING_REQUIRED`
+ *   *only* from a real `WorkerRoutingDecision` (`worker-routing-policy.ts`,
+ *   already Brain-reviewed) - the actual routing engine having been
+ *   invoked at all (`ROUTED` or `REJECTED`, either one) is itself the
+ *   authoritative proof that this job's fulfillment channel requires
+ *   admitted routing. No caller authority is required to admit this,
+ *   because it can only ever tighten the gate - a WRITE-only caller
+ *   supplying a real decision object can never use it to weaken
+ *   anything, mirroring why `RoutedExecutionAssignment`/`ExecutionRoutingPolicy`'s
+ *   own "ROUTING_REQUIRED never needs elevated authority" rule was
+ *   already accepted at Rev117.
+ * - `admitManualExecutionAllowedByAdmittedWorker` derives
+ *   `MANUAL_EXECUTION_ALLOWED` *only* from a real `AdmittedWorker`
+ *   (`worker-routing-policy.ts`) whose own `authorityLevel` is
+ *   `"ELEVATED"` - reusing the exact same admitted-identity primitive
+ *   `service-catalog-admission.ts`'s own `admittedByAuthorityId` already
+ *   established as this repository's real "who may admit a trust-bearing
+ *   fact" boundary (Rev102 F2), instead of a generic tenant-level
+ *   `AuthorityContext`. This is a genuinely narrower, more specific
+ *   binding than "any protected-authority holder in this tenant" - it
+ *   requires a real, already-vetted worker identity, not merely a
+ *   permission flag.
+ *
+ * Honest limit carried forward: neither path yet independently derives
+ * policy from a real *service/plan-level* "this job requires/does not
+ * require routing" fact composed from `service-catalog-admission.ts`/
+ * `commercial-order.ts`/plan-admission - Brain's own Rev120 note names
+ * that as the eventual real source of truth, and this checkpoint does
+ * not fabricate it. What this closes is the two concrete gaps Rev120
+ * found: a bare WRITE-only caller can no longer admit `ROUTING_REQUIRED`
+ * without a real routing decision to back it, and no caller can admit
+ * `MANUAL_EXECUTION_ALLOWED` without a real, elevated, already-admitted
+ * worker identity vouching for it - generic protected-action authority
+ * alone is no longer sufficient for either.
+ *
+ * `admit*` are the only ways to produce an `ExecutionRoutingRequirement` -
  * there is no other exported constructor. Called once, at admission
  * time, structurally separate from whatever later calls
  * `authorizedTransitionOutcomeJob(..., "EXECUTING")`. `lookup` never
- * mutates and never accepts a caller-supplied classification.
+ * mutates and never accepts a caller-supplied classification. Immutability
+ * (Rev118/119) is unchanged: re-admitting the same policy for an
+ * already-admitted job is a no-op; admitting a different policy throws
+ * `ExecutionRoutingRequirementAlreadyAdmittedError` unconditionally.
  */
 export interface ExecutionRoutingRequirementRegistry {
-  admit(input: {
+  admitRoutingRequiredFromDecision(input: {
     job: OutcomeJob;
-    policy: ExecutionRoutingPolicy;
-    authority: AuthorityContext;
+    decision: WorkerRoutingDecision;
+    admittedAt: unknown;
+  }): ExecutionRoutingRequirement;
+  admitManualExecutionAllowedByAdmittedWorker(input: {
+    job: OutcomeJob;
+    admittingWorker: AdmittedWorker;
     admittedAt: unknown;
   }): ExecutionRoutingRequirement;
   lookup(job: OutcomeJob): ExecutionRoutingRequirement | undefined;
@@ -313,34 +369,48 @@ export interface ExecutionRoutingRequirementRegistry {
 
 export function createExecutionRoutingRequirementRegistry(): ExecutionRoutingRequirementRegistry {
   const admitted = new Map<string, ExecutionRoutingRequirement>();
+
+  function admit(
+    job: OutcomeJob,
+    policy: ExecutionRoutingPolicy,
+    admittedAt: unknown,
+  ): ExecutionRoutingRequirement {
+    const key = executionRoutingRequirementKey(job);
+    const existing = admitted.get(key);
+    if (existing !== undefined) {
+      if (existing.policy !== policy) {
+        throw new ExecutionRoutingRequirementAlreadyAdmittedError(job.jobId, existing.policy, policy);
+      }
+      return existing;
+    }
+    const requirement: ExecutionRoutingRequirement = {
+      tenantId: job.tenantId,
+      customerId: job.customerId,
+      projectId: job.projectId,
+      jobId: job.jobId,
+      policy,
+      admittedAt: requireNonEmptyExecutionRoutingField(admittedAt, "admittedAt"),
+    };
+    admitted.set(key, requirement);
+    return requirement;
+  }
+
   return {
-    admit(input) {
-      if (input.policy !== "ROUTING_REQUIRED" && input.policy !== "MANUAL_EXECUTION_ALLOWED") {
+    admitRoutingRequiredFromDecision(input) {
+      if (input.decision.status !== "ROUTED" && input.decision.status !== "REJECTED") {
         throw new InvalidExecutionRoutingRequirementError(
-          `policy must be "ROUTING_REQUIRED" or "MANUAL_EXECUTION_ALLOWED"; got ${JSON.stringify(input.policy)}`,
+          `decision.status must be "ROUTED" or "REJECTED"; got ${JSON.stringify(input.decision.status)}`,
         );
       }
-      if (input.policy === "MANUAL_EXECUTION_ALLOWED") {
-        requireProtectedActionAuthorization(input.authority, "admitExecutionRoutingRequirement:MANUAL_EXECUTION_ALLOWED");
+      return admit(input.job, "ROUTING_REQUIRED", input.admittedAt);
+    },
+    admitManualExecutionAllowedByAdmittedWorker(input) {
+      if (input.admittingWorker.authorityLevel !== "ELEVATED") {
+        throw new InvalidExecutionRoutingRequirementError(
+          `admittingWorker.authorityLevel must be "ELEVATED" to admit MANUAL_EXECUTION_ALLOWED; got ${JSON.stringify(input.admittingWorker.authorityLevel)}`,
+        );
       }
-      const key = executionRoutingRequirementKey(input.job);
-      const existing = admitted.get(key);
-      if (existing !== undefined) {
-        if (existing.policy !== input.policy) {
-          throw new ExecutionRoutingRequirementAlreadyAdmittedError(input.job.jobId, existing.policy, input.policy);
-        }
-        return existing;
-      }
-      const requirement: ExecutionRoutingRequirement = {
-        tenantId: input.job.tenantId,
-        customerId: input.job.customerId,
-        projectId: input.job.projectId,
-        jobId: input.job.jobId,
-        policy: input.policy,
-        admittedAt: requireNonEmptyExecutionRoutingField(input.admittedAt, "admittedAt"),
-      };
-      admitted.set(key, requirement);
-      return requirement;
+      return admit(input.job, "MANUAL_EXECUTION_ALLOWED", input.admittedAt);
     },
     lookup(job) {
       return admitted.get(executionRoutingRequirementKey(job));
