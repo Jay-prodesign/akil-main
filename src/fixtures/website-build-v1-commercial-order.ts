@@ -27,6 +27,7 @@ export const WEBSITE_BUILD_V1_SERVICE_CATALOG: ReadonlyArray<ServiceCatalogEntry
     blueprintId: WEBSITE_BUILD_V1_BLUEPRINT.blueprintId,
     blueprintVersion: WEBSITE_BUILD_V1_BLUEPRINT.version,
     recipeId: WEBSITE_BUILD_V1_RECIPE.recipeId,
+    executionRoutingPolicy: "MANUAL_EXECUTION_ALLOWED",
   },
 ];
 
