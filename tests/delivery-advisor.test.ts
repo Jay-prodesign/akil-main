@@ -278,6 +278,62 @@ test("CXP-001A (Brain PR #66 F5, adversarial): a concrete recipe whose version d
   assert.equal(result.observation.applicableRecipeRef, undefined);
 });
 
+test("CXP-001A (Brain PR #66 Rev26 F5, adversarial): a cloned binding whose boundJobs specIds still match real jobs, but every requirementId has been rotated so none coheres with its own job's jobFamily, is never cited as applicable provenance", () => {
+  const realBoundJobs = WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING.boundJobs;
+  assert.ok(realBoundJobs.length >= 2, "expected at least two boundJobs entries for this coherence test to be meaningful");
+  // Cyclic shift: each entry keeps its own real specId (so specId===jobId
+  // matching alone would still "succeed" without the new coherence check),
+  // but is paired with the NEXT entry's requirementId, so no entry's
+  // (specId, requirementId) pair coheres with any real job's own jobFamily.
+  const rotatedBoundJobs = realBoundJobs.map((entry, index) => ({
+    specId: entry.specId,
+    requirementId: realBoundJobs[(index + 1) % realBoundJobs.length]?.requirementId,
+  }));
+  const contaminatedBinding = {
+    ...WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING,
+    boundJobs: rotatedBoundJobs,
+  } as typeof WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING;
+
+  const result = buildAdvisorResult({
+    ownership: WEBSITE_BUILD_V1_RECIPE_BINDING_OWNERSHIP,
+    snapshot: WEBSITE_BUILD_V1_BOUND_CLIENT_PROJECT_SNAPSHOT,
+    recipe: WEBSITE_BUILD_V1_RECIPE,
+    binding: contaminatedBinding,
+  });
+  assert.equal(result.observation.applicableRecipeRef, undefined);
+});
+
+test("CXP-001A (Brain PR #66 Rev26 F5, adversarial): a cloned binding with a duplicated boundJobs specId is structurally incoherent and never yields applicable provenance, even though a genuine matching entry is still present", () => {
+  const realBoundJobs = WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING.boundJobs;
+  const duplicatedBinding = {
+    ...WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING,
+    boundJobs: [...realBoundJobs, realBoundJobs[0]],
+  } as typeof WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING;
+
+  const result = buildAdvisorResult({
+    ownership: WEBSITE_BUILD_V1_RECIPE_BINDING_OWNERSHIP,
+    snapshot: WEBSITE_BUILD_V1_BOUND_CLIENT_PROJECT_SNAPSHOT,
+    recipe: WEBSITE_BUILD_V1_RECIPE,
+    binding: duplicatedBinding,
+  });
+  assert.equal(result.observation.applicableRecipeRef, undefined);
+});
+
+test("CXP-001A (Brain PR #66 Rev26 F5, adversarial): a binding with an empty boundJobs array is structurally incoherent and never yields applicable provenance", () => {
+  const emptyBinding = {
+    ...WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING,
+    boundJobs: [],
+  };
+
+  const result = buildAdvisorResult({
+    ownership: WEBSITE_BUILD_V1_RECIPE_BINDING_OWNERSHIP,
+    snapshot: WEBSITE_BUILD_V1_BOUND_CLIENT_PROJECT_SNAPSHOT,
+    recipe: WEBSITE_BUILD_V1_RECIPE,
+    binding: emptyBinding,
+  });
+  assert.equal(result.observation.applicableRecipeRef, undefined);
+});
+
 test("A7: this module exports no function other than buildAdvisorResult capable of producing an AdvisorResult (no mutation/approve/execute surface)", async () => {
   const moduleExports = await import("../src/domain/delivery-advisor.js");
   const functionExportNames = Object.keys(moduleExports).filter(

@@ -85,6 +85,43 @@ function ownershipEquals(a: ProjectOwnershipRef, b: ProjectOwnershipRef): boolea
 }
 
 /**
+ * Brain PR #66 F5 correction (Rev26): applicability previously accepted
+ * `binding.boundJobs` at face value - a single matching `specId` was
+ * sufficient, even if the array itself was structurally incoherent (empty,
+ * duplicate `specId`s, or entries whose `specId`/`requirementId` were
+ * hand-assembled rather than genuinely produced by AI-004A's
+ * `bindAdmittedRecipeToPlan`). `deriveOutcomeJobSpecs` always sets
+ * `jobFamily` to the exact same value as `requirementId` (see
+ * `outcome-job-spec.ts`), and `wireAdmittedOutcomeJobs` carries that
+ * `jobFamily` verbatim onto the runtime `OutcomeJob` - so a genuine
+ * `boundJobs` entry's `requirementId` must equal the matched job's own
+ * `jobFamily`, not merely its `specId` matching `jobId`. This function
+ * requires the whole `boundJobs` array to be non-empty with unique,
+ * non-empty `specId`s before ever consulting it, then requires the
+ * matched entry itself to satisfy both identity facts together.
+ */
+function boundJobsAreStructurallyCoherent(
+  boundJobs: DeliveryRecipePlanBinding["boundJobs"],
+): boolean {
+  if (boundJobs.length === 0) {
+    return false;
+  }
+  const seenSpecIds = new Set<string>();
+  for (const boundJob of boundJobs) {
+    const specId = boundJob.specId as string;
+    const requirementId = boundJob.requirementId as string;
+    if (specId.length === 0 || requirementId.length === 0) {
+      return false;
+    }
+    if (seenSpecIds.has(specId)) {
+      return false;
+    }
+    seenSpecIds.add(specId);
+  }
+  return true;
+}
+
+/**
  * V2-CDO-008 minimum Delivery Project Advisor (L0 Observe / L1 Recommend).
  * Pure, deterministic, provider-neutral: no model/provider SDK, prompt,
  * persistent memory, RAG/vector store or command/mutation surface exists
@@ -168,8 +205,13 @@ export function buildAdvisorResult(input: {
     (input.ownership.serviceRef === undefined || input.ownership.serviceRef === binding.serviceRef) &&
     (workingArtifact === undefined ||
       (workingArtifact.planId === binding.planId && workingArtifact.currentVersion === binding.planVersion)) &&
+    boundJobsAreStructurallyCoherent(binding.boundJobs) &&
     input.snapshot.deliveryStatus.jobs.some((job) =>
-      binding.boundJobs.some((boundJob) => (boundJob.specId as string) === (job.jobId as string)),
+      binding.boundJobs.some(
+        (boundJob) =>
+          (boundJob.specId as string) === (job.jobId as string) &&
+          (boundJob.requirementId as string) === job.jobFamily,
+      ),
     )
   ) {
     applicableRecipeRef = { recipeId: binding.boundRecipeId, version: binding.consumedRecipeVersion };
