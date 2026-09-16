@@ -89,9 +89,25 @@ function requirePositiveInteger(value: unknown, field: string): number {
  * module's own documented "binds unambiguously to ... ProjectPlanVersion"
  * contract. `planVersion` is now a required, validated positive integer
  * alongside `planId`.
+ *
+ * CXP-001P correction: `projectId` alone is not globally unique across
+ * customers within a tenant (see `project.ts`) - the same "tenant +
+ * project" phrase in MET-001A's own acceptance contract text predates
+ * this codebase's later discovery (CXP-001B through O) that "project"
+ * always means a specific customer's project, never a bare projectId
+ * string. Without `customerId`, two different customers reusing the same
+ * projectId/planId strings within one tenant could have their cost/usage
+ * events aggregated together by `selectExecutionEconomicsEvents` - a
+ * cross-customer billing/cost data leak, not merely a labeling gap.
+ * `customerId` is now part of the lineage identity for the same reason
+ * `planVersion` was added above: to make the "binds unambiguously to"
+ * contract actually true. This widens MET-001A's documented hierarchy
+ * phrase and should be confirmed against the canonical acceptance
+ * contract by independent review, not treated as self-certified here.
  */
 export interface ExecutionEconomicsLineage {
   readonly tenantId: TenantScope["tenantId"];
+  readonly customerId: string;
   readonly projectId: string;
   readonly planId: string;
   readonly planVersion: number;
@@ -103,6 +119,7 @@ export interface ExecutionEconomicsLineage {
 
 export function createExecutionEconomicsLineage(input: {
   tenantScope: TenantScope;
+  customerId: unknown;
   projectId: unknown;
   planId: unknown;
   planVersion: unknown;
@@ -113,6 +130,7 @@ export function createExecutionEconomicsLineage(input: {
 }): ExecutionEconomicsLineage {
   return {
     tenantId: input.tenantScope.tenantId,
+    customerId: requireNonEmptyString(input.customerId, "customerId"),
     projectId: requireNonEmptyString(input.projectId, "projectId"),
     planId: requireNonEmptyString(input.planId, "planId"),
     planVersion: requirePositiveInteger(input.planVersion, "planVersion"),
@@ -364,7 +382,10 @@ export function appendExecutionEconomicsEvent(
   event: ExecutionEconomicsEvent,
 ): ExecutionEconomicsLedger {
   const existing = ledger.events.find(
-    (e) => e.lineage.tenantId === event.lineage.tenantId && e.idempotencyKey === event.idempotencyKey,
+    (e) =>
+      e.lineage.tenantId === event.lineage.tenantId &&
+      e.lineage.customerId === event.lineage.customerId &&
+      e.idempotencyKey === event.idempotencyKey,
   );
   if (existing !== undefined) {
     if (eventsAreIdenticalReplay(existing, event)) {
@@ -398,6 +419,7 @@ export function appendExecutionEconomicsEvent(
  */
 export interface ExecutionEconomicsScope {
   readonly tenantId: TenantScope["tenantId"];
+  readonly customerId: string;
   readonly projectId: string;
   readonly planId: string;
   readonly planVersion?: number;
@@ -414,6 +436,7 @@ export function selectExecutionEconomicsEvents(
   return ledger.events.filter(
     (e) =>
       e.lineage.tenantId === scope.tenantId &&
+      e.lineage.customerId === scope.customerId &&
       e.lineage.projectId === scope.projectId &&
       e.lineage.planId === scope.planId &&
       (scope.planVersion === undefined || e.lineage.planVersion === scope.planVersion) &&

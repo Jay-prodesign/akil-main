@@ -166,6 +166,7 @@ test("CXP-001A MET same-lineage proof: execution-economics events bind to the ex
 
   const lineage = createExecutionEconomicsLineage({
     tenantScope: coldStart.tenantScope,
+    customerId: coldStart.project.customerId,
     projectId: coldStart.project.projectId,
     planId: coldStart.plan.planId,
     planVersion: coldStart.plan.version,
@@ -192,6 +193,7 @@ test("CXP-001A MET same-lineage proof: execution-economics events bind to the ex
 
   const foreignLineage = createExecutionEconomicsLineage({
     tenantScope: coldStart.tenantScope,
+    customerId: coldStart.project.customerId,
     projectId: coldStart.project.projectId,
     planId: coldStart.plan.planId,
     planVersion: coldStart.plan.version,
@@ -217,6 +219,7 @@ test("CXP-001A MET same-lineage proof: execution-economics events bind to the ex
   // version}, not planId alone (Brain PR #66 F4).
   const foreignVersionLineage = createExecutionEconomicsLineage({
     tenantScope: coldStart.tenantScope,
+    customerId: coldStart.project.customerId,
     projectId: coldStart.project.projectId,
     planId: coldStart.plan.planId,
     planVersion: coldStart.plan.version + 1,
@@ -242,6 +245,7 @@ test("CXP-001A MET same-lineage proof: execution-economics events bind to the ex
   // task/run/attempt tuple, not merely down to job.
   const foreignAttemptLineage = createExecutionEconomicsLineage({
     tenantScope: coldStart.tenantScope,
+    customerId: coldStart.project.customerId,
     projectId: coldStart.project.projectId,
     planId: coldStart.plan.planId,
     planVersion: coldStart.plan.version,
@@ -270,6 +274,7 @@ test("CXP-001A MET same-lineage proof: execution-economics events bind to the ex
 
   const scoped = selectExecutionEconomicsEvents(ledger, {
     tenantId: coldStart.tenantScope.tenantId,
+    customerId: coldStart.project.customerId,
     projectId: coldStart.project.projectId,
     planId: coldStart.plan.planId,
     planVersion: coldStart.plan.version,
