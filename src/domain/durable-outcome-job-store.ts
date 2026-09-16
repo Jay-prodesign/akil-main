@@ -27,7 +27,11 @@ export interface PersistJobResult {
 export interface DurableOutcomeJobStore {
   putIfAbsent(job: OutcomeJob): PersistJobResult;
   get(tenantId: TenantScope["tenantId"], jobId: OutcomeJob["jobId"]): OutcomeJob | undefined;
-  list(tenantId: TenantScope["tenantId"], projectId: OutcomeJob["projectId"]): ReadonlyArray<OutcomeJob>;
+  list(
+    tenantId: TenantScope["tenantId"],
+    customerId: OutcomeJob["customerId"],
+    projectId: OutcomeJob["projectId"],
+  ): ReadonlyArray<OutcomeJob>;
 }
 
 /**
@@ -80,9 +84,13 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
   putIfAbsent(job: OutcomeJob): PersistJobResult {
     const existing = this.get(job.tenantId, job.jobId);
     if (existing !== undefined) {
-      if (existing.tenantId !== job.tenantId || existing.projectId !== job.projectId) {
+      if (
+        existing.tenantId !== job.tenantId ||
+        existing.customerId !== job.customerId ||
+        existing.projectId !== job.projectId
+      ) {
         throw new InvalidDurableOutcomeJobStoreError(
-          `jobId "${job.jobId}" is already persisted under a different tenant/project`,
+          `jobId "${job.jobId}" is already persisted under a different tenant/customer/project`,
         );
       }
       return { job: existing, created: false };
@@ -104,10 +112,11 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
 
   list(
     tenantId: TenantScope["tenantId"],
+    customerId: OutcomeJob["customerId"],
     projectId: OutcomeJob["projectId"],
   ): ReadonlyArray<OutcomeJob> {
     return [...this.dedupedByJobId(this.readAll(tenantId)).values()].filter(
-      (job) => job.projectId === projectId,
+      (job) => job.customerId === customerId && job.projectId === projectId,
     );
   }
 }
