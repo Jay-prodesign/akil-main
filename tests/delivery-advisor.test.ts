@@ -319,6 +319,26 @@ test("CXP-001A (Brain PR #66 Rev26 F5, adversarial): a cloned binding with a dup
   assert.equal(result.observation.applicableRecipeRef, undefined);
 });
 
+test("CXP-001A (AA-005 Rev29, adversarial): a cloned binding that retains every genuine boundJobs entry but also carries one unique, well-formed, entirely foreign/injected entry is never cited as applicable provenance", () => {
+  const realBoundJobs = WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING.boundJobs;
+  const foreignEntry = {
+    specId: "forged-spec-id-not-in-snapshot",
+    requirementId: "forged-requirement-id-not-in-snapshot",
+  } as (typeof realBoundJobs)[number];
+  const contaminatedBinding = {
+    ...WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING,
+    boundJobs: [...realBoundJobs, foreignEntry],
+  } as typeof WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING;
+
+  const result = buildAdvisorResult({
+    ownership: WEBSITE_BUILD_V1_RECIPE_BINDING_OWNERSHIP,
+    snapshot: WEBSITE_BUILD_V1_BOUND_CLIENT_PROJECT_SNAPSHOT,
+    recipe: WEBSITE_BUILD_V1_RECIPE,
+    binding: contaminatedBinding,
+  });
+  assert.equal(result.observation.applicableRecipeRef, undefined);
+});
+
 test("CXP-001A (Brain PR #66 Rev26 F5, adversarial): a binding with an empty boundJobs array is structurally incoherent and never yields applicable provenance", () => {
   const emptyBinding = {
     ...WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING,

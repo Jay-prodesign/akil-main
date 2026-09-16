@@ -122,6 +122,36 @@ function boundJobsAreStructurallyCoherent(
 }
 
 /**
+ * AA-005 Rev29 correction: `boundJobsAreStructurallyCoherent` above only
+ * proves the array's own internal shape (non-empty, unique/non-empty
+ * specIds) - it says nothing about whether every entry in that array is
+ * genuinely represented in this project's real jobs. Combined with the
+ * "at least one job matches at least one boundJob" check that used to gate
+ * applicability, a cloned binding could retain every genuine entry and
+ * still append one unique, well-formed but entirely foreign/injected
+ * `boundJobs` entry (an identity no real `OutcomeJob` in the snapshot ever
+ * carries) - the coherence check would accept it (nothing duplicated or
+ * empty) and the old existential match would still succeed on a retained
+ * genuine entry, silently laundering the injected entry's presence through
+ * an otherwise-valid binding. This function instead requires the WHOLE
+ * `boundJobs` array to be exactly represented in the snapshot's real job
+ * set - every single entry, not just one - so one foreign entry anywhere in
+ * the array is enough to deny provenance outright.
+ */
+function boundJobsAreFullyRepresentedInSnapshot(
+  boundJobs: DeliveryRecipePlanBinding["boundJobs"],
+  jobs: ClientProjectSnapshot["deliveryStatus"]["jobs"],
+): boolean {
+  return boundJobs.every((boundJob) =>
+    jobs.some(
+      (job) =>
+        (boundJob.specId as string) === (job.jobId as string) &&
+        (boundJob.requirementId as string) === job.jobFamily,
+    ),
+  );
+}
+
+/**
  * V2-CDO-008 minimum Delivery Project Advisor (L0 Observe / L1 Recommend).
  * Pure, deterministic, provider-neutral: no model/provider SDK, prompt,
  * persistent memory, RAG/vector store or command/mutation surface exists
@@ -152,10 +182,12 @@ function boundJobsAreStructurallyCoherent(
  * caller-supplied recipe coincidentally sharing a fixture string. This
  * function instead requires the binding's own tenant/project to match
  * `ownership`, the binding's plan to match the snapshot's
- * `workingArtifact` when one is present, and at least one of the
- * snapshot's real jobs to be a job the binding actually claims
- * (`boundJobs[].specId === job.jobId`, the same deterministic identity
- * `outcome-job-routing-execution.ts` already relies on).
+ * `workingArtifact` when one is present, and every entry of the binding's
+ * own `boundJobs` array to be a job the snapshot's real jobs actually
+ * contain (`boundJobs[].specId === job.jobId`, the same deterministic
+ * identity `outcome-job-routing-execution.ts` already relies on) - not
+ * merely at least one of them (AA-005 Rev29; see
+ * `boundJobsAreFullyRepresentedInSnapshot` above).
  *
  * Brain PR #66 F5 correction: a `binding` alone is not sufficient - the
  * caller must also supply the concrete `recipe` the binding claims to have
@@ -165,6 +197,16 @@ function boundJobsAreStructurallyCoherent(
  * provenance - `recipeId`/`version` on the observation are exposed only
  * from the binding's own already-verified fields once both checks pass,
  * never trusted from the raw `recipe` object directly.
+ *
+ * AA-005 Rev29 correction: the applicability check used to require only
+ * that SOME snapshot job matched SOME `boundJobs` entry - so a cloned
+ * binding retaining every genuine entry could still smuggle in one unique,
+ * well-formed but entirely foreign `boundJobs` entry (an identity no real
+ * job in the snapshot carries) and still be cited as applicable provenance,
+ * since a genuine entry elsewhere in the array would satisfy the
+ * existential match. Provenance now requires the WHOLE `boundJobs` array to
+ * be exactly represented in the snapshot's real jobs - one foreign/injected
+ * entry anywhere in the array is enough to deny applicability outright.
  */
 export function buildAdvisorResult(input: {
   ownership: ProjectOwnershipRef;
@@ -206,13 +248,7 @@ export function buildAdvisorResult(input: {
     (workingArtifact === undefined ||
       (workingArtifact.planId === binding.planId && workingArtifact.currentVersion === binding.planVersion)) &&
     boundJobsAreStructurallyCoherent(binding.boundJobs) &&
-    input.snapshot.deliveryStatus.jobs.some((job) =>
-      binding.boundJobs.some(
-        (boundJob) =>
-          (boundJob.specId as string) === (job.jobId as string) &&
-          (boundJob.requirementId as string) === job.jobFamily,
-      ),
-    )
+    boundJobsAreFullyRepresentedInSnapshot(binding.boundJobs, input.snapshot.deliveryStatus.jobs)
   ) {
     applicableRecipeRef = { recipeId: binding.boundRecipeId, version: binding.consumedRecipeVersion };
   }
