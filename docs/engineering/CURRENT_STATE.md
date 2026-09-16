@@ -4,6 +4,8 @@ This file is the compact current-cursor/current-state record for this repository
 
 Repo engineering policy epoch: see `AGENTS.md` §11.
 
+Engineering cursor is continuous under `AGENTS.md` §3/DEC-160: a missing local `Next Exact Action` triggers §3's bounded resolution order (canonical handoff/task record → admitted roadmap/task/dependency pointers → live dependency scan → bounded hardening/gap scan), not a wait for Founder `continue`/`devam`. See `AGENTS.md` §3 for the full contract; this file does not restate it.
+
 ## Current engineering baseline
 
 - `main` = `3226c76fa338e425e553638e5f5f48924182a1c0`.

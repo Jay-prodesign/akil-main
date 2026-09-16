@@ -21,6 +21,10 @@ Authority order for engineering decisions: Owner → ChatGPT / canonical AKILTA 
 - "Done" asserted in prose is never sufficient evidence for any lifecycle transition.
 - `SAFE_MERGE` (merging to `main` without a separate Brain/Founder relay) is likewise governed entirely by `AGENTS.md` §12's conditions and exclusions; it is not a default engineer entitlement.
 
+## Continuous execution is not additional authority
+
+`AGENTS.md` §3's continuous-cursor discipline changes execution cadence, not authority. A bare `continue`/`devam` grants nothing on its own, and its absence never stops an authorized agent mid-mission. A pending independent review blocks only the exact affected edge, never the whole engineering cursor. Short-task chaining — moving straight to the next admitted dependency-safe action once one closes — is required whenever that next edge is already resolvable, not merely permitted. Turn/session stop is governed entirely by `AGENTS.md` §3's stop proof (stop classes A–G). None of this weakens or bypasses: the `HIGH`/`PROTECTED` classification above, the independent-verification requirement for delegated `VERIFIED`, `SAFE_MERGE`'s eligibility/exclusion conditions, any explicit `HOLD_MERGE`, or a genuine Founder-protected decision — those gates apply exactly as before regardless of execution cadence.
+
 ## DEC-121 — Secret authority
 
 - No real secret value (password, API key, access token, recovery code, private key, or equivalent) may exist in: repository history, `AGENTS.md`, `CLAUDE.md`, task/execution records, prompts, Google Drive governance documents, or ordinary logs.

@@ -20,15 +20,35 @@ Before doing material engineering work, an agent must load context in this order
 
 Do not read the entire repository or all documentation by default. Minimum sufficient context, every time.
 
-## 3. "continue" / "devam"
+## 3. Continuous cursor / "continue" / "devam"
 
-A bare `continue` or `devam` resumes only the current authorized `Next Exact Action` recorded in the active execution record. It never:
+Authorized corridor execution inside an assigned task or mission is continuous by default. A bare `continue` or `devam` is not permission and is not a required trigger — it only resumes an interrupted, otherwise-unchanged cursor if one exists. The absence of a user `continue`/`devam` message is never itself a reason to stop; an agent already inside an authorized mission keeps executing without waiting for one. It never:
 
-- starts a new task,
+- starts a new task outside the current authorized scope,
 - expands the scope of the current task,
 - or bypasses an Owner approval gate.
 
-If the recorded `Next Exact Action` is ambiguous, blocked, or missing, stop and report — do not infer intent.
+**Default work quantum.** The default unit of work is the largest dependency-safe, coherent mission reachable from the current exact action — not a single microstep. A normal quantum runs: fresh truth → resolve current exact action → inspect → implement → targeted/adversarial tests → fix failures → typecheck/build → required regression → self-review → commit/push → PR/evidence truth-sync → classify the resulting edge → scan/select the next admitted dependency-safe action → continue. Reaching a checkpoint inside that quantum — a passing test, a pushed commit, an opened PR, `IMPLEMENTED` status, a pending review, or the absence of a new Brain/Founder message — is not by itself a reason to end the quantum or ask whether to proceed.
+
+**Forward hot buffer.** Where practical, maintain `CURRENT` / `NEXT_READY` / `NEXT_AFTER_READY` as a running 1–2-edge runway, resolved only from the current canonical engineering handoff/task record, admitted roadmap/task/dependency pointers, and live repository dependency evidence — never invented merely to avoid appearing idle.
+
+**Next Exact Action resolution.** If the recorded `Next Exact Action` is missing, stale, or ambiguous, resolve it in this order before stopping: (1) the current canonical engineering handoff/task record; (2) the authoritative admitted roadmap/task/dependency pointers; (3) a live repository dependency scan; (4) a bounded admitted hardening/gap scan over already-admitted surfaces for concrete reversible defects or missing deterministic/adversarial coverage. Only stop and report if none of these resolves to a dependency-safe action — do not infer intent beyond what this resolution order actually supports.
+
+**Pending review blocks only the affected edge.** An exact head awaiting independent Brain/reviewer verification blocks only that specific edge. It does not pause the agent globally: if another admitted, dependency-safe, reversible action exists — on the same task, a different task, or a bounded hardening/gap scan — the agent continues it while the review is pending. One blocked or HIGH/PROTECTED edge never creates a global stop by itself.
+
+**Turn/session stop proof.** An agent stops only when it can state one of the following stop classes, with evidence:
+
+- **A** — a genuine Owner/Founder approval gate is reached and unresolved.
+- **B** — an unresolved HIGH/PROTECTED authority edge exists and no other admitted READY work remains.
+- **C** — a genuine dependency or trigger gate blocks every remaining admitted candidate (a concrete missing prerequisite, not merely "no new message").
+- **D** — an unresolved canonical-authority conflict exists that the agent cannot resolve without escalation.
+- **E** — a required surface, tool, or credential is genuinely unavailable and no other admitted work is reachable.
+- **F** — a bounded admitted hardening/gap scan has been run and its evidence shows every scanned candidate is non-ready or protected, with no further reversible preparation available.
+- **G** — the Owner/Founder explicitly says stop or pause.
+
+A stop must report, in machine-readable form: `STOP_CLASS`, `BLOCKED_EDGE`, `EVIDENCE`, `WHY_NO_OTHER_READY_WORK`, `NEXT_WAKE_TRIGGER`, `NEXT_EXACT_ACTION`. An agent that cannot substantiate one of A–G does not park; it continues.
+
+None of this widens authority beyond §9–§12: risk classification, independent verification, `SAFE_MERGE` eligibility, and every `HOLD_MERGE`/protected exclusion remain exactly as strict as before this section.
 
 ## 4. Handoff and continuity
 
@@ -63,6 +83,8 @@ Owner → ChatGPT / canonical AKILTA task → repository policy (this file and `
 ## 10. Task lifecycle
 
 `BACKLOG → READY → IN_PROGRESS → IMPLEMENTED → VERIFYING → VERIFIED → COMPLETED`, with `VERIFYING → CHANGES_REQUIRED → IN_PROGRESS` on failed verification. By default, an implementing engineer's authority ends at `IMPLEMENTED`: only ChatGPT verification against requirements, repository changes, and evidence can advance a task to `VERIFIED` / `COMPLETED`. §12 defines a narrow, epoch-gated exception for LOW/MEDIUM-risk work; until that epoch gate is independently confirmed active, this default rule is the only rule. See `docs/engineering/PERMISSION_POLICY.md` for full role authority.
+
+These lifecycle status boundaries are not turn or session boundaries. Reaching `IMPLEMENTED` on one task, or a task entering `VERIFYING`/pending review, is not itself a stop condition — per §3, the agent continues to the next admitted dependency-safe action rather than ending its turn merely because a status changed.
 
 ## 11. Repo engineering policy epoch
 

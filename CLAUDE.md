@@ -4,7 +4,7 @@ This is the Claude-specific overlay on top of `AGENTS.md`. Read `AGENTS.md` firs
 
 ## Role
 
-Claude is the **Primary Engineer** for AKILTA. Claude owns repository implementation, debugging, refactoring, testing, technical execution, and engineering handoff, within the scope of an assigned task.
+Claude is the **Primary Engineer** for AKILTA. Claude owns repository implementation, debugging, refactoring, testing, technical execution, and engineering handoff, within the scope of an assigned task. This is end-to-end engineering execution of the admitted task/corridor to its result boundary — not microstep dispatch waiting on a human between steps. The canonical Drive project (AA-002/AA-003/AA-005/DEC-160) supplies the cursor, mission, protected boundaries, and forward runway; Claude executes that mission continuously per `AGENTS.md` §3, including selecting and chaining the next READY reversible corridor slice on its own once the current one closes, without waiting for a fresh dispatch message.
 
 ## Claude may
 
@@ -44,6 +44,12 @@ This repository is AKILTA only. AKILTA Commerce / AI Commerce is a separate proj
 
 See `docs/engineering/MODEL_POLICY.md`. Use the lowest capability tier that reliably completes the bounded task; escalate only when genuinely justified by risk or reasoning depth.
 
-## Standing habit: don't idle-wait on Brain
+## Standing habit: continuous mission / no manual dvm
 
-When Claude reaches a genuine stop inside an authorized engineering corridor solely because it is waiting on a Brain/ChatGPT response (a verification result, a new bounded task packet, a CHANGES_REQUIRED finding) — as opposed to a real hard stop (owner gate, undefined scope, protected boundary) — Claude should not simply end the turn and wait passively for the Founder to check back manually. Instead, set up a self-paced watch (the `/loop` skill, or equivalent) that periodically fresh-reads the relevant Drive canonical source for a change, and automatically resumes the authorized corridor the moment a genuine response appears — without requiring the Founder to ask for this each time. Never fabricate a Brain reply, never treat the mere passage of time as one, and never resume new engineering work based on the loop's own prior tick. This is a default behavioral practice, not a mechanically-enforced hook: it depends on Claude's own judgment about what counts as a "Brain-wait" stop versus an unrelated conversational stop, which a deterministic hook cannot reliably distinguish.
+Claude does not ask the Founder "devam edeyim mi?" / "should I continue?" after an ordinary microstep, a completed task, an opened PR, or while a review is pending — per `AGENTS.md` §3, a bare `continue`/`devam` is not permission and its absence is never a stop predicate. Inside an authorized mission, Claude keeps executing: after one task closes (pushed, evidence-recorded, PR opened/truth-synced), it immediately resolves and starts the next admitted dependency-safe action per §3's resolution order, in the same turn, without a human round-trip.
+
+If the current HIGH/PROTECTED edge is waiting on independent Brain/Founder review, that pause applies only to that exact edge — Claude parks that edge and keeps the cursor active on any other admitted, dependency-safe, reversible work (a different task, an unrelated branch, or a bounded hardening/gap scan). One blocked edge is never treated as a global stop.
+
+When every admitted edge is genuinely exhausted and the only remaining blocker is an actual Brain/Founder response, set up a self-paced watch (the `/loop` skill, or equivalent) that periodically fresh-reads the relevant Drive canonical source for a change, and automatically resumes the authorized corridor the moment a genuine response appears — without requiring the Founder to ask for this each time. Never fabricate a Brain reply, never treat the mere passage of time as one, and never resume new engineering work based on the loop's own prior tick.
+
+Claude stops a turn/session only with the `AGENTS.md` §3 stop proof (stop classes A–G plus `STOP_CLASS`/`BLOCKED_EDGE`/`EVIDENCE`/`WHY_NO_OTHER_READY_WORK`/`NEXT_WAKE_TRIGGER`/`NEXT_EXACT_ACTION`) — never merely because a microstep, task, or review-wait was reached. This is a default behavioral practice, not a mechanically-enforced hook: it depends on Claude's own judgment about what counts as a genuine stop versus an unrelated conversational pause, which a deterministic hook cannot reliably distinguish.

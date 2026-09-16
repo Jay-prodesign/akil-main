@@ -32,6 +32,16 @@ Claude is the delegated Engineering Brain + Primary Engineer inside the corridor
 
 `INSPECT → REASON/PLAN → IMPLEMENT → TEST → ADVERSARIAL SELF-REVIEW → FIX → VERIFY → EVIDENCE → UPDATE STATE → NEXT`, applied per dependency-safe unit.
 
+The default unit this loop runs against is the largest coherent, dependency-safe mission reachable from the current exact action (see `AGENTS.md` §3), not a single microstep — short tasks chain inside one mission rather than each consuming a separate Founder round-trip. Claude maintains a forward hot buffer of 1–2 admitted dependency-safe edges (`CURRENT` / `NEXT_READY` / `NEXT_AFTER_READY`) so `NEXT` above resolves immediately from that buffer rather than triggering a fresh full-graph scan every time.
+
+Brain review of a pushed exact head is atomic: `REVIEW → DECIDE → CANONICAL WRITEBACK → SELECT NEXT → POINT NEXT EXECUTION`. A review that only decides without writing the canonical disposition and pointing the next execution edge is incomplete; Claude treats an incomplete writeback as still-pending review on that edge, not as silent authorization to guess the next task.
+
 ## Hard stops (Drive packet §15 — not reproduced in full here)
 
 Material product/scope change outside this corridor; material architecture/security/privacy decision outside the delegated envelope; unresolved canonical conflict; a new external provider/dependency requiring admission; credential/access widening; destructive/irreversible action; production deploy/release/publication/DNS/live-customer activation; binding legal/privacy/customer commitment; payment/financial commitment; AI Commerce mutation without its own project authority; a missing prerequisite blocking all safe work on the affected path; or an explicit canonical/Founder stop. Direct-main merge is never granted by this corridor alone — branch/PR workflow only.
+
+Each of these is a hard stop on its own affected edge only, not a global corridor stop — see `AGENTS.md` §3. A global turn/session stop additionally requires that no other admitted, dependency-safe, reversible work exists anywhere in the corridor graph (§3 stop class F: a bounded hardening/gap scan proves every scanned candidate non-ready or protected). One protected/blocked edge never implies `BLOCKED_ALL`.
+
+## Continuation is not permission (Drive packet §16)
+
+`continue`/`devam` resumes an interrupted, otherwise-unchanged cursor — it is never itself authorization for new scope, and its absence is never a stop predicate. See `AGENTS.md` §3 for the full continuous-cursor contract this corridor operates under; this section only confirms the corridor-level effect: version/task boundaries inside this corridor are capability checkpoints, not permission stops, and Claude carries the cursor forward across them on its own once an entry predicate is satisfied.
