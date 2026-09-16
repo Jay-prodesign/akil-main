@@ -191,3 +191,37 @@ test("T5: rejects an audit event that belongs to a different project within the 
     InvalidDeliveryTimelineError,
   );
 });
+
+test("CXP-001C (adversarial): rejects an audit event belonging to a different customer within the same tenant, even when it reuses the exact same projectId string", () => {
+  const otherCustomerInA = createCustomer({
+    tenantScope: tenantA,
+    customerId: "cust-1-other",
+    displayName: "Initech",
+  });
+  const sameProjectIdOtherCustomerInA = createProject({
+    tenantScope: tenantA,
+    customer: otherCustomerInA,
+    projectId: "proj-1",
+    ownerRef: "owner-1-other",
+    state: "active",
+  });
+  const jobForOtherCustomer = createOutcomeJob({
+    tenantScope: tenantA,
+    customer: otherCustomerInA,
+    project: sameProjectIdOtherCustomerInA,
+    jobId: "job-foreign-customer-same-projectid",
+    jobFamily: "onboarding",
+    businessObjective: "Foreign customer job, same projectId string",
+  });
+  const foreignCustomerEvent = createAuditEvent({
+    job: jobForOtherCustomer,
+    eventId: "evt-foreign-customer",
+    actorRef: "system",
+    eventType: "EXCEPTION_STATE_ENTERED:BLOCKED",
+    timestamp: "2026-08-21T09:00:00Z",
+  });
+  assert.throws(
+    () => buildDeliveryTimeline({ project: projectInA, auditEvents: [foreignCustomerEvent] }),
+    InvalidDeliveryTimelineError,
+  );
+});
