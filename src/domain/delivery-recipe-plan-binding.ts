@@ -1,7 +1,7 @@
 import type { ProjectPlanVersion } from "./project-plan.js";
 import type { ServiceCatalogAdmission } from "./service-catalog-admission.js";
 import type { DeliveryRecipe } from "./delivery-recipe.js";
-import type { OutcomeJobSpec } from "./outcome-job-spec.js";
+import { deriveOutcomeJobSpecs, type OutcomeJobSpec } from "./outcome-job-spec.js";
 
 export class InvalidDeliveryRecipePlanBindingError extends Error {
   constructor(reason: string) {
@@ -72,9 +72,15 @@ export interface DeliveryRecipePlanBinding {
  *    consequence of the blueprint/version match above, matching the
  *    `wireAdmittedOutcomeJobs` precedent of never trusting an upstream
  *    caller's own internal consistency;
- *  - every entry in `specs` must belong to this exact
- *    tenant/project/plan/version/blueprint lineage - no cross-plan
- *    substitution.
+ *  - `specs` must be exactly the canonical `deriveOutcomeJobSpecs(plan)`
+ *    output for this plan - no more, no fewer, no altered fields. A
+ *    caller-supplied same-lineage spec with a fake/altered specId,
+ *    requirementId, jobFamily, intendedOutcome or prerequisites, a
+ *    duplicate, or an omitted canonically-required spec, can never be
+ *    silently trusted as plan/job recipe provenance; `deriveOutcomeJobSpecs`
+ *    is authoritative and deterministic from the plan's REQUIRED nodes, so
+ *    the binding re-derives it and compares rather than trusting the
+ *    caller's own copy.
  *
  * Purely a function of its inputs: calling this again with the exact same
  * `admission`/`recipe`/`plan`/`specs` always produces a deep-equal result,
@@ -116,23 +122,45 @@ export function bindAdmittedRecipeToPlan(input: {
     );
   }
 
+  const canonicalSpecs = deriveOutcomeJobSpecs(plan);
+  if (specs.length !== canonicalSpecs.length) {
+    throw new InvalidDeliveryRecipePlanBindingError(
+      `specs (${specs.length}) do not match the canonical derived spec set for this plan (${canonicalSpecs.length}) - every canonically REQUIRED job spec must be present exactly once, with no extras or omissions`,
+    );
+  }
+  const canonicalBySpecId = new Map(canonicalSpecs.map((s) => [s.specId, s]));
+  const seenSpecIds = new Set<OutcomeJobSpec["specId"]>();
   for (const spec of specs) {
-    if (
-      spec.tenantId !== plan.tenantId ||
-      spec.projectId !== plan.projectId ||
-      spec.planId !== plan.planId ||
-      spec.planVersion !== plan.version
-    ) {
+    if (seenSpecIds.has(spec.specId)) {
       throw new InvalidDeliveryRecipePlanBindingError(
-        `spec "${spec.specId}" does not belong to the given plan's tenant/project/plan/version lineage`,
+        `duplicate spec "${spec.specId}" supplied - the canonical derived spec set never contains duplicates`,
       );
     }
+    seenSpecIds.add(spec.specId);
+
+    const canonical = canonicalBySpecId.get(spec.specId);
+    if (canonical === undefined) {
+      throw new InvalidDeliveryRecipePlanBindingError(
+        `spec "${spec.specId}" is not part of the canonical derived spec set for this plan - a forged or foreign spec cannot be bound`,
+      );
+    }
+    const prerequisitesMatch =
+      spec.prerequisites.length === canonical.prerequisites.length &&
+      spec.prerequisites.every((dep, i) => dep === canonical.prerequisites[i]);
     if (
-      spec.sourceBlueprintId !== plan.sourceBlueprintId ||
-      spec.sourceBlueprintVersion !== plan.sourceBlueprintVersion
+      spec.tenantId !== canonical.tenantId ||
+      spec.projectId !== canonical.projectId ||
+      spec.planId !== canonical.planId ||
+      spec.planVersion !== canonical.planVersion ||
+      spec.requirementId !== canonical.requirementId ||
+      spec.jobFamily !== canonical.jobFamily ||
+      spec.intendedOutcome !== canonical.intendedOutcome ||
+      spec.sourceBlueprintId !== canonical.sourceBlueprintId ||
+      spec.sourceBlueprintVersion !== canonical.sourceBlueprintVersion ||
+      !prerequisitesMatch
     ) {
       throw new InvalidDeliveryRecipePlanBindingError(
-        `spec "${spec.specId}" sourceBlueprint does not match the given plan's sourceBlueprint`,
+        `spec "${spec.specId}" does not match the canonical derived spec for this plan - an altered/forged same-lineage spec cannot be bound`,
       );
     }
   }

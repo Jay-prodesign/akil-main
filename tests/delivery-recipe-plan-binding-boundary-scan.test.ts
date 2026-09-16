@@ -34,7 +34,7 @@ test("AI-004A: delivery-recipe-plan-binding.ts imports only sibling domain type 
     'import type { ProjectPlanVersion } from "./project-plan.js";',
     'import type { ServiceCatalogAdmission } from "./service-catalog-admission.js";',
     'import type { DeliveryRecipe } from "./delivery-recipe.js";',
-    'import type { OutcomeJobSpec } from "./outcome-job-spec.js";',
+    'import { deriveOutcomeJobSpecs, type OutcomeJobSpec } from "./outcome-job-spec.js";',
   ]);
 });
 
@@ -45,11 +45,10 @@ test("AI-004A: never calls Date.now() or fetch - every field is caller-supplied,
   assert.doesNotMatch(content, /from ["']node:/);
 });
 
-test("AI-004A: never invokes plan compilation, spec derivation, catalog admission, job wiring, or job execution - it only composes their already-produced outputs", () => {
+test("AI-004A: never invokes plan compilation, catalog admission, job wiring, or job execution - it only composes their already-produced outputs (the sole exception is deriveOutcomeJobSpecs, imported to authenticate caller-supplied specs against the canonical derived set, never to widen execution authority)", () => {
   const content = readFileSync(join(REPO_ROOT, AI_004A_FILE), "utf8");
   const forbiddenCalls = [
     "compilePlan(",
-    "deriveOutcomeJobSpecs(",
     "admitServiceCatalogEntry(",
     "revokeServiceCatalogAdmission(",
     "wireAdmittedOutcomeJobs(",
@@ -58,6 +57,7 @@ test("AI-004A: never invokes plan compilation, spec derivation, catalog admissio
   ];
   const violations = forbiddenCalls.filter((call) => content.includes(call));
   assert.deepEqual(violations, []);
+  assert.match(content, /deriveOutcomeJobSpecs\(plan\)/);
 });
 
 test("AI-004A: no execution/dispatch/approval mutation surface anywhere in the module - a binding is provenance only", () => {

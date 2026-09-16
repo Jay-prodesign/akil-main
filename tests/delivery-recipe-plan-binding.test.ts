@@ -275,6 +275,59 @@ test("AI8 (provenance honesty): consumedRecipeVersion records the concrete recip
   assert.equal(binding.consumedRecipeVersion, 7);
 });
 
+// --- AI10/AI11/AI12 (Brain PR #65 F1, adversarial): canonical derived-spec authenticity + completeness ---
+
+test("AI10 (Brain F1, adversarial): a forged same-lineage spec with an altered requirementId/intendedOutcome cannot be bound as canonical job provenance", () => {
+  const { plan, specs } = buildWebsiteBuildV1Plan();
+  const admission = admitWebsiteBuildV1Recipe(plan);
+  const forged: OutcomeJobSpec[] = specs.map((spec, i) =>
+    i === 0 ? { ...spec, intendedOutcome: "a fabricated outcome the plan never actually required" } : spec,
+  );
+  assert.throws(
+    () =>
+      bindAdmittedRecipeToPlan({
+        admission,
+        recipe: WEBSITE_BUILD_V1_RECIPE,
+        plan,
+        specs: forged,
+      }),
+    InvalidDeliveryRecipePlanBindingError,
+  );
+});
+
+test("AI11 (Brain F1, adversarial): omitting one canonically-derived required spec cannot be bound - completeness is required, not just per-spec lineage", () => {
+  const { plan, specs } = buildWebsiteBuildV1Plan();
+  const admission = admitWebsiteBuildV1Recipe(plan);
+  assert.ok(specs.length > 1, "expected more than one committed job for this omission test to be meaningful");
+  assert.throws(
+    () =>
+      bindAdmittedRecipeToPlan({
+        admission,
+        recipe: WEBSITE_BUILD_V1_RECIPE,
+        plan,
+        specs: specs.slice(1),
+      }),
+    InvalidDeliveryRecipePlanBindingError,
+  );
+});
+
+test("AI12 (Brain F1, adversarial): a duplicated spec substituting for a different required spec cannot be bound, even when the total count matches", () => {
+  const { plan, specs } = buildWebsiteBuildV1Plan();
+  const admission = admitWebsiteBuildV1Recipe(plan);
+  assert.ok(specs.length > 1, "expected more than one committed job for this duplicate-substitution test to be meaningful");
+  const withDuplicate: OutcomeJobSpec[] = [...specs.slice(0, -1), specs[0] as OutcomeJobSpec];
+  assert.throws(
+    () =>
+      bindAdmittedRecipeToPlan({
+        admission,
+        recipe: WEBSITE_BUILD_V1_RECIPE,
+        plan,
+        specs: withDuplicate,
+      }),
+    InvalidDeliveryRecipePlanBindingError,
+  );
+});
+
 // --- AI9: recipe.jobFamily incompatible with the plan's blueprint ---
 
 test("AI9 (adversarial): a recipe whose jobFamily is incompatible with the plan's blueprint cannot bind, even with matching recipeId/blueprint/version", () => {
