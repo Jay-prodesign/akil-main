@@ -110,6 +110,10 @@ function validatePersistedSaleBootstrapRecord(
   if (soldScopeTenantId !== expectedTenantId) {
     fail(filePath, `record "${saleId}" is stored under tenant file "${expectedTenantId}" but result.soldScope.tenantId is "${soldScopeTenantId}" - cross-tenant contamination`);
   }
+  const soldScopeCustomerId = requireNonEmptyStringField(soldScopeObj["customerId"], `record "${saleId}".result.soldScope.customerId`, filePath);
+  if (soldScopeCustomerId !== projectCustomerId) {
+    fail(filePath, `record "${saleId}".result.soldScope.customerId does not match result.project.customerId`);
+  }
   const soldScopeProjectId = requireNonEmptyStringField(soldScopeObj["projectId"], `record "${saleId}".result.soldScope.projectId`, filePath);
   if (soldScopeProjectId !== projectId) {
     fail(filePath, `record "${saleId}".result.soldScope.projectId does not match result.project.projectId`);
@@ -156,6 +160,7 @@ function validatePersistedSaleBootstrapRecord(
   };
   const soldScope: SoldScope = {
     tenantId: soldScopeTenantId as TenantScope["tenantId"],
+    customerId: soldScopeCustomerId as unknown as Project["customerId"],
     projectId: soldScopeProjectId as unknown as Project["projectId"],
     soldScopeId: soldScopeId as unknown as SoldScope["soldScopeId"],
     outcomeContractRef,

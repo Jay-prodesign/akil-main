@@ -175,6 +175,86 @@ test("T7: rejects evidence that does not belong to the given tenant/project", ()
   );
 });
 
+test("CXP-001H (adversarial): rejects a soldScope belonging to a different customer within the SAME tenant, even when projectId values collide across customers", () => {
+  const otherCustomer = createCustomer({
+    tenantScope,
+    customerId: "cust-other-plan-compile",
+    displayName: "Other Customer, Same Tenant",
+  });
+  // Deliberately reuses the SAME projectId ("proj-1") from a different
+  // customer, so this case is caught ONLY by a customerId check - a
+  // tenantId or projectId check alone would not distinguish it
+  // (project.ts does not enforce projectId global uniqueness across
+  // customers).
+  const otherCustomerProject = createProject({
+    tenantScope,
+    customer: otherCustomer,
+    projectId: project.projectId,
+    ownerRef: "owner-other-customer",
+    state: "active",
+  });
+  const otherCustomerSoldScope = createSoldScope({
+    tenantScope,
+    project: otherCustomerProject,
+    soldScopeId: "scope-other-customer",
+    outcomeContractRef: "contract-other-customer",
+  });
+  assert.throws(
+    () =>
+      compilePlan({
+        tenantScope,
+        project, // cust-1's proj-1
+        planId: "plan-1",
+        blueprint,
+        soldScope: otherCustomerSoldScope, // other customer's own proj-1-named project
+        now: "2026-08-18T00:00:00.000Z",
+      }),
+    InvalidProjectPlanError,
+  );
+});
+
+test("CXP-001H (adversarial): rejects evidence belonging to a different customer within the SAME tenant, even when projectId values collide across customers", () => {
+  const otherCustomer = createCustomer({
+    tenantScope,
+    customerId: "cust-other-plan-compile-evidence",
+    displayName: "Other Customer, Same Tenant",
+  });
+  const otherCustomerProject = createProject({
+    tenantScope,
+    customer: otherCustomer,
+    projectId: project.projectId,
+    ownerRef: "owner-other-customer-evidence",
+    state: "active",
+  });
+  const otherCustomerEvidence = createCustomerEvidenceItem({
+    tenantScope,
+    project: otherCustomerProject,
+    evidenceRef: "ev-other-customer",
+    kind: "FACT",
+    subject: "belongs to a different customer, same tenant/projectId string",
+    sourceLocator: "internal://tests",
+  });
+  const soldScope = createSoldScope({
+    tenantScope,
+    project,
+    soldScopeId: "scope-1",
+    outcomeContractRef: "contract-1",
+  });
+  assert.throws(
+    () =>
+      compilePlan({
+        tenantScope,
+        project,
+        planId: "plan-1",
+        blueprint,
+        soldScope,
+        evidence: [otherCustomerEvidence],
+        now: "2026-08-18T00:00:00.000Z",
+      }),
+    InvalidProjectPlanError,
+  );
+});
+
 test("rejects a soldScope referencing an unknown requirementId", () => {
   const soldScope = createSoldScope({
     tenantScope,
