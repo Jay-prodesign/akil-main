@@ -263,6 +263,54 @@ test("T5: an OutcomeJobSpec from a different plan fails closed rather than being
   assert.throws(() => admitJobs(planAdmissionA, specsFromPlanB), InvalidPlanAdmissionError);
 });
 
+test("CXP-001K (adversarial): an OutcomeJobSpec belonging to a different customer within the SAME tenant, reusing the exact same projectId/planId/version, fails closed rather than being silently admitted", () => {
+  const fixture = fullyResolvedFixture();
+  const plan = compilePlan({
+    tenantScope: fixture.tenantScope,
+    project: fixture.project,
+    planId: "plan-cxp-001k",
+    blueprint: fixture.blueprint,
+    soldScope: fixture.soldScope,
+    evidence: fixture.evidence,
+    now: "2026-08-19T00:00:00.000Z",
+  });
+  const planAdmission = admitPlan({ plan, blueprint: fixture.blueprint });
+
+  // Deliberately reuses the SAME tenantScope, projectId string, planId,
+  // and version from a different customer, so this case is caught ONLY
+  // by a customerId check (project.ts does not enforce projectId global
+  // uniqueness across customers).
+  const otherCustomer = createCustomer({
+    tenantScope: fixture.tenantScope,
+    customerId: "cust-cxp-001k-other",
+    displayName: "Other Customer, Same Tenant",
+  });
+  const otherCustomerProject = createProject({
+    tenantScope: fixture.tenantScope,
+    customer: otherCustomer,
+    projectId: fixture.project.projectId,
+    ownerRef: "owner-cxp-001k-other",
+    state: "active",
+  });
+  const otherCustomerSoldScope = createSoldScope({
+    tenantScope: fixture.tenantScope,
+    project: otherCustomerProject,
+    soldScopeId: "sold-scope-cxp-001k-other",
+    outcomeContractRef: "outcome-contract-cxp-001k-other",
+  });
+  const otherCustomerPlan = compilePlan({
+    tenantScope: fixture.tenantScope,
+    project: otherCustomerProject,
+    planId: "plan-cxp-001k",
+    blueprint: fixture.blueprint,
+    soldScope: otherCustomerSoldScope,
+    now: "2026-08-19T00:00:00.000Z",
+  });
+  const otherCustomerSpecs = deriveOutcomeJobSpecs(otherCustomerPlan);
+
+  assert.throws(() => admitJobs(planAdmission, otherCustomerSpecs), InvalidPlanAdmissionError);
+});
+
 test("T6: a materially changed plan invalidates a stale approval - the newer version cannot inherit the old admission", () => {
   const fixture = fullyResolvedFixture();
   const { tenantScope, project, blueprint } = fixture;

@@ -97,6 +97,7 @@ const testRecipe = createDeliveryRecipe({
 function outcomeJobSpecFor(job: OutcomeJob): OutcomeJobSpec {
   return {
     tenantId: job.tenantId,
+    customerId: job.customerId,
     projectId: job.projectId,
     planId: "plan-1" as OutcomeJobSpec["planId"],
     planVersion: 1,

@@ -36,6 +36,7 @@ export interface AdmissionAwaiting {
  */
 export interface PlanAdmissionResult {
   readonly tenantId: ProjectPlanVersion["tenantId"];
+  readonly customerId: ProjectPlanVersion["customerId"];
   readonly projectId: ProjectPlanVersion["projectId"];
   readonly planId: ProjectPlanVersion["planId"];
   readonly planVersion: ProjectPlanVersion["version"];
@@ -47,9 +48,10 @@ export interface PlanAdmissionResult {
 
 function planIdentity(
   plan: ProjectPlanVersion,
-): Pick<PlanAdmissionResult, "tenantId" | "projectId" | "planId" | "planVersion"> {
+): Pick<PlanAdmissionResult, "tenantId" | "customerId" | "projectId" | "planId" | "planVersion"> {
   return {
     tenantId: plan.tenantId,
+    customerId: plan.customerId,
     projectId: plan.projectId,
     planId: plan.planId,
     planVersion: plan.version,
@@ -161,6 +163,7 @@ export function admitPlan(input: {
 
 export interface JobAdmissionResult {
   readonly tenantId: PlanAdmissionResult["tenantId"];
+  readonly customerId: PlanAdmissionResult["customerId"];
   readonly projectId: PlanAdmissionResult["projectId"];
   readonly planId: PlanAdmissionResult["planId"];
   readonly planVersion: PlanAdmissionResult["planVersion"];
@@ -185,12 +188,13 @@ export function admitJobs(
   for (const [index, spec] of specs.entries()) {
     if (
       spec.tenantId !== planAdmission.tenantId ||
+      spec.customerId !== planAdmission.customerId ||
       spec.projectId !== planAdmission.projectId ||
       spec.planId !== planAdmission.planId ||
       spec.planVersion !== planAdmission.planVersion
     ) {
       throw new InvalidPlanAdmissionError(
-        `specs[${index}] does not belong to the given plan admission result's tenant/project/plan/version`,
+        `specs[${index}] does not belong to the given plan admission result's tenant/customer/project/plan/version`,
       );
     }
   }
@@ -202,6 +206,7 @@ export function admitJobs(
         : planAdmission.awaiting?.reason;
     return specs.map((spec) => ({
       tenantId: planAdmission.tenantId,
+      customerId: planAdmission.customerId,
       projectId: planAdmission.projectId,
       planId: planAdmission.planId,
       planVersion: planAdmission.planVersion,
@@ -214,6 +219,7 @@ export function admitJobs(
 
   return specs.map((spec) => ({
     tenantId: planAdmission.tenantId,
+    customerId: planAdmission.customerId,
     projectId: planAdmission.projectId,
     planId: planAdmission.planId,
     planVersion: planAdmission.planVersion,
