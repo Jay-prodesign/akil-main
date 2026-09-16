@@ -158,7 +158,7 @@ test("CXP-001A composed lifecycle: capability eligibility, execution routing, BL
   assert.equal(verifiedJob.state, "VERIFIED");
 });
 
-test("CXP-001A MET same-lineage proof: execution-economics events bind to the exact composed tenant/project/plan/job identity and a foreign job's event is excluded from the scoped total", () => {
+test("CXP-001A MET same-lineage proof: execution-economics events bind to the exact composed tenant/project/planVersion/job/task/run/attempt identity and foreign-job/foreign-planVersion/foreign-attempt events are all excluded from the scoped total", () => {
   const spec = findSpec("discovery-evidence-intake");
   const job = findJob(WEBSITE_BUILD_V1_BOUND_JOBS, spec.specId);
   const otherSpec = findSpec("content-information-architecture");
@@ -237,10 +237,36 @@ test("CXP-001A MET same-lineage proof: execution-economics events bind to the ex
     capturedAt: "2026-09-16T00:20:00.000Z",
   });
 
+  // Differs from the real event ONLY in runRef/attemptRef (same job, same
+  // taskRef) - proves the composed selector isolates by the full exact
+  // task/run/attempt tuple, not merely down to job.
+  const foreignAttemptLineage = createExecutionEconomicsLineage({
+    tenantScope: coldStart.tenantScope,
+    projectId: coldStart.project.projectId,
+    planId: coldStart.plan.planId,
+    planVersion: coldStart.plan.version,
+    jobId: job.jobId,
+    taskRef: spec.requirementId,
+    runRef: "run-cxp-001a-1",
+    attemptRef: "attempt-2",
+  });
+  const foreignAttemptEvent = recordExecutionEconomicsEvent({
+    lineage: foreignAttemptLineage,
+    idempotencyKey: "cxp-001a-foreign-attempt-2",
+    usageSource: "OTHER_ADMITTED",
+    costBuckets: [
+      { kind: "MARGINAL_CASH", amount: { presence: "REPORTED", amountMinorUnits: 999_999, currency: "USD" } },
+      { kind: "ALLOCATED_SUBSCRIPTION", amount: { presence: "REPORTED", amountMinorUnits: 999_999, currency: "USD" } },
+      { kind: "HUMAN_SHADOW", amount: { presence: "REPORTED", amountMinorUnits: 999_999, currency: "USD" } },
+    ],
+    capturedAt: "2026-09-16T00:20:00.000Z",
+  });
+
   let ledger = EMPTY_EXECUTION_ECONOMICS_LEDGER;
   ledger = appendExecutionEconomicsEvent(ledger, event);
   ledger = appendExecutionEconomicsEvent(ledger, foreignEvent);
   ledger = appendExecutionEconomicsEvent(ledger, foreignVersionEvent);
+  ledger = appendExecutionEconomicsEvent(ledger, foreignAttemptEvent);
 
   const scoped = selectExecutionEconomicsEvents(ledger, {
     tenantId: coldStart.tenantScope.tenantId,
@@ -248,6 +274,9 @@ test("CXP-001A MET same-lineage proof: execution-economics events bind to the ex
     planId: coldStart.plan.planId,
     planVersion: coldStart.plan.version,
     jobId: job.jobId,
+    taskRef: spec.requirementId,
+    runRef: "run-cxp-001a-1",
+    attemptRef: "attempt-1",
   });
   assert.equal(scoped.length, 1);
   assert.equal(scoped[0]?.idempotencyKey, "cxp-001a-discovery-attempt-1");
