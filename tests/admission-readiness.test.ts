@@ -219,3 +219,49 @@ test("F1: a readiness assertion for a different tenant/project fails closed rath
     InvalidAdmissionReadinessError,
   );
 });
+
+test("CXP-001I (adversarial): a readiness assertion from a different customer within the SAME tenant fails closed, even when projectId values collide across customers", () => {
+  const { tenantScope, plan } = compiledPlan();
+  // Deliberately reuses the SAME tenantScope and the SAME projectId
+  // string ("proj-website-build-v1") from a different customer, so this
+  // case is caught ONLY by a customerId check - a tenantId or projectId
+  // check alone would not distinguish it (project.ts does not enforce
+  // projectId global uniqueness across customers).
+  const otherCustomer = createCustomer({
+    tenantScope,
+    customerId: "cust-readiness-other-same-tenant",
+    displayName: "Other Customer, Same Tenant",
+  });
+  const otherCustomerProject = createProject({
+    tenantScope,
+    customer: otherCustomer,
+    projectId: plan.projectId,
+    ownerRef: "owner-readiness-other-same-tenant",
+    state: "active",
+  });
+  const foreignAssertion = {
+    evidence: createCustomerEvidenceItem({
+      tenantScope,
+      project: otherCustomerProject,
+      evidenceRef: "ev-other-customer",
+      kind: "FACT" as const,
+      subject: "Belongs to a different customer, same tenant/projectId string",
+      sourceLocator: "internal://test-fixtures/readiness/other-customer",
+      relatedRequirementId: "discovery-evidence-intake",
+    }),
+    assertedForPlanVersion: plan.version,
+    readinessOutcome: "SATISFIED" as const,
+  };
+  const requiredRequirementIds = plan.nodes
+    .filter((n) => n.disposition === "REQUIRED")
+    .map((n) => n.requirementId);
+  assert.throws(
+    () =>
+      evaluateReadiness({
+        plan,
+        requiredRequirementIds,
+        assertions: [foreignAssertion],
+      }),
+    InvalidAdmissionReadinessError,
+  );
+});
