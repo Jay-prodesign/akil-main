@@ -470,6 +470,29 @@ test("Brain Rev122: admitManualExecutionAllowedFromServiceCatalogAdmission succe
   assert.equal(requirement.policy, "MANUAL_EXECUTION_ALLOWED");
 });
 
+test("CXP-001N (adversarial): admitManualExecutionAllowedFromServiceCatalogAdmission rejects a spec carrying a different customerId than the job, even with matching tenantId/projectId/specId", () => {
+  const job = readyJob();
+  const registry = createExecutionRoutingRequirementRegistry();
+  const spec = outcomeJobSpecFor(job);
+  // Deliberately forges only customerId - specId still equals job.jobId,
+  // tenantId/projectId still match, so this case is caught ONLY by a
+  // customerId check.
+  const foreignCustomerSpec: OutcomeJobSpec = {
+    ...spec,
+    customerId: "cust-cxp-001n-foreign" as never,
+  };
+  assert.throws(
+    () =>
+      registry.admitManualExecutionAllowedFromServiceCatalogAdmission({
+        job,
+        spec: foreignCustomerSpec,
+        admission: admittedCatalogFor(foreignCustomerSpec),
+        admittedAt: "2026-09-15T00:00:00.000Z",
+      }),
+    InvalidExecutionRoutingRequirementError,
+  );
+});
+
 test("Brain Rev123/124 adversarial: a ServiceCatalogAdmission whose own catalog entry declares ROUTING_REQUIRED can never admit MANUAL_EXECUTION_ALLOWED for this job, even with a matching spec/blueprint and a fully trusted, currently-ADMITTED admission - catalog trust alone does not imply manual execution is permitted", () => {
   const job = readyJob();
   const registry = createExecutionRoutingRequirementRegistry();
