@@ -1,4 +1,5 @@
 import type { TenantScope } from "./tenant-scope.js";
+import type { Customer } from "./customer.js";
 import type { Project } from "./project.js";
 import type { RequirementId } from "./offer-blueprint.js";
 
@@ -22,6 +23,7 @@ type SoldScopeId = string & { readonly __brand: "SoldScopeId" };
  */
 export interface SoldScope {
   readonly tenantId: TenantScope["tenantId"];
+  readonly customerId: Customer["customerId"];
   readonly projectId: Project["projectId"];
   readonly soldScopeId: SoldScopeId;
   readonly outcomeContractRef: string;
@@ -90,6 +92,7 @@ export function createSoldScope(input: {
   }
   return {
     tenantId: input.tenantScope.tenantId,
+    customerId: input.project.customerId,
     projectId: input.project.projectId,
     soldScopeId: soldScopeId as SoldScopeId,
     outcomeContractRef,

@@ -1,4 +1,5 @@
 import type { TenantScope } from "./tenant-scope.js";
+import type { Customer } from "./customer.js";
 import type { Project } from "./project.js";
 import type { OfferBlueprintVersion, RequirementId } from "./offer-blueprint.js";
 import type { SoldScope } from "./sold-scope.js";
@@ -46,6 +47,7 @@ export interface PlanNode {
  */
 export interface ProjectPlanVersion {
   readonly tenantId: TenantScope["tenantId"];
+  readonly customerId: Customer["customerId"];
   readonly projectId: Project["projectId"];
   readonly planId: PlanId;
   readonly version: number;
@@ -141,6 +143,11 @@ export function compilePlan(input: {
       "soldScope does not belong to the given tenantScope",
     );
   }
+  if (input.soldScope.customerId !== input.project.customerId) {
+    throw new InvalidProjectPlanError(
+      "soldScope does not belong to the given project's customer",
+    );
+  }
   if (input.soldScope.projectId !== input.project.projectId) {
     throw new InvalidProjectPlanError(
       "soldScope does not belong to the given project",
@@ -151,6 +158,11 @@ export function compilePlan(input: {
     if (item.tenantId !== input.tenantScope.tenantId) {
       throw new InvalidProjectPlanError(
         `evidence[${index}] does not belong to the given tenantScope`,
+      );
+    }
+    if (item.customerId !== input.project.customerId) {
+      throw new InvalidProjectPlanError(
+        `evidence[${index}] does not belong to the given project's customer`,
       );
     }
     if (item.projectId !== input.project.projectId) {
@@ -247,6 +259,7 @@ export function compilePlan(input: {
 
   return {
     tenantId: input.tenantScope.tenantId,
+    customerId: input.project.customerId,
     projectId: input.project.projectId,
     planId: planId as PlanId,
     version,
