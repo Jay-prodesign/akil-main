@@ -39,6 +39,7 @@ export interface DeliveryRecipeJobBinding {
  */
 export interface DeliveryRecipePlanBinding {
   readonly tenantId: ProjectPlanVersion["tenantId"];
+  readonly customerId: ProjectPlanVersion["customerId"];
   readonly projectId: ProjectPlanVersion["projectId"];
   readonly planId: ProjectPlanVersion["planId"];
   readonly planVersion: ProjectPlanVersion["version"];
@@ -149,6 +150,7 @@ export function bindAdmittedRecipeToPlan(input: {
       spec.prerequisites.every((dep, i) => dep === canonical.prerequisites[i]);
     if (
       spec.tenantId !== canonical.tenantId ||
+      spec.customerId !== canonical.customerId ||
       spec.projectId !== canonical.projectId ||
       spec.planId !== canonical.planId ||
       spec.planVersion !== canonical.planVersion ||
@@ -167,6 +169,7 @@ export function bindAdmittedRecipeToPlan(input: {
 
   return {
     tenantId: plan.tenantId,
+    customerId: plan.customerId,
     projectId: plan.projectId,
     planId: plan.planId,
     planVersion: plan.version,
