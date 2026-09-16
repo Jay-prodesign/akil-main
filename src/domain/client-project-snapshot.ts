@@ -178,19 +178,24 @@ export function buildClientProjectSnapshot(input: {
 
   let workingArtifact: WorkingArtifactState | undefined;
   if (input.plan !== undefined) {
-    if (input.plan.tenantId !== input.project.tenantId || input.plan.projectId !== input.project.projectId) {
+    if (
+      input.plan.tenantId !== input.project.tenantId ||
+      input.plan.customerId !== input.project.customerId ||
+      input.plan.projectId !== input.project.projectId
+    ) {
       throw new InvalidClientProjectSnapshotError(
-        "plan does not belong to the given project's tenant/project identity",
+        "plan does not belong to the given project's tenant/customer/project identity",
       );
     }
     if (
       input.latestApproval !== undefined &&
       (input.latestApproval.tenantId !== input.plan.tenantId ||
+        input.latestApproval.customerId !== input.plan.customerId ||
         input.latestApproval.projectId !== input.plan.projectId ||
         input.latestApproval.planId !== input.plan.planId)
     ) {
       throw new InvalidClientProjectSnapshotError(
-        "latestApproval does not belong to the given plan's tenant/project/planId identity",
+        "latestApproval does not belong to the given plan's tenant/customer/project/planId identity",
       );
     }
     const isCurrentVersionApproved =
