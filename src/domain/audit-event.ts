@@ -24,6 +24,7 @@ type AuditEventId = string & { readonly __brand: "AuditEventId" };
 export interface AuditEvent {
   readonly eventId: AuditEventId;
   readonly tenantId: TenantScope["tenantId"];
+  readonly customerId: OutcomeJob["customerId"];
   readonly jobId: OutcomeJob["jobId"];
   readonly projectId: OutcomeJob["projectId"];
   readonly actorRef: string;
@@ -52,8 +53,16 @@ function requireNonEmptyString(value: unknown, field: string): string {
 }
 
 /**
- * Preserves tenant/job/project correlation structurally (T10): these
- * fields come from the given `OutcomeJob`, not from free caller input.
+ * Preserves tenant/customer/job/project correlation structurally (T10):
+ * these fields come from the given `OutcomeJob`, not from free caller
+ * input.
+ *
+ * CXP-001C correction: `customerId` was previously dropped from the
+ * source `OutcomeJob` entirely, even though `OutcomeJob` is canonically
+ * tenantId+customerId+projectId scoped - `buildDeliveryTimeline()` had no
+ * way to reject a foreign-customer event sharing the same tenantId/
+ * projectId because the field it would need to check did not exist on
+ * this type at all.
  */
 export function createAuditEvent(input: {
   job: OutcomeJob;
@@ -89,6 +98,7 @@ export function createAuditEvent(input: {
   return {
     eventId: eventId as AuditEventId,
     tenantId: input.job.tenantId,
+    customerId: input.job.customerId,
     jobId: input.job.jobId,
     projectId: input.job.projectId,
     actorRef,

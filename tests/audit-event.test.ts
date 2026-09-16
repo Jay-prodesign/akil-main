@@ -37,6 +37,7 @@ test("T10: preserves tenant/job/project correlation from the given job", () => {
     timestamp: "2026-08-16T00:00:00.000Z",
   });
   assert.equal(event.tenantId, job.tenantId);
+  assert.equal(event.customerId, job.customerId);
   assert.equal(event.jobId, job.jobId);
   assert.equal(event.projectId, job.projectId);
 });

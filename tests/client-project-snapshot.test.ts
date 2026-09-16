@@ -112,6 +112,33 @@ test("P2: a job belonging to a different tenant/project rejects (cross-tenant sc
   );
 });
 
+test("CXP-001C (adversarial, composed): a job belonging to a different customer within the SAME tenant, reusing the exact same projectId string, rejects rather than being silently projected into this customer's delivery status", () => {
+  const otherCustomer = createCustomer({
+    tenantScope: fixture.tenantScope,
+    customerId: "cust-other-same-tenant",
+    displayName: "Other Customer, Same Tenant",
+  });
+  const sameProjectIdOtherCustomerProject = createProject({
+    tenantScope: fixture.tenantScope,
+    customer: otherCustomer,
+    projectId: fixture.project.projectId,
+    ownerRef: "owner-other-same-tenant",
+    state: "active",
+  });
+  const foreignCustomerJob = createOutcomeJob({
+    tenantScope: fixture.tenantScope,
+    customer: otherCustomer,
+    project: sameProjectIdOtherCustomerProject,
+    jobId: "job-foreign-customer-same-projectid",
+    jobFamily: "website-build-v1",
+    businessObjective: "Foreign customer job, same projectId string",
+  });
+  assert.throws(
+    () => buildClientProjectSnapshot({ ...minimalInput(), jobs: [foreignCustomerJob] }),
+    Error,
+  );
+});
+
 test("P3: internal-only fields/secrets/prompts/margins are absent from the snapshot by construction", () => {
   // Note: "evidenceRef" is deliberately NOT in the forbidden list - it is a
   // plain reference/locator string already proven customer-safe by

@@ -55,12 +55,20 @@ export interface DeliveryTimeline {
 }
 
 /**
- * Every input event must belong to the given project (same tenantId and
- * projectId) - same "cross-tenant/wrong-project ... binding fails closed"
- * discipline as `computeDeliveryStatus` and DEL-003 T7; a foreign event is
- * treated as contamination, not silently dropped. This check runs before
- * category mapping/filtering, so a contaminated input still fails closed
- * even if none of its events would otherwise map to a customer category.
+ * Every input event must belong to the given project (same tenantId,
+ * customerId, AND projectId) - same "cross-tenant/wrong-project ...
+ * binding fails closed" discipline as `computeDeliveryStatus` and
+ * DEL-003 T7; a foreign event is treated as contamination, not silently
+ * dropped. This check runs before category mapping/filtering, so a
+ * contaminated input still fails closed even if none of its events would
+ * otherwise map to a customer category.
+ *
+ * CXP-001C correction: `AuditEvent` now preserves `customerId` from its
+ * source `OutcomeJob` (see `audit-event.ts`); this function checks it the
+ * same way `computeDeliveryStatus` checks `OutcomeJob.customerId`, so two
+ * different customers within the same tenant reusing the same `projectId`
+ * string can no longer have one customer's audit events silently accepted
+ * into the other's delivery timeline.
  *
  * Entries are sorted ascending by `timestamp` using a plain string
  * comparison (existing timestamps in this repository are ISO-8601, for
@@ -74,6 +82,11 @@ export function buildDeliveryTimeline(input: {
     if (event.tenantId !== input.project.tenantId) {
       throw new InvalidDeliveryTimelineError(
         `event ${event.eventId} belongs to a different tenant than the given project`,
+      );
+    }
+    if (event.customerId !== input.project.customerId) {
+      throw new InvalidDeliveryTimelineError(
+        `event ${event.eventId} belongs to a different customer than the given project`,
       );
     }
     if (event.projectId !== input.project.projectId) {

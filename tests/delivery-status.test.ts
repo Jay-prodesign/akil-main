@@ -32,6 +32,18 @@ const projectInB = createProject({
   ownerRef: "owner-2",
   state: "active",
 });
+const otherCustomerInA = createCustomer({
+  tenantScope: tenantA,
+  customerId: "cust-1-other",
+  displayName: "Initech",
+});
+const sameProjectIdOtherCustomerInA = createProject({
+  tenantScope: tenantA,
+  customer: otherCustomerInA,
+  projectId: "proj-1",
+  ownerRef: "owner-1-other",
+  state: "active",
+});
 
 function jobIn(project: typeof projectInA, jobId: string): OutcomeJob {
   return createOutcomeJob({
@@ -130,6 +142,21 @@ test("rejects a job that belongs to a different project within the same tenant",
   const wrongProjectJob = jobIn(otherProjectInA, "job-y");
   assert.throws(
     () => computeDeliveryStatus({ project: projectInA, jobs: [wrongProjectJob] }),
+    InvalidDeliveryStatusError,
+  );
+});
+
+test("CXP-001C (adversarial): rejects a job belonging to a different customer within the same tenant, even when it reuses the exact same projectId string", () => {
+  const foreignCustomerJob = createOutcomeJob({
+    tenantScope: tenantA,
+    customer: otherCustomerInA,
+    project: sameProjectIdOtherCustomerInA,
+    jobId: "job-foreign-customer-same-projectid",
+    jobFamily: "onboarding",
+    businessObjective: "Deliver the bounded slice",
+  });
+  assert.throws(
+    () => computeDeliveryStatus({ project: projectInA, jobs: [foreignCustomerJob] }),
     InvalidDeliveryStatusError,
   );
 });

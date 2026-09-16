@@ -50,10 +50,18 @@ export interface DeliveryStatusView {
 /**
  * Aggregates a project's own `OutcomeJob` records into one customer-safe
  * status label plus a per-job breakdown. Every input job must belong to
- * the given project (same tenantId and projectId) - matching the
- * "cross-tenant/wrong-project ... binding fails closed" discipline already
- * established by DEL-003 T7; a caller passing a foreign job is treated as
- * contamination, not silently dropped or silently accepted.
+ * the given project (same tenantId, customerId, AND projectId) - matching
+ * the "cross-tenant/wrong-project ... binding fails closed" discipline
+ * already established by DEL-003 T7; a caller passing a foreign job is
+ * treated as contamination, not silently dropped or silently accepted.
+ *
+ * CXP-001C correction: `OutcomeJob` is canonically tenantId+customerId+
+ * projectId scoped, but this check previously validated only tenantId+
+ * projectId. Two different `Customer`s within the same tenant may each
+ * have a `Project` using the same `projectId` string (nothing in
+ * `project.ts` enforces global projectId uniqueness across customers), so
+ * omitting the customerId check allowed a foreign customer's job to be
+ * silently projected into this project's delivery status.
  *
  * Status derivation (a direct read of the existing lifecycle, not a new
  * business rule): no jobs -> NOT_STARTED; any job in one of the four
@@ -68,6 +76,11 @@ export function computeDeliveryStatus(input: {
     if (job.tenantId !== input.project.tenantId) {
       throw new InvalidDeliveryStatusError(
         `job ${job.jobId} belongs to a different tenant than the given project`,
+      );
+    }
+    if (job.customerId !== input.project.customerId) {
+      throw new InvalidDeliveryStatusError(
+        `job ${job.jobId} belongs to a different customer than the given project`,
       );
     }
     if (job.projectId !== input.project.projectId) {
