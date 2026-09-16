@@ -1,4 +1,5 @@
 import type { TenantScope } from "./tenant-scope.js";
+import type { Customer } from "./customer.js";
 import type { Project } from "./project.js";
 import type { ProjectPlanVersion } from "./project-plan.js";
 import type { PlanAdmissionResult } from "./plan-admission.js";
@@ -33,6 +34,7 @@ export type PlanAdmissionEvent =
       readonly type: "EVALUATION_RECORDED";
       readonly eventId: PlanAdmissionEventId;
       readonly tenantId: TenantScope["tenantId"];
+      readonly customerId: Customer["customerId"];
       readonly projectId: Project["projectId"];
       readonly planId: ProjectPlanVersion["planId"];
       readonly planVersion: ProjectPlanVersion["version"];
@@ -43,6 +45,7 @@ export type PlanAdmissionEvent =
       readonly type: "ANSWER_RECORDED";
       readonly eventId: PlanAdmissionEventId;
       readonly tenantId: TenantScope["tenantId"];
+      readonly customerId: Customer["customerId"];
       readonly projectId: Project["projectId"];
       readonly planId: ProjectPlanVersion["planId"];
       readonly planVersion: ProjectPlanVersion["version"];
@@ -87,6 +90,7 @@ export function createEvaluationRecordedEvent(input: {
     type: "EVALUATION_RECORDED",
     eventId: evaluationEventId(input.result),
     tenantId: input.result.tenantId,
+    customerId: input.result.customerId,
     projectId: input.result.projectId,
     planId: input.result.planId,
     planVersion: input.result.planVersion,
@@ -97,6 +101,7 @@ export function createEvaluationRecordedEvent(input: {
 
 export function createAnswerRecordedEvent(input: {
   tenantId: TenantScope["tenantId"];
+  customerId: Customer["customerId"];
   projectId: Project["projectId"];
   planId: ProjectPlanVersion["planId"];
   planVersion: ProjectPlanVersion["version"];
@@ -111,6 +116,7 @@ export function createAnswerRecordedEvent(input: {
     type: "ANSWER_RECORDED",
     eventId: eventId as PlanAdmissionEventId,
     tenantId: input.tenantId,
+    customerId: input.customerId,
     projectId: input.projectId,
     planId: input.planId,
     planVersion: input.planVersion,
