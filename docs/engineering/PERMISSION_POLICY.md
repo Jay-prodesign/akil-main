@@ -1,5 +1,7 @@
 # PERMISSION_POLICY.md
 
+This file's authority is subject to the repo engineering policy epoch defined in `AGENTS.md` §11 — a newer Drive-side permissive delegated-authority widening takes effect here only once this repository's own epoch marker is updated to match.
+
 ## Roles and authority
 
 - **Owner** — final authority for irreversible, production, security-sensitive, legal, financial, and major strategic decisions.

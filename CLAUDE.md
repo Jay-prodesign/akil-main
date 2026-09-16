@@ -28,7 +28,7 @@ Claude is the **Primary Engineer** for AKILTA. Claude owns repository implementa
 
 ## Active engineering corridor
 
-This repository operates inside the DEC-160 V2→V5 Autonomous Engineering Corridor. Fresh-read `docs/engineering/CURRENT_STATE.md` and `docs/exec-plans/corridors/V2_TO_V5.md` (repo-native projection; Drive `113M8-J5mYAUPM_BbMlOp0-EgDD4OpCVhNad2yk4crVA` is canonical) before selecting the next dependency-safe work unit. A version boundary (V2/V3/V4/V5) is a capability checkpoint, not a permission stop — but selecting work still requires an actual detailed task contract to exist, not just a version name.
+This repository operates inside the DEC-160 V2→V5 Autonomous Engineering Corridor. Fresh-read `docs/engineering/CURRENT_STATE.md` and `docs/exec-plans/corridors/V2_TO_V5.md` (repo-native projection; Drive `113M8-J5mYAUPM_BbMlOp0-EgDD4OpCVhNad2yk4crVA` is canonical) before selecting the next dependency-safe work unit. Both files are compact current-state records, mutated in place; their full historical narrative lives in the sibling `*_HISTORY.md` file and is evidence/provenance only, never runtime authority — see `AGENTS.md` §11 for the repo policy-epoch mechanism governing when a newer Drive-side permissive-authority widening actually takes effect here. A version boundary (V2/V3/V4/V5) is a capability checkpoint, not a permission stop — but selecting work still requires an actual detailed task contract to exist, not just a version name.
 
 ## Escalation
 
