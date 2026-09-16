@@ -185,7 +185,7 @@ test("P5: an approval for the exact unchanged current plan version validates", (
   assert.equal(snapshot.workingArtifact?.isCurrentVersionApproved, true);
 });
 
-test("CXP-001B (adversarial): an approval belonging to a different tenant/project can never be presented as this project's lastApprovedVersion, even though it is a genuinely valid approval elsewhere", () => {
+test("CXP-001B (adversarial): an approval belonging to a different tenant/project is contamination and rejects snapshot construction, even though it is a genuinely valid approval elsewhere", () => {
   const foreignTenantScope = createTenantScope("tenant-foreign-approval-lineage");
   const foreignCustomer = createCustomer({
     tenantScope: foreignTenantScope,
@@ -220,16 +220,18 @@ test("CXP-001B (adversarial): an approval belonging to a different tenant/projec
     approverRef: "foreign-approver",
   });
 
-  const snapshot = buildClientProjectSnapshot({
-    ...minimalInput(),
-    plan: WEBSITE_BUILD_V1_SNAPSHOT_PLAN,
-    latestApproval: foreignApproval,
-  });
-  assert.equal(snapshot.workingArtifact?.lastApprovedVersion, undefined);
-  assert.equal(snapshot.workingArtifact?.isCurrentVersionApproved, false);
+  assert.throws(
+    () =>
+      buildClientProjectSnapshot({
+        ...minimalInput(),
+        plan: WEBSITE_BUILD_V1_SNAPSHOT_PLAN,
+        latestApproval: foreignApproval,
+      }),
+    InvalidClientProjectSnapshotError,
+  );
 });
 
-test("CXP-001B (adversarial): an approval belonging to a different planId within the SAME tenant/project can never be presented as this project's lastApprovedVersion", () => {
+test("CXP-001B (adversarial): an approval belonging to a different planId within the SAME tenant/project is contamination and rejects snapshot construction", () => {
   const otherPlan = compilePlan({
     tenantScope: fixture.tenantScope,
     project: fixture.project,
@@ -246,13 +248,15 @@ test("CXP-001B (adversarial): an approval belonging to a different planId within
     approverRef: "customer-approver-1",
   });
 
-  const snapshot = buildClientProjectSnapshot({
-    ...minimalInput(),
-    plan: WEBSITE_BUILD_V1_SNAPSHOT_PLAN,
-    latestApproval: otherPlanApproval,
-  });
-  assert.equal(snapshot.workingArtifact?.lastApprovedVersion, undefined);
-  assert.equal(snapshot.workingArtifact?.isCurrentVersionApproved, false);
+  assert.throws(
+    () =>
+      buildClientProjectSnapshot({
+        ...minimalInput(),
+        plan: WEBSITE_BUILD_V1_SNAPSHOT_PLAN,
+        latestApproval: otherPlanApproval,
+      }),
+    InvalidClientProjectSnapshotError,
+  );
 });
 
 test("P6: CLIENT_ACTION_REQUIRED requires a real customer input/approval dependency - a routine informational communication cannot manufacture it", () => {

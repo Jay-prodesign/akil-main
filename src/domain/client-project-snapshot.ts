@@ -59,15 +59,18 @@ export type EtaProjection = { readonly status: "UNKNOWN" };
  * most recent known approval was actually issued for - independently
  * readable from `currentVersion` even when they happen to be equal.
  *
- * CXP-001B correction: `lastApprovedVersion` is exposed only when the
- * given approval belongs to the SAME tenant/project/planId lineage as
- * `plan` - a legitimate older-version approval for that same plan still
- * surfaces its version here even though `isCurrentVersionApproved` is
- * false (an older version and the current version are expected to
- * differ), but an approval whose tenantId/projectId/planId names a
- * different plan entirely can never be presented as this project's last
- * approved version, even though `isApprovalValidForPlan` already fails
- * closed for `isCurrentVersionApproved` in that same foreign case.
+ * CXP-001B correction (Rev32): a `latestApproval` whose tenantId/
+ * projectId/planId does not match `plan` is caller contamination, not a
+ * value to silently drop - `buildClientProjectSnapshot` throws
+ * `InvalidClientProjectSnapshotError` before ever constructing
+ * `workingArtifact`, the same fail-closed discipline this function
+ * already applies to a mismatched `ownership`/`project` pair. A
+ * legitimate older-version approval for the SAME tenant/project/planId is
+ * not contamination and still surfaces its version as
+ * `lastApprovedVersion` even though `isCurrentVersionApproved` is false
+ * (an older version and the current version are expected to differ);
+ * `isCurrentVersionApproved` itself remains governed only by the
+ * unchanged `isApprovalValidForPlan` version+payload-hash check.
  */
 export interface WorkingArtifactState {
   readonly planId: ProjectPlanVersion["planId"];
@@ -180,19 +183,24 @@ export function buildClientProjectSnapshot(input: {
         "plan does not belong to the given project's tenant/project identity",
       );
     }
+    if (
+      input.latestApproval !== undefined &&
+      (input.latestApproval.tenantId !== input.plan.tenantId ||
+        input.latestApproval.projectId !== input.plan.projectId ||
+        input.latestApproval.planId !== input.plan.planId)
+    ) {
+      throw new InvalidClientProjectSnapshotError(
+        "latestApproval does not belong to the given plan's tenant/project/planId identity",
+      );
+    }
     const isCurrentVersionApproved =
       input.latestApproval !== undefined && isApprovalValidForPlan(input.latestApproval, input.plan);
-    const approvalBelongsToPlanLineage =
-      input.latestApproval !== undefined &&
-      input.latestApproval.tenantId === input.plan.tenantId &&
-      input.latestApproval.projectId === input.plan.projectId &&
-      input.latestApproval.planId === input.plan.planId;
     workingArtifact = {
       planId: input.plan.planId,
       currentVersion: input.plan.version,
       isCurrentVersionApproved,
-      ...(approvalBelongsToPlanLineage
-        ? { lastApprovedVersion: input.latestApproval!.planVersion }
+      ...(input.latestApproval !== undefined
+        ? { lastApprovedVersion: input.latestApproval.planVersion }
         : {}),
     };
   }
