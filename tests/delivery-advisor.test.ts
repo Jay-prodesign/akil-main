@@ -221,6 +221,26 @@ test("CXP-001A (adversarial, contamination): a binding built for a different ten
   assert.equal(result.observation.applicableRecipeRef, undefined);
 });
 
+test("CXP-001O (adversarial, contamination): a binding cloned from the real one but carrying a forged customerId can never become applicable provenance, even though every other field (planId/version/boundJobs/blueprint/serviceRef) genuinely matches", () => {
+  // A precise clone of the one binding that DOES validate elsewhere in
+  // this file, changing ONLY customerId - isolating this exact guard from
+  // the workingArtifact/planId/boundJobs checks that a completely
+  // different plan's binding would also trip, so a disabled customerId
+  // check is the only way this case could otherwise pass.
+  const foreignCustomerBinding = {
+    ...WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING,
+    customerId: "cust-delivery-advisor-cxp-001o-forged" as never,
+  };
+
+  const result = buildAdvisorResult({
+    ownership: WEBSITE_BUILD_V1_RECIPE_BINDING_OWNERSHIP,
+    snapshot: WEBSITE_BUILD_V1_BOUND_CLIENT_PROJECT_SNAPSHOT,
+    recipe: WEBSITE_BUILD_V1_RECIPE,
+    binding: foreignCustomerBinding,
+  });
+  assert.equal(result.observation.applicableRecipeRef, undefined);
+});
+
 test("CXP-001A (adversarial, staleness): a binding for an old plan version cannot ride along on old job ids once the snapshot's working artifact has moved to a newer plan version", () => {
   const newerPlan = compilePlan({
     tenantScope: WEBSITE_BUILD_V1_RECIPE_BINDING_COLD_START.tenantScope,
