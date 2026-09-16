@@ -7,6 +7,7 @@ import type {
   WorkingArtifactState,
 } from "./client-project-snapshot.js";
 import type { DeliveryStatusLabel } from "./delivery-status.js";
+import type { DeliveryRecipePlanBinding } from "./delivery-recipe-plan-binding.js";
 import type { DeliveryRecipe } from "./delivery-recipe.js";
 
 export class InvalidAdvisorContextError extends Error {
@@ -45,8 +46,8 @@ export interface AdvisorObservation {
     CustomerSafeCapabilitySummary["requiredCapabilityRef"]
   >;
   readonly applicableRecipeRef?: {
-    readonly recipeId: DeliveryRecipe["recipeId"];
-    readonly version: DeliveryRecipe["version"];
+    readonly recipeId: DeliveryRecipePlanBinding["boundRecipeId"];
+    readonly version: DeliveryRecipePlanBinding["consumedRecipeVersion"];
   };
 }
 
@@ -61,7 +62,7 @@ export interface AdvisorObservation {
 export interface AdvisorRecommendationOption {
   readonly optionId: string;
   readonly basedOnCapabilityRef: CustomerSafeCapabilitySummary["requiredCapabilityRef"];
-  readonly recipeId?: DeliveryRecipe["recipeId"];
+  readonly recipeId?: DeliveryRecipePlanBinding["boundRecipeId"];
   readonly description: string;
 }
 
@@ -84,6 +85,73 @@ function ownershipEquals(a: ProjectOwnershipRef, b: ProjectOwnershipRef): boolea
 }
 
 /**
+ * Brain PR #66 F5 correction (Rev26): applicability previously accepted
+ * `binding.boundJobs` at face value - a single matching `specId` was
+ * sufficient, even if the array itself was structurally incoherent (empty,
+ * duplicate `specId`s, or entries whose `specId`/`requirementId` were
+ * hand-assembled rather than genuinely produced by AI-004A's
+ * `bindAdmittedRecipeToPlan`). `deriveOutcomeJobSpecs` always sets
+ * `jobFamily` to the exact same value as `requirementId` (see
+ * `outcome-job-spec.ts`), and `wireAdmittedOutcomeJobs` carries that
+ * `jobFamily` verbatim onto the runtime `OutcomeJob` - so a genuine
+ * `boundJobs` entry's `requirementId` must equal the matched job's own
+ * `jobFamily`, not merely its `specId` matching `jobId`. This function
+ * requires the whole `boundJobs` array to be non-empty with unique,
+ * non-empty `specId`s before ever consulting it, then requires the
+ * matched entry itself to satisfy both identity facts together.
+ */
+function boundJobsAreStructurallyCoherent(
+  boundJobs: DeliveryRecipePlanBinding["boundJobs"],
+): boolean {
+  if (boundJobs.length === 0) {
+    return false;
+  }
+  const seenSpecIds = new Set<string>();
+  for (const boundJob of boundJobs) {
+    const specId = boundJob.specId as string;
+    const requirementId = boundJob.requirementId as string;
+    if (specId.length === 0 || requirementId.length === 0) {
+      return false;
+    }
+    if (seenSpecIds.has(specId)) {
+      return false;
+    }
+    seenSpecIds.add(specId);
+  }
+  return true;
+}
+
+/**
+ * AA-005 Rev29 correction: `boundJobsAreStructurallyCoherent` above only
+ * proves the array's own internal shape (non-empty, unique/non-empty
+ * specIds) - it says nothing about whether every entry in that array is
+ * genuinely represented in this project's real jobs. Combined with the
+ * "at least one job matches at least one boundJob" check that used to gate
+ * applicability, a cloned binding could retain every genuine entry and
+ * still append one unique, well-formed but entirely foreign/injected
+ * `boundJobs` entry (an identity no real `OutcomeJob` in the snapshot ever
+ * carries) - the coherence check would accept it (nothing duplicated or
+ * empty) and the old existential match would still succeed on a retained
+ * genuine entry, silently laundering the injected entry's presence through
+ * an otherwise-valid binding. This function instead requires the WHOLE
+ * `boundJobs` array to be exactly represented in the snapshot's real job
+ * set - every single entry, not just one - so one foreign entry anywhere in
+ * the array is enough to deny provenance outright.
+ */
+function boundJobsAreFullyRepresentedInSnapshot(
+  boundJobs: DeliveryRecipePlanBinding["boundJobs"],
+  jobs: ClientProjectSnapshot["deliveryStatus"]["jobs"],
+): boolean {
+  return boundJobs.every((boundJob) =>
+    jobs.some(
+      (job) =>
+        (boundJob.specId as string) === (job.jobId as string) &&
+        (boundJob.requirementId as string) === job.jobFamily,
+    ),
+  );
+}
+
+/**
  * V2-CDO-008 minimum Delivery Project Advisor (L0 Observe / L1 Recommend).
  * Pure, deterministic, provider-neutral: no model/provider SDK, prompt,
  * persistent memory, RAG/vector store or command/mutation surface exists
@@ -102,11 +170,49 @@ function ownershipEquals(a: ProjectOwnershipRef, b: ProjectOwnershipRef): boolea
  * constructed, matching the fail-closed pattern already established by
  * `buildClientProjectSnapshot` (V2-CDO-005) and
  * `createCapabilityAdmission` (V2-CDO-004).
+ *
+ * CXP-001A: recipe provenance is proven only through a verified AI-004A
+ * `DeliveryRecipePlanBinding` - never a raw caller-supplied `DeliveryRecipe`
+ * alone and never a `jobFamily` string comparison. The prior check compared
+ * a recipe's blueprint-level `jobFamily` (e.g. `"website-build-v1"`)
+ * against a real wired `OutcomeJob`'s requirement-level `jobFamily` (e.g.
+ * `"design-build"`, `"handover"` - see `outcome-job-spec.ts`/
+ * `outcome-job-wiring.ts`), which can never legitimately be equal on a
+ * genuine cold-start lineage and could only ever "match" by an unbound
+ * caller-supplied recipe coincidentally sharing a fixture string. This
+ * function instead requires the binding's own tenant/project to match
+ * `ownership`, the binding's plan to match the snapshot's
+ * `workingArtifact` when one is present, and every entry of the binding's
+ * own `boundJobs` array to be a job the snapshot's real jobs actually
+ * contain (`boundJobs[].specId === job.jobId`, the same deterministic
+ * identity `outcome-job-routing-execution.ts` already relies on) - not
+ * merely at least one of them (AA-005 Rev29; see
+ * `boundJobsAreFullyRepresentedInSnapshot` above).
+ *
+ * Brain PR #66 F5 correction: a `binding` alone is not sufficient - the
+ * caller must also supply the concrete `recipe` the binding claims to have
+ * consumed, and its `recipeId`/`version` must exactly equal
+ * `binding.boundRecipeId`/`binding.consumedRecipeVersion`. A `recipe`
+ * supplied without a matching `binding` (or vice versa) still yields no
+ * provenance - `recipeId`/`version` on the observation are exposed only
+ * from the binding's own already-verified fields once both checks pass,
+ * never trusted from the raw `recipe` object directly.
+ *
+ * AA-005 Rev29 correction: the applicability check used to require only
+ * that SOME snapshot job matched SOME `boundJobs` entry - so a cloned
+ * binding retaining every genuine entry could still smuggle in one unique,
+ * well-formed but entirely foreign `boundJobs` entry (an identity no real
+ * job in the snapshot carries) and still be cited as applicable provenance,
+ * since a genuine entry elsewhere in the array would satisfy the
+ * existential match. Provenance now requires the WHOLE `boundJobs` array to
+ * be exactly represented in the snapshot's real jobs - one foreign/injected
+ * entry anywhere in the array is enough to deny applicability outright.
  */
 export function buildAdvisorResult(input: {
   ownership: ProjectOwnershipRef;
   snapshot: ClientProjectSnapshot;
   recipe?: DeliveryRecipe;
+  binding?: DeliveryRecipePlanBinding;
 }): AdvisorResult {
   if (!ownershipEquals(input.ownership, input.snapshot.ownership)) {
     throw new InvalidAdvisorContextError(
@@ -127,17 +233,24 @@ export function buildAdvisorResult(input: {
     )
     .map((capability) => capability.requiredCapabilityRef);
 
-  // A1/A11: a recipe is only cited as "applicable" provenance when its own
-  // jobFamily actually appears among this project's real OutcomeJob
-  // records - never merely because a caller happened to pass one in.
+  const binding = input.binding;
+  const recipe = input.recipe;
+  const workingArtifact = input.snapshot.workingArtifact;
   let applicableRecipeRef: AdvisorObservation["applicableRecipeRef"];
   if (
-    input.recipe !== undefined &&
-    input.snapshot.deliveryStatus.jobs.some(
-      (job) => job.jobFamily === input.recipe!.jobFamily,
-    )
+    binding !== undefined &&
+    recipe !== undefined &&
+    recipe.recipeId === binding.boundRecipeId &&
+    recipe.version === binding.consumedRecipeVersion &&
+    binding.tenantId === input.ownership.tenantId &&
+    binding.projectId === input.ownership.projectId &&
+    (input.ownership.serviceRef === undefined || input.ownership.serviceRef === binding.serviceRef) &&
+    (workingArtifact === undefined ||
+      (workingArtifact.planId === binding.planId && workingArtifact.currentVersion === binding.planVersion)) &&
+    boundJobsAreStructurallyCoherent(binding.boundJobs) &&
+    boundJobsAreFullyRepresentedInSnapshot(binding.boundJobs, input.snapshot.deliveryStatus.jobs)
   ) {
-    applicableRecipeRef = { recipeId: input.recipe.recipeId, version: input.recipe.version };
+    applicableRecipeRef = { recipeId: binding.boundRecipeId, version: binding.consumedRecipeVersion };
   }
 
   const observation: AdvisorObservation = {
