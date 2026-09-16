@@ -7,7 +7,7 @@ import type {
   WorkingArtifactState,
 } from "./client-project-snapshot.js";
 import type { DeliveryStatusLabel } from "./delivery-status.js";
-import type { DeliveryRecipe } from "./delivery-recipe.js";
+import type { DeliveryRecipePlanBinding } from "./delivery-recipe-plan-binding.js";
 
 export class InvalidAdvisorContextError extends Error {
   constructor(reason: string) {
@@ -45,8 +45,8 @@ export interface AdvisorObservation {
     CustomerSafeCapabilitySummary["requiredCapabilityRef"]
   >;
   readonly applicableRecipeRef?: {
-    readonly recipeId: DeliveryRecipe["recipeId"];
-    readonly version: DeliveryRecipe["version"];
+    readonly recipeId: DeliveryRecipePlanBinding["boundRecipeId"];
+    readonly version: DeliveryRecipePlanBinding["consumedRecipeVersion"];
   };
 }
 
@@ -61,7 +61,7 @@ export interface AdvisorObservation {
 export interface AdvisorRecommendationOption {
   readonly optionId: string;
   readonly basedOnCapabilityRef: CustomerSafeCapabilitySummary["requiredCapabilityRef"];
-  readonly recipeId?: DeliveryRecipe["recipeId"];
+  readonly recipeId?: DeliveryRecipePlanBinding["boundRecipeId"];
   readonly description: string;
 }
 
@@ -102,11 +102,29 @@ function ownershipEquals(a: ProjectOwnershipRef, b: ProjectOwnershipRef): boolea
  * constructed, matching the fail-closed pattern already established by
  * `buildClientProjectSnapshot` (V2-CDO-005) and
  * `createCapabilityAdmission` (V2-CDO-004).
+ *
+ * CXP-001A: recipe provenance is proven only through a verified AI-004A
+ * `DeliveryRecipePlanBinding` - never a raw caller-supplied `DeliveryRecipe`
+ * and never a `jobFamily` string comparison. The prior check compared a
+ * recipe's blueprint-level `jobFamily` (e.g. `"website-build-v1"`) against
+ * a real wired `OutcomeJob`'s requirement-level `jobFamily` (e.g.
+ * `"design-build"`, `"handover"` - see `outcome-job-spec.ts`/
+ * `outcome-job-wiring.ts`), which can never legitimately be equal on a
+ * genuine cold-start lineage and could only ever "match" by an unbound
+ * caller-supplied recipe coincidentally sharing a fixture string. This
+ * function instead requires the binding's own tenant/project to match
+ * `ownership`, the binding's plan to match the snapshot's
+ * `workingArtifact` when one is present, and at least one of the
+ * snapshot's real jobs to be a job the binding actually claims
+ * (`boundJobs[].specId === job.jobId`, the same deterministic identity
+ * `outcome-job-routing-execution.ts` already relies on). `recipeId`/
+ * `version` are read only from the binding's own already-verified fields,
+ * never from a separate untrusted recipe object.
  */
 export function buildAdvisorResult(input: {
   ownership: ProjectOwnershipRef;
   snapshot: ClientProjectSnapshot;
-  recipe?: DeliveryRecipe;
+  binding?: DeliveryRecipePlanBinding;
 }): AdvisorResult {
   if (!ownershipEquals(input.ownership, input.snapshot.ownership)) {
     throw new InvalidAdvisorContextError(
@@ -127,17 +145,21 @@ export function buildAdvisorResult(input: {
     )
     .map((capability) => capability.requiredCapabilityRef);
 
-  // A1/A11: a recipe is only cited as "applicable" provenance when its own
-  // jobFamily actually appears among this project's real OutcomeJob
-  // records - never merely because a caller happened to pass one in.
+  const binding = input.binding;
+  const workingArtifact = input.snapshot.workingArtifact;
   let applicableRecipeRef: AdvisorObservation["applicableRecipeRef"];
   if (
-    input.recipe !== undefined &&
-    input.snapshot.deliveryStatus.jobs.some(
-      (job) => job.jobFamily === input.recipe!.jobFamily,
+    binding !== undefined &&
+    binding.tenantId === input.ownership.tenantId &&
+    binding.projectId === input.ownership.projectId &&
+    (input.ownership.serviceRef === undefined || input.ownership.serviceRef === binding.serviceRef) &&
+    (workingArtifact === undefined ||
+      (workingArtifact.planId === binding.planId && workingArtifact.currentVersion === binding.planVersion)) &&
+    input.snapshot.deliveryStatus.jobs.some((job) =>
+      binding.boundJobs.some((boundJob) => (boundJob.specId as string) === (job.jobId as string)),
     )
   ) {
-    applicableRecipeRef = { recipeId: input.recipe.recipeId, version: input.recipe.version };
+    applicableRecipeRef = { recipeId: binding.boundRecipeId, version: binding.consumedRecipeVersion };
   }
 
   const observation: AdvisorObservation = {
