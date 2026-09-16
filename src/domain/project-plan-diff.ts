@@ -45,9 +45,13 @@ export function diffProjectPlans(
       "previous and next plan versions do not share the same planId",
     );
   }
-  if (previous.tenantId !== next.tenantId || previous.projectId !== next.projectId) {
+  if (
+    previous.tenantId !== next.tenantId ||
+    previous.customerId !== next.customerId ||
+    previous.projectId !== next.projectId
+  ) {
     throw new InvalidProjectPlanDiffError(
-      "previous and next plan versions do not belong to the same tenant/project",
+      "previous and next plan versions do not belong to the same tenant/customer/project",
     );
   }
   if (next.version <= previous.version) {
