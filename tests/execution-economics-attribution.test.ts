@@ -249,13 +249,25 @@ test("M17b (F2 fix): selectExecutionEconomicsEvents isolates by taskRef/runRef/a
     ledger,
     event({ idempotencyKey: "attempt-2-evt", lineage: lineage({ attemptRef: "attempt-2" }) }),
   );
+  ledger = appendExecutionEconomicsEvent(
+    ledger,
+    event({ idempotencyKey: "task-2-evt", lineage: lineage({ taskRef: "task-2" }) }),
+  );
   const byRun = selectExecutionEconomicsEvents(ledger, {
     tenantId: tenantA.tenantId,
     projectId: "project-1",
     planId: "plan-1",
     runRef: "run-1",
   });
-  assert.equal(byRun.length, 2, "run-1 scope must include both attempts recorded under run-1, and no other run");
+  assert.equal(byRun.length, 3, "run-1 scope must include every task/attempt recorded under run-1, and no other run");
+  const byTask = selectExecutionEconomicsEvents(ledger, {
+    tenantId: tenantA.tenantId,
+    projectId: "project-1",
+    planId: "plan-1",
+    taskRef: "task-1",
+  });
+  assert.equal(byTask.length, 3, "task-1 scope must include every run/attempt recorded under task-1 and exclude the task-2 event - no cross-task leakage");
+  assert.ok(byTask.every((e) => e.idempotencyKey !== "task-2-evt"));
   const byAttempt = selectExecutionEconomicsEvents(ledger, {
     tenantId: tenantA.tenantId,
     projectId: "project-1",
