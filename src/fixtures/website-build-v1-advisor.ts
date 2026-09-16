@@ -4,6 +4,7 @@ import {
   WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING,
   WEBSITE_BUILD_V1_BOUND_CLIENT_PROJECT_SNAPSHOT,
 } from "./website-build-v1-recipe-binding.js";
+import { WEBSITE_BUILD_V1_RECIPE } from "./website-build-v1-recipe.js";
 
 /**
  * CXP-001A "one canonical WEBSITE_BUILD_v1 fixture" reference proof.
@@ -21,5 +22,6 @@ import {
 export const WEBSITE_BUILD_V1_ADVISOR_RESULT: AdvisorResult = buildAdvisorResult({
   ownership: WEBSITE_BUILD_V1_RECIPE_BINDING_OWNERSHIP,
   snapshot: WEBSITE_BUILD_V1_BOUND_CLIENT_PROJECT_SNAPSHOT,
+  recipe: WEBSITE_BUILD_V1_RECIPE,
   binding: WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING,
 });

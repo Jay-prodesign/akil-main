@@ -55,6 +55,7 @@ test("A4/A11 reference proof: WEBSITE_BUILD_v1 advisor result is deterministic, 
   const again = buildAdvisorResult({
     ownership: WEBSITE_BUILD_V1_RECIPE_BINDING_OWNERSHIP,
     snapshot: WEBSITE_BUILD_V1_BOUND_CLIENT_PROJECT_SNAPSHOT,
+    recipe: WEBSITE_BUILD_V1_RECIPE,
     binding: WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING,
   });
   assert.deepEqual(again, WEBSITE_BUILD_V1_ADVISOR_RESULT);
@@ -172,6 +173,7 @@ test("A1 (CXP-001A): a verified binding whose boundJobs share no real job identi
   const result = buildAdvisorResult({
     ownership: WEBSITE_BUILD_V1_RECIPE_BINDING_OWNERSHIP,
     snapshot,
+    recipe: WEBSITE_BUILD_V1_RECIPE,
     binding: WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING,
   });
   assert.equal(result.observation.applicableRecipeRef, undefined);
@@ -213,6 +215,7 @@ test("CXP-001A (adversarial, contamination): a binding built for a different ten
   const result = buildAdvisorResult({
     ownership: WEBSITE_BUILD_V1_RECIPE_BINDING_OWNERSHIP,
     snapshot: WEBSITE_BUILD_V1_BOUND_CLIENT_PROJECT_SNAPSHOT,
+    recipe: WEBSITE_BUILD_V1_RECIPE,
     binding: otherBinding,
   });
   assert.equal(result.observation.applicableRecipeRef, undefined);
@@ -238,6 +241,38 @@ test("CXP-001A (adversarial, staleness): a binding for an old plan version canno
   const result = buildAdvisorResult({
     ownership: WEBSITE_BUILD_V1_RECIPE_BINDING_OWNERSHIP,
     snapshot: staleSnapshot,
+    recipe: WEBSITE_BUILD_V1_RECIPE,
+    binding: WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING,
+  });
+  assert.equal(result.observation.applicableRecipeRef, undefined);
+});
+
+test("CXP-001A (Brain PR #66 F5, adversarial): a binding present with real matching jobs but NO concrete recipe supplied still yields no provenance - binding alone is not sufficient", () => {
+  const result = buildAdvisorResult({
+    ownership: WEBSITE_BUILD_V1_RECIPE_BINDING_OWNERSHIP,
+    snapshot: WEBSITE_BUILD_V1_BOUND_CLIENT_PROJECT_SNAPSHOT,
+    binding: WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING,
+  });
+  assert.equal(result.observation.applicableRecipeRef, undefined);
+});
+
+test("CXP-001A (Brain PR #66 F5, adversarial): a concrete recipe whose recipeId does not match binding.boundRecipeId never becomes provenance, even with an otherwise valid binding/jobs", () => {
+  const wrongIdRecipe = { ...WEBSITE_BUILD_V1_RECIPE, recipeId: "some-other-recipe-id" } as typeof WEBSITE_BUILD_V1_RECIPE;
+  const result = buildAdvisorResult({
+    ownership: WEBSITE_BUILD_V1_RECIPE_BINDING_OWNERSHIP,
+    snapshot: WEBSITE_BUILD_V1_BOUND_CLIENT_PROJECT_SNAPSHOT,
+    recipe: wrongIdRecipe,
+    binding: WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING,
+  });
+  assert.equal(result.observation.applicableRecipeRef, undefined);
+});
+
+test("CXP-001A (Brain PR #66 F5, adversarial): a concrete recipe whose version does not match binding.consumedRecipeVersion never becomes provenance, even with a matching recipeId", () => {
+  const wrongVersionRecipe = { ...WEBSITE_BUILD_V1_RECIPE, version: WEBSITE_BUILD_V1_RECIPE.version + 1 };
+  const result = buildAdvisorResult({
+    ownership: WEBSITE_BUILD_V1_RECIPE_BINDING_OWNERSHIP,
+    snapshot: WEBSITE_BUILD_V1_BOUND_CLIENT_PROJECT_SNAPSHOT,
+    recipe: wrongVersionRecipe,
     binding: WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING,
   });
   assert.equal(result.observation.applicableRecipeRef, undefined);

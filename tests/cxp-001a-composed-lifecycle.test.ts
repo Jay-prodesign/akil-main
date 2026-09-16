@@ -32,6 +32,7 @@ import {
   WEBSITE_BUILD_V1_RECIPE_BINDING_CAPABILITY_ADMISSION,
   WEBSITE_BUILD_V1_RECIPE_BINDING_CONNECTION_BINDING,
 } from "../src/fixtures/website-build-v1-recipe-binding.js";
+import { WEBSITE_BUILD_V1_RECIPE } from "../src/fixtures/website-build-v1-recipe.js";
 
 /**
  * Brain PR #66 F2/F3 correction: a deterministic composed WEBSITE_BUILD_v1
@@ -167,6 +168,7 @@ test("CXP-001A MET same-lineage proof: execution-economics events bind to the ex
     tenantScope: coldStart.tenantScope,
     projectId: coldStart.project.projectId,
     planId: coldStart.plan.planId,
+    planVersion: coldStart.plan.version,
     jobId: job.jobId,
     taskRef: spec.requirementId,
     runRef: "run-cxp-001a-1",
@@ -192,6 +194,7 @@ test("CXP-001A MET same-lineage proof: execution-economics events bind to the ex
     tenantScope: coldStart.tenantScope,
     projectId: coldStart.project.projectId,
     planId: coldStart.plan.planId,
+    planVersion: coldStart.plan.version,
     jobId: otherJob.jobId,
     taskRef: otherSpec.requirementId,
     runRef: "run-cxp-001a-1",
@@ -209,14 +212,41 @@ test("CXP-001A MET same-lineage proof: execution-economics events bind to the ex
     capturedAt: "2026-09-16T00:20:00.000Z",
   });
 
+  // Differs from the real event ONLY in planVersion - proves this exact
+  // composed lineage isolates by ProjectPlanVersion identity {planId,
+  // version}, not planId alone (Brain PR #66 F4).
+  const foreignVersionLineage = createExecutionEconomicsLineage({
+    tenantScope: coldStart.tenantScope,
+    projectId: coldStart.project.projectId,
+    planId: coldStart.plan.planId,
+    planVersion: coldStart.plan.version + 1,
+    jobId: job.jobId,
+    taskRef: spec.requirementId,
+    runRef: "run-cxp-001a-1",
+    attemptRef: "attempt-1",
+  });
+  const foreignVersionEvent = recordExecutionEconomicsEvent({
+    lineage: foreignVersionLineage,
+    idempotencyKey: "cxp-001a-foreign-plan-version-attempt-1",
+    usageSource: "OTHER_ADMITTED",
+    costBuckets: [
+      { kind: "MARGINAL_CASH", amount: { presence: "REPORTED", amountMinorUnits: 999_999, currency: "USD" } },
+      { kind: "ALLOCATED_SUBSCRIPTION", amount: { presence: "REPORTED", amountMinorUnits: 999_999, currency: "USD" } },
+      { kind: "HUMAN_SHADOW", amount: { presence: "REPORTED", amountMinorUnits: 999_999, currency: "USD" } },
+    ],
+    capturedAt: "2026-09-16T00:20:00.000Z",
+  });
+
   let ledger = EMPTY_EXECUTION_ECONOMICS_LEDGER;
   ledger = appendExecutionEconomicsEvent(ledger, event);
   ledger = appendExecutionEconomicsEvent(ledger, foreignEvent);
+  ledger = appendExecutionEconomicsEvent(ledger, foreignVersionEvent);
 
   const scoped = selectExecutionEconomicsEvents(ledger, {
     tenantId: coldStart.tenantScope.tenantId,
     projectId: coldStart.project.projectId,
     planId: coldStart.plan.planId,
+    planVersion: coldStart.plan.version,
     jobId: job.jobId,
   });
   assert.equal(scoped.length, 1);
@@ -241,6 +271,7 @@ test("CXP-001A customer-safety proof: the composed customer-safe snapshot/adviso
   const result = buildAdvisorResult({
     ownership: WEBSITE_BUILD_V1_RECIPE_BINDING_OWNERSHIP,
     snapshot,
+    recipe: WEBSITE_BUILD_V1_RECIPE,
     binding: WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING,
   });
 

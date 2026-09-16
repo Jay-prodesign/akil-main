@@ -8,6 +8,7 @@ import type {
 } from "./client-project-snapshot.js";
 import type { DeliveryStatusLabel } from "./delivery-status.js";
 import type { DeliveryRecipePlanBinding } from "./delivery-recipe-plan-binding.js";
+import type { DeliveryRecipe } from "./delivery-recipe.js";
 
 export class InvalidAdvisorContextError extends Error {
   constructor(reason: string) {
@@ -105,9 +106,9 @@ function ownershipEquals(a: ProjectOwnershipRef, b: ProjectOwnershipRef): boolea
  *
  * CXP-001A: recipe provenance is proven only through a verified AI-004A
  * `DeliveryRecipePlanBinding` - never a raw caller-supplied `DeliveryRecipe`
- * and never a `jobFamily` string comparison. The prior check compared a
- * recipe's blueprint-level `jobFamily` (e.g. `"website-build-v1"`) against
- * a real wired `OutcomeJob`'s requirement-level `jobFamily` (e.g.
+ * alone and never a `jobFamily` string comparison. The prior check compared
+ * a recipe's blueprint-level `jobFamily` (e.g. `"website-build-v1"`)
+ * against a real wired `OutcomeJob`'s requirement-level `jobFamily` (e.g.
  * `"design-build"`, `"handover"` - see `outcome-job-spec.ts`/
  * `outcome-job-wiring.ts`), which can never legitimately be equal on a
  * genuine cold-start lineage and could only ever "match" by an unbound
@@ -117,13 +118,21 @@ function ownershipEquals(a: ProjectOwnershipRef, b: ProjectOwnershipRef): boolea
  * `workingArtifact` when one is present, and at least one of the
  * snapshot's real jobs to be a job the binding actually claims
  * (`boundJobs[].specId === job.jobId`, the same deterministic identity
- * `outcome-job-routing-execution.ts` already relies on). `recipeId`/
- * `version` are read only from the binding's own already-verified fields,
- * never from a separate untrusted recipe object.
+ * `outcome-job-routing-execution.ts` already relies on).
+ *
+ * Brain PR #66 F5 correction: a `binding` alone is not sufficient - the
+ * caller must also supply the concrete `recipe` the binding claims to have
+ * consumed, and its `recipeId`/`version` must exactly equal
+ * `binding.boundRecipeId`/`binding.consumedRecipeVersion`. A `recipe`
+ * supplied without a matching `binding` (or vice versa) still yields no
+ * provenance - `recipeId`/`version` on the observation are exposed only
+ * from the binding's own already-verified fields once both checks pass,
+ * never trusted from the raw `recipe` object directly.
  */
 export function buildAdvisorResult(input: {
   ownership: ProjectOwnershipRef;
   snapshot: ClientProjectSnapshot;
+  recipe?: DeliveryRecipe;
   binding?: DeliveryRecipePlanBinding;
 }): AdvisorResult {
   if (!ownershipEquals(input.ownership, input.snapshot.ownership)) {
@@ -146,10 +155,14 @@ export function buildAdvisorResult(input: {
     .map((capability) => capability.requiredCapabilityRef);
 
   const binding = input.binding;
+  const recipe = input.recipe;
   const workingArtifact = input.snapshot.workingArtifact;
   let applicableRecipeRef: AdvisorObservation["applicableRecipeRef"];
   if (
     binding !== undefined &&
+    recipe !== undefined &&
+    recipe.recipeId === binding.boundRecipeId &&
+    recipe.version === binding.consumedRecipeVersion &&
     binding.tenantId === input.ownership.tenantId &&
     binding.projectId === input.ownership.projectId &&
     (input.ownership.serviceRef === undefined || input.ownership.serviceRef === binding.serviceRef) &&
