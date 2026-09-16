@@ -81,9 +81,22 @@ export interface AttentionState {
 /**
  * §7 acceptance direction (implicit fail-closed discipline, matching
  * every other projection in this repository): a caller-supplied
- * `latestExceptionEvent` must belong to the exact same job/tenant as
- * `job`, or construction rejects rather than silently attributing a
- * foreign event's reason/timestamp to this job.
+ * `latestExceptionEvent` must belong to the exact same job/tenant/customer
+ * as `job`, or construction rejects rather than silently attributing a
+ * foreign event's reason/timestamp to this job. Likewise, a caller-supplied
+ * `ownership` must match the job's tenant/customer/project identity before
+ * it is used to resolve a responsible owner.
+ *
+ * CXP-001E correction: `jobId` is a derived, human-readable string, not a
+ * globally unique identifier (see `evidence.ts`), so a same-tenant,
+ * same-jobId `AuditEvent` or `ProjectOwnershipRef` genuinely belonging to
+ * a different customer could previously pass the tenantId-only (and,
+ * for ownership, tenantId+projectId-only) check and leak that foreign
+ * customer's raw exception reason/timestamp or resolved delivery owner
+ * into this job's `AttentionState`. Both checks now also require
+ * `customerId` to match - `AuditEvent.customerId` (CXP-001C) and
+ * `ProjectOwnershipRef.customerId` were already available but not yet
+ * consulted here.
  */
 export function buildAttentionState(input: {
   job: OutcomeJob;
@@ -102,6 +115,11 @@ export function buildAttentionState(input: {
         "latestExceptionEvent belongs to a different tenant than the given job",
       );
     }
+    if (input.latestExceptionEvent.customerId !== input.job.customerId) {
+      throw new InvalidAttentionStateError(
+        "latestExceptionEvent belongs to a different customer than the given job",
+      );
+    }
   }
 
   let internalAttentionLevel: InternalAttentionLevel;
@@ -116,9 +134,13 @@ export function buildAttentionState(input: {
 
   let responsibleOwnerMembershipId: OwnershipAssignment["membershipId"] | undefined;
   if (input.ownershipHistory !== undefined && input.ownership !== undefined) {
-    if (input.ownership.tenantId !== input.job.tenantId || input.ownership.projectId !== input.job.projectId) {
+    if (
+      input.ownership.tenantId !== input.job.tenantId ||
+      input.ownership.customerId !== input.job.customerId ||
+      input.ownership.projectId !== input.job.projectId
+    ) {
       throw new InvalidAttentionStateError(
-        "ownership does not match the given job's tenant/project identity",
+        "ownership does not match the given job's tenant/customer/project identity",
       );
     }
     const currentDeliveryOwner = resolveCurrentOwner({
