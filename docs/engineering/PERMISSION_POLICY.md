@@ -16,9 +16,10 @@ Authority order for engineering decisions: Owner → ChatGPT / canonical AKILTA 
 `BACKLOG → READY → IN_PROGRESS → IMPLEMENTED → VERIFYING → VERIFIED → COMPLETED`
 
 - An implementing engineer (Claude or Codex) may move a task up to `IMPLEMENTED`.
-- Only ChatGPT verification against requirements, repository changes, and evidence may move a task to `VERIFIED` or `COMPLETED`.
+- By default, only ChatGPT verification against requirements, repository changes, and evidence may move a task to `VERIFIED` or `COMPLETED`. `AGENTS.md` §12 defines a narrow exception, active only once §11's epoch gate is independently confirmed open: a LOW/MEDIUM-risk task fully inside existing canonical scope may reach delegated `VERIFIED`/task-local `COMPLETED` via a verifier distinct from the implementing execution context (Codex, a separate Claude review session, or another admitted independent reviewer) — never via the implementer's own self-review, and never for HIGH/PROTECTED work or anything carrying an explicit `HOLD_MERGE`/owner gate.
 - If verification fails: `VERIFYING → CHANGES_REQUIRED → IN_PROGRESS`.
 - "Done" asserted in prose is never sufficient evidence for any lifecycle transition.
+- `SAFE_MERGE` (merging to `main` without a separate Brain/Founder relay) is likewise governed entirely by `AGENTS.md` §12's conditions and exclusions; it is not a default engineer entitlement.
 
 ## DEC-121 — Secret authority
 

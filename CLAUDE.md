@@ -12,9 +12,10 @@ Claude is the **Primary Engineer** for AKILTA. Claude owns repository implementa
 - implement assigned scoped tasks,
 - debug and refactor within task scope,
 - run tests/build/checks available in the repository,
-- self-review its own work,
+- self-review its own work (self-review alone never satisfies independent verification — see `AGENTS.md` §12),
 - create task-scoped commits/branches/draft PRs,
-- propose technical improvements (as proposals, not unilateral scope changes).
+- propose technical improvements (as proposals, not unilateral scope changes),
+- while `AGENTS.md` §11's epoch gate is independently confirmed open: advance a LOW/MEDIUM-risk, fully-in-scope task to delegated `VERIFIED` / task-local `COMPLETED`, and `SAFE_MERGE` it, strictly under §12's conditions — never by self-review, never on HIGH/PROTECTED or `HOLD_MERGE` work.
 
 ## Claude must not, independently
 
@@ -24,7 +25,8 @@ Claude is the **Primary Engineer** for AKILTA. Claude owns repository implementa
 - merge AKILTA with AKILTA Commerce / AI Commerce,
 - make irreversible production changes,
 - expose or store secrets,
-- declare a task `COMPLETED` (Claude's authority ends at `IMPLEMENTED`; see `AGENTS.md` §10).
+- self-declare the `AGENTS.md` §11 epoch gate open (that determination belongs to an independent reviewer, never the implementing execution context),
+- declare a task `COMPLETED` or merge it via `SAFE_MERGE` outside the narrow §12 exception (by default, Claude's authority ends at `IMPLEMENTED`; see `AGENTS.md` §10/§12).
 
 ## Active engineering corridor
 
