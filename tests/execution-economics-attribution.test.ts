@@ -115,6 +115,24 @@ test("M8: createCostAmount UNKNOWN forbids a supplied amount/currency - never co
   assert.throws(() => createCostAmount({ presence: "UNKNOWN", amountMinorUnits: 0, currency: "USD" }), InvalidExecutionEconomicsError);
 });
 
+test("M8b (F3 fix, adversarial): a raw malformed object cannot bypass createCostAmount by claiming to already be a valid CostAmount", () => {
+  const malformedAmount = { presence: "REPORTED", amountMinorUnits: Number.NaN, currency: "USD" };
+  assert.throws(
+    () => event({ costBuckets: [{ kind: "MARGINAL_CASH", amount: malformedAmount as never }] }),
+    InvalidExecutionEconomicsError,
+  );
+  const missingCurrency = { presence: "REPORTED", amountMinorUnits: 100 };
+  assert.throws(
+    () => event({ costBuckets: [{ kind: "MARGINAL_CASH", amount: missingCurrency as never }] }),
+    InvalidExecutionEconomicsError,
+  );
+  const forgedUnknownWithValue = { presence: "UNKNOWN", amountMinorUnits: 500, currency: "USD" };
+  assert.throws(
+    () => event({ costBuckets: [{ kind: "MARGINAL_CASH", amount: forgedUnknownWithValue as never }] }),
+    InvalidExecutionEconomicsError,
+  );
+});
+
 // --- M9-M11: time/attribution discipline ---
 
 test("M9: an event's activeTimeMs must never exceed wallTimeMs - wait/blocker time is not active execution", () => {
@@ -182,7 +200,17 @@ test("M15: selectExecutionEconomicsEvents returns only events matching tenant+pr
 
 test("M16 (adversarial): a same-named project/plan/job under a different tenant never leaks into the scoped total", () => {
   let ledger = EMPTY_EXECUTION_ECONOMICS_LEDGER;
-  ledger = appendExecutionEconomicsEvent(ledger, event({ idempotencyKey: "tenant-a-evt" }));
+  ledger = appendExecutionEconomicsEvent(
+    ledger,
+    event({
+      idempotencyKey: "tenant-a-evt",
+      costBuckets: [
+        { kind: "MARGINAL_CASH", amount: createCostAmount({ presence: "REPORTED", amountMinorUnits: 500, currency: "USD" }) },
+        { kind: "ALLOCATED_SUBSCRIPTION", amount: createCostAmount({ presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }) },
+        { kind: "HUMAN_SHADOW", amount: createCostAmount({ presence: "REPORTED", amountMinorUnits: 50, currency: "USD" }) },
+      ],
+    }),
+  );
   ledger = appendExecutionEconomicsEvent(
     ledger,
     event({
@@ -196,7 +224,47 @@ test("M16 (adversarial): a same-named project/plan/job under a different tenant 
   const selected = selectExecutionEconomicsEvents(ledger, { tenantId: tenantA.tenantId, projectId: "project-1", planId: "plan-1" });
   assert.equal(selected.length, 1);
   const total = resolveTotalDeliveryCost(selected);
-  assert.deepEqual(total, { status: "COMPUTED", amountMinorUnits: 500, currency: "USD" });
+  assert.deepEqual(total, { status: "COMPUTED", amountMinorUnits: 650, currency: "USD" });
+});
+
+test("M16b (F1 fix, adversarial): an entirely absent required cost bucket makes the grand total INCOMPLETE, never zero-by-omission", () => {
+  const e = event({
+    costBuckets: [
+      { kind: "MARGINAL_CASH", amount: createCostAmount({ presence: "REPORTED", amountMinorUnits: 500, currency: "USD" }) },
+      // ALLOCATED_SUBSCRIPTION and HUMAN_SHADOW are never supplied at all.
+    ],
+  });
+  const result = resolveTotalDeliveryCost([e]);
+  assert.equal(result.status, "INCOMPLETE");
+});
+
+test("M17b (F2 fix): selectExecutionEconomicsEvents isolates by taskRef/runRef/attemptRef - no cross-task/run/attempt leakage", () => {
+  let ledger = EMPTY_EXECUTION_ECONOMICS_LEDGER;
+  ledger = appendExecutionEconomicsEvent(ledger, event({ idempotencyKey: "run-1-evt" }));
+  ledger = appendExecutionEconomicsEvent(
+    ledger,
+    event({ idempotencyKey: "run-2-evt", lineage: lineage({ runRef: "run-2" }) }),
+  );
+  ledger = appendExecutionEconomicsEvent(
+    ledger,
+    event({ idempotencyKey: "attempt-2-evt", lineage: lineage({ attemptRef: "attempt-2" }) }),
+  );
+  const byRun = selectExecutionEconomicsEvents(ledger, {
+    tenantId: tenantA.tenantId,
+    projectId: "project-1",
+    planId: "plan-1",
+    runRef: "run-1",
+  });
+  assert.equal(byRun.length, 2, "run-1 scope must include both attempts recorded under run-1, and no other run");
+  const byAttempt = selectExecutionEconomicsEvents(ledger, {
+    tenantId: tenantA.tenantId,
+    projectId: "project-1",
+    planId: "plan-1",
+    runRef: "run-1",
+    attemptRef: "attempt-2",
+  });
+  assert.equal(byAttempt.length, 1);
+  assert.equal(byAttempt.at(0)?.idempotencyKey, "attempt-2-evt");
 });
 
 test("M17: selectExecutionEconomicsEvents narrows further by jobId when supplied", () => {

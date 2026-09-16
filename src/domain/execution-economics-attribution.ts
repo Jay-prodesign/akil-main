@@ -105,18 +105,6 @@ export function createExecutionEconomicsLineage(input: {
   };
 }
 
-function lineagesMatch(a: ExecutionEconomicsLineage, b: ExecutionEconomicsLineage): boolean {
-  return (
-    a.tenantId === b.tenantId &&
-    a.projectId === b.projectId &&
-    a.planId === b.planId &&
-    a.jobId === b.jobId &&
-    a.taskRef === b.taskRef &&
-    a.runRef === b.runRef &&
-    a.attemptRef === b.attemptRef
-  );
-}
-
 /** "Subscription-vs-API/PAYG surface": honest usage-source declaration, never inferred. */
 export type UsageSource = "API_PAYG" | "SUBSCRIPTION_SHARED" | "OTHER_ADMITTED";
 
@@ -184,11 +172,24 @@ export interface CostBucketEntry {
   readonly amount: CostAmount;
 }
 
+/**
+ * F3 fix (Brain PR #64 exact-head review): the public construction path
+ * must never trust a caller-supplied object's claim to already be a valid
+ * `CostAmount` - it must be reconstructed through `createCostAmount`,
+ * exactly like every other validated value in this module, so a raw
+ * malformed/missing/NaN amount can never bypass validation.
+ */
 function createCostBucketEntry(input: { kind: unknown; amount: unknown }): CostBucketEntry {
   if (!RECOGNIZED_COST_BUCKET_KINDS.has(input.kind as CostBucketKind)) {
     throw new InvalidExecutionEconomicsError(`kind must be one of ${Array.from(RECOGNIZED_COST_BUCKET_KINDS).join(", ")}`);
   }
-  return { kind: input.kind as CostBucketKind, amount: input.amount as CostAmount };
+  const rawAmount = (input.amount ?? {}) as { presence?: unknown; amountMinorUnits?: unknown; currency?: unknown };
+  const amount = createCostAmount({
+    presence: rawAmount.presence,
+    amountMinorUnits: rawAmount.amountMinorUnits,
+    currency: rawAmount.currency,
+  });
+  return { kind: input.kind as CostBucketKind, amount };
 }
 
 /**
@@ -284,7 +285,7 @@ export function recordExecutionEconomicsEvent(input: {
   lineage: ExecutionEconomicsLineage;
   idempotencyKey: unknown;
   usageSource: unknown;
-  costBuckets: ReadonlyArray<{ kind: unknown; amount: CostAmount }>;
+  costBuckets: ReadonlyArray<{ kind: unknown; amount: unknown }>;
   attribution?: {
     workerRef?: unknown;
     providerRef?: unknown;
@@ -364,11 +365,21 @@ export function appendExecutionEconomicsEvent(
  * whose lineage does not match every supplied field is excluded, never
  * partially matched.
  */
+/**
+ * F2 fix (Brain PR #64 exact-head review): `ExecutionEconomicsLineage`
+ * binds the full tenant/project/plan/job/task/run/attempt hierarchy, so
+ * scoping must be able to isolate at every one of those levels - not only
+ * down to job - or a caller cannot prove no cross-task/cross-run/cross-
+ * attempt leakage exists.
+ */
 export interface ExecutionEconomicsScope {
   readonly tenantId: TenantScope["tenantId"];
   readonly projectId: string;
   readonly planId: string;
   readonly jobId?: string;
+  readonly taskRef?: string;
+  readonly runRef?: string;
+  readonly attemptRef?: string;
 }
 
 export function selectExecutionEconomicsEvents(
@@ -380,7 +391,10 @@ export function selectExecutionEconomicsEvents(
       e.lineage.tenantId === scope.tenantId &&
       e.lineage.projectId === scope.projectId &&
       e.lineage.planId === scope.planId &&
-      (scope.jobId === undefined || e.lineage.jobId === scope.jobId),
+      (scope.jobId === undefined || e.lineage.jobId === scope.jobId) &&
+      (scope.taskRef === undefined || e.lineage.taskRef === scope.taskRef) &&
+      (scope.runRef === undefined || e.lineage.runRef === scope.runRef) &&
+      (scope.attemptRef === undefined || e.lineage.attemptRef === scope.attemptRef),
   );
 }
 
@@ -424,7 +438,21 @@ export function resolveCostBucketTotal(
  * together; any bucket kind absent entirely, `UNKNOWN`, or in a
  * conflicting currency makes the whole total `INCOMPLETE`.
  */
+const REQUIRED_COST_BUCKET_KINDS: ReadonlyArray<CostBucketKind> = ["MARGINAL_CASH", "ALLOCATED_SUBSCRIPTION", "HUMAN_SHADOW"];
+
+/**
+ * F1 fix (Brain PR #64 exact-head review): an entirely absent required
+ * bucket is a stronger form of "missing" than a present-but-`UNKNOWN`
+ * bucket, and must fail the grand total closed exactly the same way -
+ * this function must never silently treat "no entry was ever recorded
+ * for this bucket kind" as if it contributed zero.
+ */
 export function resolveTotalDeliveryCost(events: ReadonlyArray<ExecutionEconomicsEvent>): CostRollupResult {
+  const presentKinds = new Set(events.flatMap((e) => e.costBuckets.map((b) => b.kind)));
+  const missingKinds = REQUIRED_COST_BUCKET_KINDS.filter((kind) => !presentKinds.has(kind));
+  if (missingKinds.length > 0) {
+    return { status: "INCOMPLETE", reason: `required cost bucket(s) entirely absent: ${missingKinds.join(", ")}` };
+  }
   const amounts = events.flatMap((e) => e.costBuckets.map((b) => b.amount));
   return rollUpCostAmounts(amounts);
 }
