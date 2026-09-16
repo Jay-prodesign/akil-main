@@ -22,6 +22,7 @@ type OutcomeJobSpecId = string & { readonly __brand: "OutcomeJobSpecId" };
  */
 export interface OutcomeJobSpec {
   readonly tenantId: ProjectPlanVersion["tenantId"];
+  readonly customerId: ProjectPlanVersion["customerId"];
   readonly projectId: ProjectPlanVersion["projectId"];
   readonly planId: ProjectPlanVersion["planId"];
   readonly planVersion: ProjectPlanVersion["version"];
@@ -46,9 +47,18 @@ export interface OutcomeJobSpec {
  * tenantId + jobId. `projectId` is now part of `specId` so two projects
  * sharing a planId/version/requirement can never collide on runtime job
  * identity.
+ *
+ * CXP-001K correction: `projectId` itself is not asserted unique across
+ * customers within a tenant either (see `project.ts`), so two distinct
+ * customers' equally legitimate projects reusing the same `projectId`
+ * string could still produce an identical `specId`/derived `jobId` under
+ * the previous formula. `customerId` is now also part of `specId` for the
+ * same reason `projectId` was added: two customers sharing a
+ * projectId/planId/version/requirement can never collide on runtime job
+ * identity either.
  */
 function specIdFor(plan: ProjectPlanVersion, node: PlanNode): OutcomeJobSpecId {
-  return `${plan.projectId}:${plan.planId}:v${plan.version}:${node.requirementId}` as OutcomeJobSpecId;
+  return `${plan.customerId}:${plan.projectId}:${plan.planId}:v${plan.version}:${node.requirementId}` as OutcomeJobSpecId;
 }
 
 /**
@@ -67,6 +77,7 @@ export function deriveOutcomeJobSpecs(
     .filter((node) => node.disposition === "REQUIRED")
     .map((node) => ({
       tenantId: plan.tenantId,
+      customerId: plan.customerId,
       projectId: plan.projectId,
       planId: plan.planId,
       planVersion: plan.version,

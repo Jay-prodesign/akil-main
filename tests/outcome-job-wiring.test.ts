@@ -231,6 +231,64 @@ test("T5: wiring for a different tenant/project than the plan admission fails cl
   );
 });
 
+test("CXP-001K (adversarial): wiring for a different customer within the SAME tenant, reusing the exact same projectId string, fails closed", () => {
+  const fixture = buildWebsiteBuildV1Fixture();
+  const plan = compilePlan({
+    tenantScope: fixture.tenantScope,
+    project: fixture.project,
+    planId: "plan-wiring-cxp-001k",
+    blueprint: fixture.blueprint,
+    soldScope: fixture.soldScope,
+    evidence: fixture.evidence,
+    now: "2026-08-19T00:00:00.000Z",
+  });
+  const approval = createApprovalReference({
+    plan,
+    approvalId: "approval-wiring-cxp-001k",
+    approvedAt: "2026-08-19T00:00:00.000Z",
+    approverRef: "owner:founder",
+  });
+  const planAdmission = admitPlan({
+    plan,
+    blueprint: fixture.blueprint,
+    readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, plan),
+    approval,
+  });
+  assert.equal(planAdmission.status, "ADMITTED");
+  const specs = deriveOutcomeJobSpecs(plan);
+  const jobAdmissions = admitJobs(planAdmission, specs);
+
+  // Deliberately reuses the SAME tenantScope and the SAME projectId
+  // string from a different customer, so this case is caught ONLY by a
+  // customerId check - a tenantId or projectId check alone would not
+  // distinguish it (project.ts does not enforce projectId global
+  // uniqueness across customers).
+  const otherCustomer = createCustomer({
+    tenantScope: fixture.tenantScope,
+    customerId: "cust-wiring-cxp-001k-other",
+    displayName: "Other Customer, Same Tenant",
+  });
+  const otherCustomerProject = createProject({
+    tenantScope: fixture.tenantScope,
+    customer: otherCustomer,
+    projectId: fixture.project.projectId,
+    ownerRef: "owner-wiring-cxp-001k-other",
+    state: "active",
+  });
+  assert.throws(
+    () =>
+      wireAdmittedOutcomeJobs({
+        tenantScope: fixture.tenantScope,
+        customer: otherCustomer,
+        project: otherCustomerProject,
+        planAdmission,
+        jobAdmissions,
+        specs,
+      }),
+    InvalidOutcomeJobWiringError,
+  );
+});
+
 test("T11: wired OutcomeJob identifiers remain traceable to their exact Project/PlanVersion/requirement lineage", () => {
   const fixture = buildWebsiteBuildV1Fixture();
   const plan = compilePlan({
@@ -268,7 +326,7 @@ test("T11: wired OutcomeJob identifiers remain traceable to their exact Project/
   });
 
   for (const job of jobs) {
-    assert.ok(job.jobId.startsWith(`${plan.projectId}:${plan.planId}:v${plan.version}:`));
+    assert.ok(job.jobId.startsWith(`${plan.customerId}:${plan.projectId}:${plan.planId}:v${plan.version}:`));
     assert.ok(job.jobId.includes(job.jobFamily));
   }
 });
@@ -394,6 +452,54 @@ test("F4: a JobAdmissionResult whose lineage does not match the planAdmission fa
         planAdmission,
         jobAdmissions: mismatchedRequirement,
         specs,
+      }),
+    InvalidOutcomeJobWiringError,
+  );
+
+  // CXP-001K: a hand-built JobAdmissionResult with a forged customerId
+  // must fail closed at the jobAdmission-vs-planAdmission lineage check,
+  // independently of the tenantId/projectId checks above and independently
+  // of the separate spec-vs-jobAdmission agreement check below - the
+  // matching spec's own customerId is forged to the SAME value here so
+  // spec-vs-jobAdmission agreement trivially holds and only the
+  // jobAdmission-vs-planAdmission comparison can be what fails this case.
+  const forgedCustomerId = "cust-cxp-001k-forged" as never;
+  const mismatchedCustomer = [
+    { ...jobAdmissions[0]!, customerId: forgedCustomerId },
+  ];
+  const specsAgreeingWithForgedCustomer = [
+    { ...specs[0]!, customerId: forgedCustomerId },
+    ...specs.slice(1),
+  ];
+  assert.throws(
+    () =>
+      wireAdmittedOutcomeJobs({
+        tenantScope: fixture.tenantScope,
+        customer: fixture.customer,
+        project: fixture.project,
+        planAdmission,
+        jobAdmissions: mismatchedCustomer,
+        specs: specsAgreeingWithForgedCustomer,
+      }),
+    InvalidOutcomeJobWiringError,
+  );
+
+  // CXP-001K: a spec whose customerId disagrees with the (otherwise
+  // correctly-lineaged) jobAdmission it is matched against by specId must
+  // also fail closed at the spec-vs-jobAdmission agreement check.
+  const mismatchedSpecCustomer = [
+    { ...specs[0]!, customerId: "cust-cxp-001k-forged-spec" as never },
+    ...specs.slice(1),
+  ];
+  assert.throws(
+    () =>
+      wireAdmittedOutcomeJobs({
+        tenantScope: fixture.tenantScope,
+        customer: fixture.customer,
+        project: fixture.project,
+        planAdmission,
+        jobAdmissions,
+        specs: mismatchedSpecCustomer,
       }),
     InvalidOutcomeJobWiringError,
   );
