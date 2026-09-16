@@ -3,7 +3,17 @@ import { admitServiceCatalogEntry, type ServiceCatalogAdmission } from "../domai
 import type { AdmittedWorker } from "../domain/worker-routing-policy.js";
 import { deriveOutcomeJobSpecs, type OutcomeJobSpec } from "../domain/outcome-job-spec.js";
 import { bindAdmittedRecipeToPlan, type DeliveryRecipePlanBinding } from "../domain/delivery-recipe-plan-binding.js";
-import { createOutcomeJob, type OutcomeJob } from "../domain/outcome-job.js";
+import type { OutcomeJob } from "../domain/outcome-job.js";
+import { createApprovalReference, type ApprovalReference } from "../domain/approval-reference.js";
+import { createCustomerEvidenceItem } from "../domain/customer-evidence.js";
+import type { EvidenceReadinessAssertion } from "../domain/admission-readiness.js";
+import {
+  admitPlan,
+  admitJobs,
+  type PlanAdmissionResult,
+  type JobAdmissionResult,
+} from "../domain/plan-admission.js";
+import { wireAdmittedOutcomeJobs } from "../domain/outcome-job-wiring.js";
 import { buildClientProjectSnapshot, type ClientProjectSnapshot } from "../domain/client-project-snapshot.js";
 import {
   createConnectionRequirement,
@@ -18,6 +28,7 @@ import {
   buildWebsiteBuildV1ColdStartFixture,
   WEBSITE_BUILD_V1_SERVICE_CATALOG,
 } from "./website-build-v1-commercial-order.js";
+import { WEBSITE_BUILD_V1_BLUEPRINT } from "./website-build-v1.js";
 import { WEBSITE_BUILD_V1_RECIPE } from "./website-build-v1-recipe.js";
 
 /**
@@ -81,23 +92,67 @@ export const WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING: DeliveryRecipePlanBinding = b
 });
 
 /**
- * Real per-requirement wired jobs (`jobId === spec.specId`, `jobFamily ===
- * spec.requirementId`, mirroring `wireAdmittedOutcomeJobs`'s own identity
- * convention) - not hand-picked blueprint-level `jobFamily` strings. This
- * is what makes `binding.boundJobs[].specId === job.jobId` a genuine,
- * non-coincidental provenance proof.
+ * Brain PR #66 F1 correction: jobs must be proven through the real
+ * admitted/wired lineage (`admitPlan` -> `admitJobs` -> `wireAdmittedOutcomeJobs`,
+ * the same pattern `tests/commercial-order-cold-start-admission.test.ts`
+ * already proves end to end) rather than manually reconstructed via a bare
+ * `createOutcomeJob()` map - a hand-built substitute can carry the same
+ * field values by construction but does not demonstrate this repository's
+ * actual admission/wiring semantics.
  */
-export const WEBSITE_BUILD_V1_BOUND_JOBS: ReadonlyArray<OutcomeJob> = WEBSITE_BUILD_V1_RECIPE_BINDING_SPECS.map(
-  (spec) =>
-    createOutcomeJob({
-      tenantScope: coldStart.tenantScope,
-      customer: coldStart.customer,
-      project: coldStart.project,
-      jobId: spec.specId,
-      jobFamily: spec.jobFamily,
-      businessObjective: spec.intendedOutcome,
-    }),
+export const WEBSITE_BUILD_V1_RECIPE_BINDING_READINESS_ASSERTIONS: ReadonlyArray<EvidenceReadinessAssertion> =
+  coldStart.plan.nodes
+    .filter((node) => node.disposition === "REQUIRED")
+    .map((node) => ({
+      evidence: createCustomerEvidenceItem({
+        tenantScope: coldStart.tenantScope,
+        project: coldStart.project,
+        evidenceRef: `ev-readiness-website-build-v1-recipe-binding-${node.requirementId}`,
+        kind: "FACT",
+        subject: `Readiness confirmed for ${node.requirementId}`,
+        sourceLocator: `internal://reference-fixtures/website-build-v1-recipe-binding/readiness/${node.requirementId}`,
+        relatedRequirementId: node.requirementId,
+      }),
+      assertedForPlanVersion: coldStart.plan.version,
+      readinessOutcome: "SATISFIED" as const,
+    }));
+
+export const WEBSITE_BUILD_V1_RECIPE_BINDING_APPROVAL: ApprovalReference = createApprovalReference({
+  plan: coldStart.plan,
+  approvalId: "approval-website-build-v1-recipe-binding",
+  approvedAt: "2026-09-09T00:00:00.000Z",
+  approverRef: "owner:founder",
+});
+
+export const WEBSITE_BUILD_V1_RECIPE_BINDING_PLAN_ADMISSION: PlanAdmissionResult = admitPlan({
+  plan: coldStart.plan,
+  blueprint: WEBSITE_BUILD_V1_BLUEPRINT,
+  readinessAssertions: WEBSITE_BUILD_V1_RECIPE_BINDING_READINESS_ASSERTIONS,
+  approval: WEBSITE_BUILD_V1_RECIPE_BINDING_APPROVAL,
+});
+
+export const WEBSITE_BUILD_V1_RECIPE_BINDING_JOB_ADMISSIONS: ReadonlyArray<JobAdmissionResult> = admitJobs(
+  WEBSITE_BUILD_V1_RECIPE_BINDING_PLAN_ADMISSION,
+  WEBSITE_BUILD_V1_RECIPE_BINDING_SPECS,
 );
+
+/**
+ * Real per-requirement wired DRAFT jobs (`jobId === spec.specId`,
+ * `jobFamily === spec.requirementId`) produced by the actual
+ * `wireAdmittedOutcomeJobs` primitive - not hand-picked blueprint-level
+ * `jobFamily` strings and not a manually reconstructed substitute. This is
+ * what makes `binding.boundJobs[].specId === job.jobId` a genuine,
+ * non-coincidental provenance proof against this repository's real
+ * admission/wiring semantics.
+ */
+export const WEBSITE_BUILD_V1_BOUND_JOBS: ReadonlyArray<OutcomeJob> = wireAdmittedOutcomeJobs({
+  tenantScope: coldStart.tenantScope,
+  customer: coldStart.customer,
+  project: coldStart.project,
+  planAdmission: WEBSITE_BUILD_V1_RECIPE_BINDING_PLAN_ADMISSION,
+  jobAdmissions: WEBSITE_BUILD_V1_RECIPE_BINDING_JOB_ADMISSIONS,
+  specs: WEBSITE_BUILD_V1_RECIPE_BINDING_SPECS,
+});
 
 /**
  * One VERIFIED_AVAILABLE capability, scoped to this fixture's own
