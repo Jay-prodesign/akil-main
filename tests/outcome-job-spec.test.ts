@@ -114,6 +114,74 @@ test("T9: excluding then including the same requirementId via a new sold scope p
   assert.equal(deriveOutcomeJobSpecs(includedPlan).some((s) => s.requirementId === "c"), true);
 });
 
+test("Brain Rev44 F1 (adversarial): two distinct customer/project identity tuples whose components contain the delimiter character never collide on specId, even though raw ':' concatenation of the same tuples would produce an identical string", () => {
+  // customerId="a:b" + projectId="c" and customerId="a" + projectId="b:c"
+  // both concatenate to the literal string "a:b:c" under naive
+  // `${customerId}:${projectId}` joining - this is the exact Brain Rev44
+  // F1 collision shape. Holding planId/version/requirementId constant
+  // isolates the identity-tuple encoding as the only thing that can
+  // distinguish these two specs.
+  const customerA = createCustomer({ tenantScope, customerId: "a:b", displayName: "Customer A" });
+  const projectA = createProject({
+    tenantScope,
+    customer: customerA,
+    projectId: "c",
+    ownerRef: "owner-a",
+    state: "active",
+  });
+  const customerB = createCustomer({ tenantScope, customerId: "a", displayName: "Customer B" });
+  const projectB = createProject({
+    tenantScope,
+    customer: customerB,
+    projectId: "b:c",
+    ownerRef: "owner-b",
+    state: "active",
+  });
+
+  const soldScopeA = createSoldScope({
+    tenantScope,
+    project: projectA,
+    soldScopeId: "scope-a",
+    outcomeContractRef: "contract-a",
+  });
+  const soldScopeB = createSoldScope({
+    tenantScope,
+    project: projectB,
+    soldScopeId: "scope-b",
+    outcomeContractRef: "contract-b",
+  });
+  const planA = compilePlan({
+    tenantScope,
+    project: projectA,
+    planId: "plan-1",
+    blueprint,
+    soldScope: soldScopeA,
+    now: "2026-08-18T00:00:00.000Z",
+  });
+  const planB = compilePlan({
+    tenantScope,
+    project: projectB,
+    planId: "plan-1",
+    blueprint,
+    soldScope: soldScopeB,
+    now: "2026-08-18T00:00:00.000Z",
+  });
+
+  const specA = deriveOutcomeJobSpecs(planA).find((s) => s.requirementId === "a");
+  const specB = deriveOutcomeJobSpecs(planB).find((s) => s.requirementId === "a");
+  assert.ok(specA, "expected an OutcomeJobSpec for requirement a on planA");
+  assert.ok(specB, "expected an OutcomeJobSpec for requirement a on planB");
+
+  // Sanity: prove the OLD raw-concatenation formula genuinely collided on
+  // these two tuples, so this test would have failed to catch anything
+  // before the Rev44 correction.
+  const oldFormulaA = `${customerA.customerId}:${projectA.projectId}:plan-1:v1:a`;
+  const oldFormulaB = `${customerB.customerId}:${projectB.projectId}:plan-1:v1:a`;
+  assert.equal(oldFormulaA, oldFormulaB, "sanity: the old raw concatenation formula must collide for this adversarial pair");
+
+  assert.notEqual(specA?.specId, specB?.specId);
+});
+
 test("an UNKNOWN requirement produces no OutcomeJobSpec (only REQUIRED nodes are committed)", () => {
   const soldScope = createSoldScope({
     tenantScope,

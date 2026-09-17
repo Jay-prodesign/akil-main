@@ -22,13 +22,27 @@ export class InvalidPlanAdmissionAnswerError extends Error {
   }
 }
 
+/**
+ * Brain Rev44 F2 correction: raw `::`-delimited concatenation of
+ * tenantId/customerId/projectId/planId is not actually collision-safe -
+ * these components are validated only as non-empty strings elsewhere,
+ * never as delimiter-free, so a component containing `::` can shift the
+ * apparent tuple boundaries and make two distinct tenant/customer/
+ * project/plan tuples resolve to the same key (base64url-encoding the
+ * result afterward does not restore the lost boundaries - it just
+ * encodes the same already-ambiguous string). `JSON.stringify` of the
+ * identity tuple as an array is injective for this purpose: JSON string
+ * escaping means two distinct tuples can never serialize to the same
+ * string, so this key (before being base64url-encoded into a filename by
+ * `filePathFor`) is unambiguous.
+ */
 function planKey(
   tenantId: TenantScope["tenantId"],
   customerId: Customer["customerId"],
   projectId: Project["projectId"],
   planId: ProjectPlanVersion["planId"],
 ): string {
-  return `${tenantId}::${customerId}::${projectId}::${planId}`;
+  return JSON.stringify([tenantId, customerId, projectId, planId]);
 }
 
 /**
