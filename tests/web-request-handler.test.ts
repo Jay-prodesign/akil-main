@@ -92,7 +92,9 @@ test("A5: a valid session for a different tenant/project resolves 403 FORBIDDEN_
 
 test("A9: a valid session with matching ownership resolves 200 READY and renders the underlying snapshot's delivery status", () => {
   const handler = devHandler();
-  const response = handler(request({ headers: { [SESSION_TOKEN_HEADER]: WEB_SHELL_DEV_SESSION_TOKEN } }));
+  const response = handler(
+    request({ headers: { [SESSION_TOKEN_HEADER]: WEB_SHELL_DEV_SESSION_TOKEN, "accept-language": "en" } }),
+  );
   assert.equal(response.status, 200);
   assert.match(response.body, /Overall status/);
   assert.match(response.body, /IN_PROGRESS/);
@@ -148,7 +150,9 @@ test("U6/U10: a project with a blocked job resolves 200 BLOCKED with a customer-
     }),
     snapshotSource: singleSnapshotSource(blockedSnapshot),
   });
-  const response = handler(request({ headers: { [SESSION_TOKEN_HEADER]: WEB_SHELL_DEV_SESSION_TOKEN } }));
+  const response = handler(
+    request({ headers: { [SESSION_TOKEN_HEADER]: WEB_SHELL_DEV_SESSION_TOKEN, "accept-language": "en" } }),
+  );
   assert.equal(response.status, 200);
   assert.match(response.body, /Blocked since/);
   assert.doesNotMatch(response.body, /internal engineering reason, not customer-safe/);
@@ -156,7 +160,9 @@ test("U6/U10: a project with a blocked job resolves 200 BLOCKED with a customer-
 
 test("V3-F-001: without a teamAttentionSource wired, READY still renders 200 with an honest team-attention Unavailable section - no crash, no fabricated data", () => {
   const handler = devHandler();
-  const response = handler(request({ headers: { [SESSION_TOKEN_HEADER]: WEB_SHELL_DEV_SESSION_TOKEN } }));
+  const response = handler(
+    request({ headers: { [SESSION_TOKEN_HEADER]: WEB_SHELL_DEV_SESSION_TOKEN, "accept-language": "en" } }),
+  );
   assert.equal(response.status, 200);
   assert.match(response.body, /team-attention-heading/);
   assert.match(response.body, />Unavailable</);
@@ -171,7 +177,9 @@ test("V3-F-001: with a teamAttentionSource wired, READY renders the resolved own
     snapshotSource: createWebShellFixtureSnapshotSource(),
     teamAttentionSource: createWebShellFixtureTeamAttentionSource(),
   });
-  const response = handler(request({ headers: { [SESSION_TOKEN_HEADER]: WEB_SHELL_DEV_SESSION_TOKEN } }));
+  const response = handler(
+    request({ headers: { [SESSION_TOKEN_HEADER]: WEB_SHELL_DEV_SESSION_TOKEN, "accept-language": "en" } }),
+  );
   assert.equal(response.status, 200);
   assert.match(response.body, /Your role: STAFF/);
   assert.match(response.body, /Lead Owner: /);

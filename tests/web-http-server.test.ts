@@ -37,7 +37,7 @@ test("A3: the shell starts on an ephemeral local port and serves a real HTTP req
     },
     async (baseUrl) => {
       const response = await fetch(`${baseUrl}${PORTAL_PATH}`, {
-        headers: { [SESSION_TOKEN_HEADER]: WEB_SHELL_DEV_SESSION_TOKEN },
+        headers: { [SESSION_TOKEN_HEADER]: WEB_SHELL_DEV_SESSION_TOKEN, "accept-language": "en" },
       });
       assert.equal(response.status, 200);
       const body = await response.text();
