@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { TenantScope } from "./tenant-scope.js";
 import type { ConnectionBinding, ConnectionState } from "./connection-authority.js";
+import type { ProjectOwnershipRef } from "./project-ownership.js";
 import type {
   ConnectorConnectionInstance,
   ConnectorKind,
@@ -22,6 +23,15 @@ export class ConnectorConnectionVersionConflictError extends Error {
       `ConnectorConnectionInstance "${connectionBindingId}" version conflict: expected ${expectedVersion ?? "(none - create)"}, actual ${actualVersion ?? "(none - not yet created)"}`,
     );
     this.name = "ConnectorConnectionVersionConflictError";
+  }
+}
+
+export class ConnectorConnectionOwnershipMismatchError extends Error {
+  constructor(connectionBindingId: string) {
+    super(
+      `ConnectorConnectionInstance "${connectionBindingId}" already exists under a different tenant/customer/project/service ownership - an update can never change who owns an existing connection`,
+    );
+    this.name = "ConnectorConnectionOwnershipMismatchError";
   }
 }
 
@@ -66,6 +76,25 @@ export class ConnectorConnectionLockTimeoutError extends Error {
  *   caller must read the current version before overwriting it; blind
  *   overwrite of an already-persisted connection is never permitted).
  *
+ * CXP-001S-scan correction: `connectionBindingId` is a caller-supplied
+ * opaque string (see `connection-authority.ts`'s `createConnectionBinding`),
+ * never asserted globally unique across customers/projects within a
+ * tenant - the same collision-prone-identifier shape already found and
+ * fixed for `OutcomeJob.jobId` (CXP-001G) and plan-admission's durable
+ * file key (CXP-001L). Before this correction, a version-matching update
+ * on an existing `connectionBindingId` replaced the stored `instance`
+ * wholesale with no check that the caller's new ownership actually
+ * matched the existing record's - a caller who (by coincidence, replay,
+ * or a client-side bug) supplied the correct `expectedVersion` for a
+ * connectionBindingId belonging to a different customer/project/service
+ * could silently overwrite that unrelated connection. `save`'s update
+ * branch now also requires `existing.instance.binding.ownership` to
+ * exactly match the new `instance.binding.ownership`
+ * (tenantId+customerId+projectId+serviceRef) before proceeding, failing
+ * closed with `ConnectorConnectionOwnershipMismatchError` otherwise - an
+ * update can change a connection's own lifecycle state/secret/evidence,
+ * but never who owns it.
+ *
  * Rev94 F1 correction: the version check above is enforced correctly
  * in-process, but the original implementation's "read whole file -> check
  * -> rewrite whole file" was not atomic *across* processes - two
@@ -81,6 +110,15 @@ export class ConnectorConnectionLockTimeoutError extends Error {
  * critical section for a given tenant at a time, so the version check and
  * the write it gates can never be split across two racing processes.
  */
+function ownershipEquals(a: ProjectOwnershipRef, b: ProjectOwnershipRef): boolean {
+  return (
+    a.tenantId === b.tenantId &&
+    a.customerId === b.customerId &&
+    a.projectId === b.projectId &&
+    a.serviceRef === b.serviceRef
+  );
+}
+
 export interface StoredConnectorConnection {
   readonly instance: ConnectorConnectionInstance;
   readonly version: number;
@@ -478,6 +516,9 @@ export class FileDurableConnectorConnectionStore implements DurableConnectorConn
 
       if (expectedVersion === undefined || expectedVersion !== existing.version) {
         throw new ConnectorConnectionVersionConflictError(connectionBindingId, expectedVersion, existing.version);
+      }
+      if (!ownershipEquals(existing.instance.binding.ownership, instance.binding.ownership)) {
+        throw new ConnectorConnectionOwnershipMismatchError(connectionBindingId);
       }
       const updated: StoredConnectorConnection = { instance, version: existing.version + 1 };
       records[connectionBindingId] = updated;
