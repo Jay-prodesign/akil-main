@@ -18,6 +18,7 @@ import {
   createRoutedExecutionAssignment,
   isRoutedExecutionAssignmentValidForJob,
   authorizeOutcomeJobExecutionFromRouting,
+  createExecutionRoutingRequirementRegistry,
   InvalidRoutedExecutionAssignmentError,
   OutcomeJobExecutionNotRoutedError,
   type RoutedExecutionAssignment,
@@ -222,4 +223,76 @@ test("R11: authorizeOutcomeJobExecutionFromRouting throws when the job is not ye
     () => authorizeOutcomeJobExecutionFromRouting({ job, assignment }),
     InvalidOutcomeJobTransitionError,
   );
+});
+
+test("CXP-001V: createExecutionRoutingRequirementRegistry's registry key does not collide across distinct (tenantId, customerId, projectId, jobId) tuples whose components straddle the raw `::` delimiter", () => {
+  // Prove the defect this test guards against was real: the old
+  // `${tenantId}::${customerId}::${projectId}::${jobId}` formula genuinely
+  // collides for this exact pair of distinct scopes (they differ only in
+  // where the `::` boundary falls between tenantId and customerId).
+  const scopeA = { tenantId: "t::x", customerId: "c", projectId: "p", jobId: "j" };
+  const scopeB = { tenantId: "t", customerId: "x::c", projectId: "p", jobId: "j" };
+  const oldKey = (s: typeof scopeA): string => `${s.tenantId}::${s.customerId}::${s.projectId}::${s.jobId}`;
+  assert.equal(oldKey(scopeA), oldKey(scopeB));
+
+  const tenantScopeA = createTenantScope(scopeA.tenantId);
+  const customerA = createCustomer({ tenantScope: tenantScopeA, customerId: scopeA.customerId, displayName: "A" });
+  const projectA = createProject({
+    tenantScope: tenantScopeA,
+    customer: customerA,
+    projectId: scopeA.projectId,
+    ownerRef: "owner-a",
+    state: "active",
+  });
+  const jobA = createOutcomeJob({
+    tenantScope: tenantScopeA,
+    customer: customerA,
+    project: projectA,
+    jobId: scopeA.jobId,
+    jobFamily: "onboarding",
+    businessObjective: "Verify registry key collision safety",
+  });
+
+  const tenantScopeB = createTenantScope(scopeB.tenantId);
+  const customerB = createCustomer({ tenantScope: tenantScopeB, customerId: scopeB.customerId, displayName: "B" });
+  const projectB = createProject({
+    tenantScope: tenantScopeB,
+    customer: customerB,
+    projectId: scopeB.projectId,
+    ownerRef: "owner-b",
+    state: "active",
+  });
+  const jobB = createOutcomeJob({
+    tenantScope: tenantScopeB,
+    customer: customerB,
+    project: projectB,
+    jobId: scopeB.jobId,
+    jobFamily: "onboarding",
+    businessObjective: "Verify registry key collision safety",
+  });
+
+  const registry = createExecutionRoutingRequirementRegistry();
+  const requirementA = registry.admitRoutingRequiredFromAssignment({
+    job: jobA,
+    assignment: assignmentFor(jobA),
+    admittedAt: "2026-09-17T00:00:00.000Z",
+  });
+  const requirementB = registry.admitRoutingRequiredFromAssignment({
+    job: jobB,
+    assignment: assignmentFor(jobB),
+    admittedAt: "2026-09-17T00:00:00.000Z",
+  });
+
+  // Each admission must reflect its OWN job's identity, not the other
+  // scope's - a collision would have caused the second admit() call to
+  // short-circuit and silently return the first scope's stored
+  // requirement instead of admitting/returning one for its own job.
+  assert.equal(requirementA.tenantId, scopeA.tenantId);
+  assert.equal(requirementA.customerId, scopeA.customerId);
+  assert.equal(requirementB.tenantId, scopeB.tenantId);
+  assert.equal(requirementB.customerId, scopeB.customerId);
+  assert.notEqual(requirementA.tenantId, requirementB.tenantId);
+
+  assert.equal(registry.lookup(jobA)?.tenantId, scopeA.tenantId);
+  assert.equal(registry.lookup(jobB)?.tenantId, scopeB.tenantId);
 });
