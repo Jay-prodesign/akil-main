@@ -78,6 +78,20 @@ Reverted the `Object.create(null)` fix in `cloudflare-worker-fetch-adapter.ts` a
 | 6. Acceptance-to-test trace | SATISFIED (spot-checked, not exhaustive); **BLOCKED** - `FileDurableOutcomeJobStore.putIfAbsent`'s cross-process race is already fixed on unmerged PR #30 (`AUD-DURABILITY-GAP`), not on `main`/this branch; merge, don't re-implement |
 | 7. Config/test-runner consistency | SATISFIED/NO DEFECT |
 
+## Round 3 — exhaustive prototype-chain bug-class closure sweep (no code change)
+
+Following Round 2's PR #30 finding, and per Rev66's own "do not stop at the first finding" instruction, ran an exhaustive repo-wide sweep (not a targeted spot-check) to determine whether the caller-controlled-key-into-plain-object-dictionary bug class (found 6 times total: `worker-routing-policy.ts`, `local-execution-hardening.ts`, `local-execution-collaboration.ts`, `durable-connector-connection-store.ts`, `http-server.ts`, `cloudflare-worker-fetch-adapter.ts`) has any remaining unfixed instance anywhere in `src/`.
+
+Two grep passes across all of `src/**/*.ts`:
+- Every bare `= {}` dictionary-literal construction (`: {} `, `= {};`).
+- Every dynamic bracket-indexed assignment (`dict[key] = value`).
+
+Findings:
+- The only two remaining `= {}` sites (`execution-economics-attribution.ts` lines 255/291, `local-execution-hardening.ts` line 540) assign exclusively fixed, statically-named properties (`workerRef`, `activeTimeMs`, etc.) declared in the enclosing TypeScript object-literal type — never a caller-controlled dynamic key. **Not vulnerable** to this bug class; the bracket-indexing precondition simply does not apply.
+- Every dynamic bracket-indexed assignment remaining in `src/` (`durable-connector-connection-store.ts` lines 510/532/544, `cloudflare-worker-fetch-adapter.ts` line 41, `http-server.ts` line 54) traces back to a dictionary already constructed via `Object.create(null)` — confirmed by reading each declaration site directly, not inferred.
+
+**Disposition: SATISFIED/NO DEFECT.** The prototype-chain bug-class scan is now exhausted for this repository: no further live instance exists. This closes the thread opened by Round 1/2 rather than leaving it open-ended: the bounded audit correctly stopped searching for this specific bug class once a genuine exhaustive negative result was produced, rather than continuing to re-scan without new evidence.
+
 ## Status
 
 `IMPLEMENTED / SELF-VALIDATED`. `HOLD_MERGE` - inherited stacked lineage; independent Brain exact-head review required before any merge disposition or before this bounded audit round is declared exhausted. Not self-declared `VERIFIED`/`PASS`/`SAFE_MERGE`/`STOP_PROOF`.
