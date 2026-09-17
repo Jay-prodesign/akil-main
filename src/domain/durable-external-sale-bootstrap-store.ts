@@ -4,6 +4,7 @@ import {
   writeFileSync,
   existsSync,
   appendFileSync,
+  readdirSync,
   linkSync,
   unlinkSync,
 } from "node:fs";
@@ -27,6 +28,20 @@ export class CorruptedExternalSaleBootstrapLineError extends Error {
   constructor(filePath: string, reason: string) {
     super(`Corrupted durable external-sale-bootstrap line (${filePath}): ${reason}`);
     this.name = "CorruptedExternalSaleBootstrapLineError";
+  }
+}
+
+export class CorruptedExternalSaleBootstrapLockError extends Error {
+  constructor(lockPath: string, reason: string) {
+    super(`Corrupted durable external-sale-bootstrap creation lock (${lockPath}): ${reason}`);
+    this.name = "CorruptedExternalSaleBootstrapLockError";
+  }
+}
+
+export class ExternalSaleBootstrapTenantLockTimeoutError extends Error {
+  constructor(tenantId: string) {
+    super(`Timed out waiting for the durable external-sale-bootstrap tenant journal lock for tenant "${tenantId}"`);
+    this.name = "ExternalSaleBootstrapTenantLockTimeoutError";
   }
 }
 
@@ -226,11 +241,14 @@ export class FileDurableExternalSaleBootstrapStore
   implements DurableExternalSaleBootstrapStore
 {
   private readonly baseDir: string;
+  private static readonly TENANT_LOCK_TIMEOUT_MS = 5000;
+  private static readonly TENANT_LOCK_RETRY_BACKOFF_MS = 5;
 
   constructor(baseDir: string) {
     this.baseDir = baseDir;
     mkdirSync(this.baseDir, { recursive: true });
     mkdirSync(this.creationLockDir(), { recursive: true });
+    mkdirSync(this.tenantLockDir(), { recursive: true });
   }
 
   private filePathFor(tenantId: TenantScope["tenantId"]): string {
@@ -248,24 +266,251 @@ export class FileDurableExternalSaleBootstrapStore
     return join(this.creationLockDir(), `${tenantKey}.${saleKey}.lock`);
   }
 
+  private tenantLockDir(): string {
+    return join(this.baseDir, ".tenant-locks");
+  }
+
+  private tenantLockPathForEpoch(tenantId: TenantScope["tenantId"], epoch: number): string {
+    const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
+    return join(this.tenantLockDir(), `${safeKey}.epoch-${epoch}.lock`);
+  }
+
+  private currentTenantLockEpoch(tenantId: TenantScope["tenantId"]): number {
+    const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
+    const prefix = `${safeKey}.epoch-`;
+    const suffix = ".lock";
+    let highest = 0;
+    for (const entry of readdirSync(this.tenantLockDir())) {
+      if (!entry.startsWith(prefix) || !entry.endsWith(suffix)) {
+        continue;
+      }
+      const epoch = Number(entry.slice(prefix.length, entry.length - suffix.length));
+      if (Number.isInteger(epoch) && epoch > highest) {
+        highest = epoch;
+      }
+    }
+    return highest;
+  }
+
+  private isProcessAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (cause) {
+      return (cause as NodeJS.ErrnoException).code !== "ESRCH";
+    }
+  }
+
+  private tryAcquireTenantLockEpoch(tenantId: TenantScope["tenantId"], epoch: number): "acquired" | "taken" {
+    const candidatePath = this.tenantLockPathForEpoch(tenantId, epoch);
+    const tmpPath = `${candidatePath}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(tmpPath, JSON.stringify({ pid: process.pid }), "utf8");
+    try {
+      linkSync(tmpPath, candidatePath);
+      return "acquired";
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw cause;
+      }
+      return "taken";
+    } finally {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        // best-effort cleanup only
+      }
+    }
+  }
+
+  /**
+   * AUD-DURABILITY-GAP / Rev71 forward-port (repo-wide Rev66 audit
+   * closure): ports the exact `FileDurableOutcomeJobStore` tenant-journal
+   * design proven correct through Rev69/Rev70/Rev72 (see that file's own
+   * doc comments for the full reasoning, including the ABA-race pitfall a
+   * naive "read holder pid, confirm dead, unlink, retry" reclaim would
+   * introduce) - implemented correctly on the first pass here rather than
+   * re-discovering the same three correction rounds. Epoch numbers only
+   * ever increase; a waiter never deletes a stale holder's lock, it only
+   * ever creates a new, never-before-existing epoch once the current
+   * highest epoch is confirmed dead; `linkSync` remains the sole atomic
+   * arbiter of any given epoch.
+   */
+  private withTenantJournalLock<T>(tenantId: TenantScope["tenantId"], criticalSection: () => T): T {
+    const deadline = Date.now() + FileDurableExternalSaleBootstrapStore.TENANT_LOCK_TIMEOUT_MS;
+    let acquiredEpoch: number | undefined;
+    for (;;) {
+      const highest = this.currentTenantLockEpoch(tenantId);
+
+      if (highest === 0) {
+        if (this.tryAcquireTenantLockEpoch(tenantId, 1) === "acquired") {
+          acquiredEpoch = 1;
+          break;
+        }
+        continue;
+      }
+
+      const highestPath = this.tenantLockPathForEpoch(tenantId, highest);
+      let holderPid: number | undefined;
+      let lockAlreadyGone = false;
+      try {
+        const raw = JSON.parse(readFileSync(highestPath, "utf8")) as unknown;
+        if (
+          typeof raw === "object" &&
+          raw !== null &&
+          typeof (raw as Record<string, unknown>)["pid"] === "number"
+        ) {
+          holderPid = (raw as { pid: number })["pid"];
+        }
+      } catch (readCause) {
+        if ((readCause as NodeJS.ErrnoException).code === "ENOENT") {
+          lockAlreadyGone = true;
+        }
+      }
+
+      if (lockAlreadyGone) {
+        continue;
+      }
+      if (holderPid !== undefined && !this.isProcessAlive(holderPid)) {
+        if (this.tryAcquireTenantLockEpoch(tenantId, highest + 1) === "acquired") {
+          acquiredEpoch = highest + 1;
+          break;
+        }
+        continue;
+      }
+
+      if (Date.now() > deadline) {
+        throw new ExternalSaleBootstrapTenantLockTimeoutError(tenantId);
+      }
+      Atomics.wait(
+        new Int32Array(new SharedArrayBuffer(4)),
+        0,
+        0,
+        FileDurableExternalSaleBootstrapStore.TENANT_LOCK_RETRY_BACKOFF_MS,
+      );
+    }
+    try {
+      return criticalSection();
+    } finally {
+      try {
+        unlinkSync(this.tenantLockPathForEpoch(tenantId, acquiredEpoch));
+      } catch {
+        // best-effort
+      }
+    }
+  }
+
+  /**
+   * The sole physical-append path for this tenant's jsonl journal -
+   * mirrors `FileDurableOutcomeJobStore.appendJobIfAbsentLocked` exactly.
+   * Both `putIfAbsent`'s own winning-creator append and
+   * `reconcileOrphanedLocks`'s healing append go through this method, so
+   * a concurrent creator-vs-reconciler or multi-reconciler race can never
+   * physically duplicate a jsonl line (Rev69's finding for the sibling
+   * store applies identically here).
+   */
+  private appendRecordIfAbsentLocked(
+    tenantId: TenantScope["tenantId"],
+    saleId: string,
+    payload: string,
+  ): void {
+    this.withTenantJournalLock(tenantId, () => {
+      const filePath = this.filePathFor(tenantId);
+      if (existsSync(filePath)) {
+        const lines = readFileSync(filePath, "utf8")
+          .split("\n")
+          .filter((line) => line.trim().length > 0);
+        for (const line of lines) {
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (
+            typeof parsed === "object" &&
+            parsed !== null &&
+            (parsed as Record<string, unknown>)["saleId"] === saleId
+          ) {
+            return;
+          }
+        }
+      }
+      appendFileSync(filePath, `${payload}\n`, "utf8");
+    });
+  }
+
+  /**
+   * AUD-DURABILITY-GAP / Rev71 forward-port F1 (repo-wide Rev66 audit
+   * closure): mirrors `FileDurableOutcomeJobStore.reconcileOrphanedLocks`.
+   * A process killed after `linkSync` succeeds but before its own
+   * `appendFileSync` completes would otherwise leave a permanently
+   * invisible-but-claimed saleId - `get()`/`putIfAbsent()`'s own
+   * absence-check now transparently heals any creation lock not yet
+   * reflected in the jsonl file. A lock that fails validation, or whose
+   * own embedded tenantId does not match the tenant it is filed under, is
+   * corruption and fails closed with `CorruptedExternalSaleBootstrapLockError`.
+   */
+  private reconcileOrphanedLocks(
+    tenantId: TenantScope["tenantId"],
+    knownSaleIds: ReadonlySet<string>,
+  ): Array<{ saleId: string; result: ExternalSaleBootstrapResult }> {
+    const lockDir = this.creationLockDir();
+    const tenantKey = Buffer.from(tenantId, "utf8").toString("base64url");
+    const prefix = `${tenantKey}.`;
+    const healed: Array<{ saleId: string; result: ExternalSaleBootstrapResult }> = [];
+    for (const entry of readdirSync(lockDir)) {
+      if (!entry.startsWith(prefix) || !entry.endsWith(".lock")) {
+        continue;
+      }
+      const lockPath = join(lockDir, entry);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(readFileSync(lockPath, "utf8"));
+      } catch (cause) {
+        throw new CorruptedExternalSaleBootstrapLockError(
+          lockPath,
+          `lock file is not valid JSON (${(cause as Error).message})`,
+        );
+      }
+      let record: { saleId: string; result: ExternalSaleBootstrapResult };
+      try {
+        record = validatePersistedSaleBootstrapRecord(parsed, tenantId, lockPath);
+      } catch (cause) {
+        throw new CorruptedExternalSaleBootstrapLockError(
+          lockPath,
+          `lock file failed validation (${(cause as Error).message})`,
+        );
+      }
+      if (knownSaleIds.has(record.saleId)) {
+        continue;
+      }
+      this.appendRecordIfAbsentLocked(tenantId, record.saleId, JSON.stringify({ saleId: record.saleId, result: record.result }));
+      healed.push(record);
+    }
+    return healed;
+  }
+
   private readAll(
     tenantId: TenantScope["tenantId"],
   ): Array<{ saleId: string; result: ExternalSaleBootstrapResult }> {
     const filePath = this.filePathFor(tenantId);
-    if (!existsSync(filePath)) {
-      return [];
-    }
-    const content = readFileSync(filePath, "utf8");
-    const lines = content.split("\n").filter((line) => line.trim().length > 0);
-    return lines.map((line) => {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line);
-      } catch (cause) {
-        throw new CorruptedExternalSaleBootstrapLineError(filePath, `line is not valid JSON (${(cause as Error).message})`);
+    const fromJsonl: Array<{ saleId: string; result: ExternalSaleBootstrapResult }> = [];
+    if (existsSync(filePath)) {
+      const content = readFileSync(filePath, "utf8");
+      const lines = content.split("\n").filter((line) => line.trim().length > 0);
+      for (const line of lines) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line);
+        } catch (cause) {
+          throw new CorruptedExternalSaleBootstrapLineError(filePath, `line is not valid JSON (${(cause as Error).message})`);
+        }
+        fromJsonl.push(validatePersistedSaleBootstrapRecord(parsed, tenantId, filePath));
       }
-      return validatePersistedSaleBootstrapRecord(parsed, tenantId, filePath);
-    });
+    }
+    const knownSaleIds = new Set(fromJsonl.map((record) => record.saleId));
+    const healed = this.reconcileOrphanedLocks(tenantId, knownSaleIds);
+    return [...fromJsonl, ...healed];
   }
 
   private dedupedBySaleId(
@@ -325,29 +570,30 @@ export class FileDurableExternalSaleBootstrapStore
     }
 
     if (!wonCreation) {
-      const winnerRaw = readFileSync(lockPath, "utf8");
-      let winner: { saleId: string; result: ExternalSaleBootstrapResult };
-      try {
-        winner = validatePersistedSaleBootstrapRecord(JSON.parse(winnerRaw), tenantId, lockPath);
-      } catch (cause) {
+      // Re-resolve through get() (not a raw lock read) so a crashed
+      // winner's orphaned lock is transparently healed via readAll's own
+      // reconciliation before this call decides what to return - the
+      // same path every other reader uses (mirrors
+      // FileDurableOutcomeJobStore.putIfAbsent's identical correction).
+      const winner = this.get(tenantId, saleId);
+      if (winner === undefined) {
         throw new InvalidDurableExternalSaleBootstrapStoreError(
-          `internal error: creation-lock content for saleId "${saleId}" is not a valid persisted record (${(cause as Error).message})`,
+          `internal error: creation lock for saleId "${saleId}" exists but could not be resolved`,
         );
       }
       if (
-        winner.result.job.jobId !== result.job.jobId ||
-        winner.result.project.projectId !== result.project.projectId ||
-        winner.result.soldScope.soldScopeId !== result.soldScope.soldScopeId
+        winner.job.jobId !== result.job.jobId ||
+        winner.project.projectId !== result.project.projectId ||
+        winner.soldScope.soldScopeId !== result.soldScope.soldScopeId
       ) {
         throw new InvalidDurableExternalSaleBootstrapStoreError(
           `saleId "${saleId}" is already persisted under a different bootstrapped result`,
         );
       }
-      return { result: winner.result, created: false };
+      return { result: winner, created: false };
     }
 
-    const filePath = this.filePathFor(tenantId);
-    appendFileSync(filePath, `${payload}\n`, "utf8");
+    this.appendRecordIfAbsentLocked(tenantId, saleId, payload);
     return { result, created: true };
   }
 

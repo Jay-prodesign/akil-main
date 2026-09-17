@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, appendFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { TenantScope } from "./tenant-scope.js";
 import type { Customer } from "./customer.js";
@@ -95,15 +95,20 @@ export class FileDurablePlanAdmissionStore implements DurablePlanAdmissionStore 
     return join(this.baseDir, `${safeKey}.jsonl`);
   }
 
+  /**
+   * Rev71 (repo-wide Rev66 audit closure) correction: the previous
+   * "read whole file, concatenate, rewrite whole file" implementation was
+   * not atomic across processes - two concurrent `appendEvent` calls for
+   * the same plan could both read the same current content and one's
+   * `writeFileSync` would silently discard the other's event (a lost
+   * update). A single `appendFileSync` call is one atomic `write(2)` in
+   * append mode, matching the identical fix already applied to this
+   * repository's other durable stores (`FileDurableEngineeringStore`,
+   * `FileDurableOutcomeJobStore`, `FileDurableExternalSaleBootstrapStore`).
+   */
   appendEvent(event: PlanAdmissionEvent): void {
     const filePath = this.filePathFor(event.tenantId, event.customerId, event.projectId, event.planId);
-    const line = `${JSON.stringify(event)}\n`;
-    if (existsSync(filePath)) {
-      const existing = readFileSync(filePath, "utf8");
-      writeFileSync(filePath, existing + line, "utf8");
-    } else {
-      writeFileSync(filePath, line, "utf8");
-    }
+    appendFileSync(filePath, `${JSON.stringify(event)}\n`, "utf8");
   }
 
   getEvents(
