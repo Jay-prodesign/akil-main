@@ -4,6 +4,7 @@ import { requireSession, UnauthenticatedError } from "./route-guard.js";
 import { resolveProtectedSnapshotView, type ClientProjectSnapshotSource } from "./snapshot-view-state.js";
 import { resolveProtectedTeamAttentionView, type TeamAttentionSource } from "./team-attention-view-state.js";
 import { renderShellPage, type ShellPageContent, type RenderedShellPage } from "./shell-render.js";
+import { resolveRequestLocale } from "./locale.js";
 
 const SESSION_TOKEN_HEADER = "x-akilta-session-token";
 
@@ -67,15 +68,17 @@ export function createRequestHandler(deps: {
   teamAttentionSource?: TeamAttentionSource;
 }): RequestHandler {
   return (request: IncomingRequestLike): OutgoingResponseLike => {
+    const locale = resolveRequestLocale(request.headers);
+
     if (request.method !== "GET") {
       return toResponse(
-        renderShellPage({ kind: "UNSUPPORTED", reason: `method ${request.method} is not supported` }),
+        renderShellPage({ kind: "UNSUPPORTED", reason: `method ${request.method} is not supported` }, locale),
       );
     }
 
     const requestedOwnership = parsePortalPath(request.path);
     if (requestedOwnership === undefined) {
-      return toResponse(renderShellPage({ kind: "NOT_FOUND" }));
+      return toResponse(renderShellPage({ kind: "NOT_FOUND" }, locale));
     }
 
     let session;
@@ -83,7 +86,7 @@ export function createRequestHandler(deps: {
       session = requireSession(deps.sessionProvider, request.headers[SESSION_TOKEN_HEADER]);
     } catch (error) {
       if (error instanceof UnauthenticatedError) {
-        return toResponse(renderShellPage({ kind: "UNAUTHENTICATED" }));
+        return toResponse(renderShellPage({ kind: "UNAUTHENTICATED" }, locale));
       }
       throw error;
     }
@@ -124,6 +127,6 @@ export function createRequestHandler(deps: {
       }
     }
 
-    return toResponse(renderShellPage(content));
+    return toResponse(renderShellPage(content, locale));
   };
 }

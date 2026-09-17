@@ -1,14 +1,14 @@
 import type {
   ClientProjectSnapshot,
-  CustomerSafeCapabilitySummary,
-  NextAction,
   WorkingArtifactState,
 } from "../domain/client-project-snapshot.js";
-import type { DeliveryTimeline, DeliveryTimelineEntry } from "../domain/delivery-timeline.js";
+import type { DeliveryTimeline } from "../domain/delivery-timeline.js";
 import type { ProjectCommunicationRecord } from "../domain/project-communication.js";
 import { buildAdvisorResult, type AdvisorResult } from "../domain/delivery-advisor.js";
 import type { TeamAttentionViewState } from "./team-attention-view-state.js";
 import type { TeamAttentionProjection } from "../domain/team-attention-projection.js";
+import type { Locale } from "./locale.js";
+import { resolveShellCopy, type ShellCopy } from "./shell-copy.js";
 
 /**
  * V2-APP-001 (IN SCOPE H) / V2-CDO-006: the deterministic, closed set of
@@ -54,15 +54,25 @@ function escapeHtml(value: string): string {
  * `statusLabel` is always rendered as visible text (never color alone -
  * "no color-only security/action status"), and `statusTone` only adds a
  * CSS class for color, never changes what text is shown.
+ *
+ * APP-I18N-001: `locale` drives the document's own `lang` attribute -
+ * the one structural signal every downstream assistive technology and
+ * browser feature (spell-check, translation offers, hyphenation, screen
+ * readers) relies on - and `copy` supplies every fixed string on this
+ * shared frame. Tenant/customer/project/resource identity, authorization,
+ * routing and state semantics are entirely untouched by this parameter;
+ * it only ever selects which fixed strings are shown.
  */
 function renderPage(input: {
+  locale: Locale;
+  copy: ShellCopy;
   title: string;
   statusLabel: string;
   statusTone: "neutral" | "warning" | "danger" | "success";
   bodyHtml: string;
 }): string {
   return `<!doctype html>
-<html lang="en">
+<html lang="${input.locale}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -84,27 +94,20 @@ function renderPage(input: {
 </style>
 </head>
 <body>
-<a class="skip-link" href="#main-content">Skip to main content</a>
+<a class="skip-link" href="#main-content">${escapeHtml(input.copy.skipLink)}</a>
 <header>
-  <p><strong>AKILTA</strong> — Client Portal Shell</p>
+  <p><strong>AKILTA</strong> — ${escapeHtml(input.copy.portalHeaderSuffix)}</p>
 </header>
 <main id="main-content">
   <p class="status status-${input.statusTone}" role="status">${escapeHtml(input.statusLabel)}</p>
   ${input.bodyHtml}
 </main>
 <footer>
-  <p>This is an internal engineering checkpoint (V2-APP-001/V2-CDO-006), not a released customer product.</p>
+  <p>${escapeHtml(input.copy.footerDisclaimer)}</p>
 </footer>
 </body>
 </html>`;
 }
-
-const NEXT_ACTION_LABELS: Record<NextAction["owner"], { label: string; badge: string; tone: string }> = {
-  NO_ACTION_NEEDED: { label: "Nothing needed from you right now.", badge: "NO ACTION NEEDED", tone: "success" },
-  CLIENT_ACTION_REQUIRED: { label: "Action is needed from you.", badge: "YOUR ACTION", tone: "warning" },
-  AKILTA_ACTION_REQUIRED: { label: "AKILTA is handling the next step.", badge: "AKILTA WORKING", tone: "neutral" },
-  EXTERNAL_WAIT: { label: "Waiting on an external factor.", badge: "EXTERNAL WAIT", tone: "neutral" },
-};
 
 /**
  * V2-CDO-006 (UX/CLAIM RULES): "Customer action is visually distinct from
@@ -112,47 +115,39 @@ const NEXT_ACTION_LABELS: Record<NextAction["owner"], { label: string; badge: st
  * reduce unnecessary customer interruptions" - each owner gets its own
  * always-visible text badge, never color alone (U2/U6).
  */
-function renderNextActionSection(nextAction: NextAction): string {
-  const info = NEXT_ACTION_LABELS[nextAction.owner];
+function renderNextActionSection(copy: ShellCopy, nextAction: { owner: keyof ShellCopy["nextAction"] }): string {
+  const info = copy.nextAction[nextAction.owner];
+  const tone = nextAction.owner === "NO_ACTION_NEEDED" ? "success" : nextAction.owner === "CLIENT_ACTION_REQUIRED" ? "warning" : "neutral";
   return `
   <section aria-labelledby="next-action-heading">
-    <h2 id="next-action-heading">Next action</h2>
-    <p class="status status-${info.tone}" role="status">${escapeHtml(info.badge)}</p>
+    <h2 id="next-action-heading">${escapeHtml(copy.nextActionHeading)}</h2>
+    <p class="status status-${tone}" role="status">${escapeHtml(info.badge)}</p>
     <p>${escapeHtml(info.label)}</p>
   </section>`;
 }
-
-const TIMELINE_CATEGORY_LABELS: Record<DeliveryTimelineEntry["category"], string> = {
-  STATUS_UPDATE: "Status update",
-  BLOCKER: "Blocking issue",
-  VERIFICATION: "Verified",
-  ACTION_REQUIRED: "Action required",
-  WORKING_ARTIFACT: "Working artifact update",
-  APPROVAL: "Approval",
-};
 
 /**
  * V2-CDO-006 IA: "state-first milestone/timeline summary". Reuses the
  * already customer-safe `DeliveryTimeline` (V2-CDO-001 CR-1) verbatim -
  * no raw `reason`/`actorRef` ever reaches this layer (U11).
  */
-function renderTimelineSection(timeline: DeliveryTimeline): string {
+function renderTimelineSection(copy: ShellCopy, timeline: DeliveryTimeline): string {
   if (timeline.entries.length === 0) {
     return `
   <section aria-labelledby="timeline-heading">
-    <h2 id="timeline-heading">Timeline</h2>
-    <p>No updates recorded yet.</p>
+    <h2 id="timeline-heading">${escapeHtml(copy.timelineHeading)}</h2>
+    <p>${escapeHtml(copy.noUpdatesYet)}</p>
   </section>`;
   }
   const items = timeline.entries
     .map(
       (entry) =>
-        `<li>${escapeHtml(TIMELINE_CATEGORY_LABELS[entry.category])} — <time datetime="${escapeHtml(entry.timestamp)}">${escapeHtml(entry.timestamp)}</time></li>`,
+        `<li>${escapeHtml(copy.timelineCategory[entry.category])} — <time datetime="${escapeHtml(entry.timestamp)}">${escapeHtml(entry.timestamp)}</time></li>`,
     )
     .join("\n    ");
   return `
   <section aria-labelledby="timeline-heading">
-    <h2 id="timeline-heading">Timeline</h2>
+    <h2 id="timeline-heading">${escapeHtml(copy.timelineHeading)}</h2>
     <ul>
     ${items}
     </ul>
@@ -166,15 +161,15 @@ function renderTimelineSection(timeline: DeliveryTimeline): string {
  * (V2-CDO-001 CR-1) - never a raw internal `reason` string (U11). Absent
  * such an entry, this states that truthfully rather than fabricating one.
  */
-function renderBlockerSection(timeline: DeliveryTimeline): string {
+function renderBlockerSection(copy: ShellCopy, timeline: DeliveryTimeline): string {
   const mostRecentBlocker = [...timeline.entries].filter((entry) => entry.category === "BLOCKER").at(-1);
   const detail =
     mostRecentBlocker !== undefined
-      ? `Blocked since <time datetime="${escapeHtml(mostRecentBlocker.timestamp)}">${escapeHtml(mostRecentBlocker.timestamp)}</time>.`
-      : "A blocking issue was detected. No further customer-safe detail is available yet.";
+      ? copy.blockedSince(escapeHtml(mostRecentBlocker.timestamp))
+      : copy.blockerFallback;
   return `
   <section aria-labelledby="blocker-heading">
-    <h2 id="blocker-heading">Blocked</h2>
+    <h2 id="blocker-heading">${escapeHtml(copy.blockerHeading)}</h2>
     <p>${detail}</p>
   </section>`;
 }
@@ -188,30 +183,23 @@ function renderBlockerSection(timeline: DeliveryTimeline): string {
  * approval label always reflects `isCurrentVersionApproved` exactly as
  * `isApprovalValidForPlan` computed it, never inferred separately here.
  */
-function renderWorkingArtifactSection(workingArtifact: WorkingArtifactState): string {
+function renderWorkingArtifactSection(copy: ShellCopy, workingArtifact: WorkingArtifactState): string {
   const approvalLine = workingArtifact.isCurrentVersionApproved
-    ? `<p class="status status-success" role="status">Approved</p>`
-    : `<p class="status status-neutral" role="status">Preview — not yet approved</p>`;
+    ? `<p class="status status-success" role="status">${escapeHtml(copy.approved)}</p>`
+    : `<p class="status status-neutral" role="status">${escapeHtml(copy.previewNotApproved)}</p>`;
   const staleNotice =
     workingArtifact.lastApprovedVersion !== undefined &&
     workingArtifact.lastApprovedVersion !== workingArtifact.currentVersion
-      ? `<p>A newer version exists since the last approval (version ${escapeHtml(String(workingArtifact.lastApprovedVersion))} was approved; current is version ${escapeHtml(String(workingArtifact.currentVersion))}).</p>`
+      ? `<p>${copy.newerVersionExists(escapeHtml(String(workingArtifact.lastApprovedVersion)), escapeHtml(String(workingArtifact.currentVersion)))}</p>`
       : "";
   return `
   <section aria-labelledby="working-artifact-heading">
-    <h2 id="working-artifact-heading">Working artifact</h2>
-    <p>Current version: ${escapeHtml(String(workingArtifact.currentVersion))}</p>
+    <h2 id="working-artifact-heading">${escapeHtml(copy.workingArtifactHeading)}</h2>
+    <p>${escapeHtml(copy.currentVersionLabel(String(workingArtifact.currentVersion)))}</p>
     ${approvalLine}
     ${staleNotice}
   </section>`;
 }
-
-const CAPABILITY_STATUS_LABELS: Record<CustomerSafeCapabilitySummary["status"], string> = {
-  UNVERIFIED: "Not yet verified",
-  VERIFIED_AVAILABLE: "Ready",
-  UNSUPPORTED: "Not supported",
-  INELIGIBLE: "Not eligible",
-};
 
 /**
  * V2-CDO-006 IA: "connection/capability readiness summary ... without
@@ -219,19 +207,22 @@ const CAPABILITY_STATUS_LABELS: Record<CustomerSafeCapabilitySummary["status"], 
  * already excludes `connectionBindingId`/`evidenceRef`/provider detail
  * (V2-CDO-005 P9) - this renders only `requiredCapabilityRef` + `status`.
  */
-function renderCapabilitiesSection(capabilities: ReadonlyArray<CustomerSafeCapabilitySummary>): string {
+function renderCapabilitiesSection(
+  copy: ShellCopy,
+  capabilities: ReadonlyArray<{ requiredCapabilityRef: string; status: keyof ShellCopy["capabilityStatus"] }>,
+): string {
   if (capabilities.length === 0) {
     return "";
   }
   const items = capabilities
     .map(
       (capability) =>
-        `<li>${escapeHtml(capability.requiredCapabilityRef)}: ${escapeHtml(CAPABILITY_STATUS_LABELS[capability.status])}</li>`,
+        `<li>${escapeHtml(capability.requiredCapabilityRef)}: ${escapeHtml(copy.capabilityStatus[capability.status])}</li>`,
     )
     .join("\n    ");
   return `
   <section aria-labelledby="capabilities-heading">
-    <h2 id="capabilities-heading">Connections &amp; capabilities</h2>
+    <h2 id="capabilities-heading">${escapeHtml(copy.capabilitiesHeading)}</h2>
     <ul>
     ${items}
     </ul>
@@ -243,7 +234,7 @@ function renderCapabilitiesSection(capabilities: ReadonlyArray<CustomerSafeCapab
  * the already customer-safe `ProjectCommunicationRecord` fields (V2-CDO-003
  * O9) - no message body/content field exists on this type to leak.
  */
-function renderCommunicationsSection(records: ReadonlyArray<ProjectCommunicationRecord>): string {
+function renderCommunicationsSection(copy: ShellCopy, records: ReadonlyArray<ProjectCommunicationRecord>): string {
   if (records.length === 0) {
     return "";
   }
@@ -251,23 +242,18 @@ function renderCommunicationsSection(records: ReadonlyArray<ProjectCommunication
     .sort((a, b) => (a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0))
     .map((record) => {
       const evidence = record.evidenceRef ?? record.relatedArtifactRef;
-      const evidenceLine = evidence !== undefined ? ` — evidence: ${escapeHtml(evidence)}` : "";
+      const evidenceLine = evidence !== undefined ? ` — ${escapeHtml(copy.evidenceLabel)}: ${escapeHtml(evidence)}` : "";
       return `<li>${escapeHtml(record.classification)} (${escapeHtml(record.requiredActor)}) — <time datetime="${escapeHtml(record.timestamp)}">${escapeHtml(record.timestamp)}</time>${evidenceLine}</li>`;
     })
     .join("\n    ");
   return `
   <section aria-labelledby="communications-heading">
-    <h2 id="communications-heading">Recent updates</h2>
+    <h2 id="communications-heading">${escapeHtml(copy.communicationsHeading)}</h2>
     <ul>
     ${items}
     </ul>
   </section>`;
 }
-
-const ADVISOR_MATURITY_LABELS: Record<AdvisorResult["maturity"], string> = {
-  L0_OBSERVE: "ADVISOR: OBSERVE",
-  L1_RECOMMEND: "ADVISOR: RECOMMEND",
-};
 
 /**
  * V2-CDO-008 (In Scope: "Customer-safe presentation integration only if
@@ -290,23 +276,23 @@ const ADVISOR_MATURITY_LABELS: Record<AdvisorResult["maturity"], string> = {
  * defect can never hide or corrupt the verified project-status sections
  * that already rendered above it.
  */
-function renderAdvisorSection(snapshot: ClientProjectSnapshot): string {
+function renderAdvisorSection(copy: ShellCopy, snapshot: ClientProjectSnapshot): string {
   let result: AdvisorResult;
   try {
     result = buildAdvisorResult({ ownership: snapshot.ownership, snapshot });
   } catch {
     return `
   <section aria-labelledby="advisor-heading">
-    <h2 id="advisor-heading">Delivery advisor</h2>
-    <p class="status status-neutral" role="status">Advisor unavailable</p>
-    <p>The delivery advisor could not be computed for this project. This does not affect your project status above.</p>
+    <h2 id="advisor-heading">${escapeHtml(copy.advisorHeading)}</h2>
+    <p class="status status-neutral" role="status">${escapeHtml(copy.advisorUnavailableStatus)}</p>
+    <p>${escapeHtml(copy.advisorUnavailableBody)}</p>
   </section>`;
   }
 
   const body =
     result.status === "RECOMMENDATIONS_AVAILABLE"
       ? `
-    <p><em>Advisor recommendation — not verified evidence, not an approval:</em></p>
+    <p><em>${escapeHtml(copy.advisorRecommendationIntro)}</em></p>
     <ul>
     ${result.recommendations
       .map((option) => `<li>${escapeHtml(option.description)}</li>`)
@@ -317,17 +303,17 @@ function renderAdvisorSection(snapshot: ClientProjectSnapshot): string {
 
   return `
   <section aria-labelledby="advisor-heading">
-    <h2 id="advisor-heading">Delivery advisor</h2>
-    <p class="status status-neutral" role="status">${escapeHtml(ADVISOR_MATURITY_LABELS[result.maturity])}</p>
+    <h2 id="advisor-heading">${escapeHtml(copy.advisorHeading)}</h2>
+    <p class="status status-neutral" role="status">${escapeHtml(copy.advisorMaturity[result.maturity])}</p>
     ${body}
   </section>`;
 }
 
-const OWNER_ROLE_LABELS: ReadonlyArray<{ label: string; field: keyof TeamAttentionProjection["owners"] }> = [
-  { label: "Lead Owner", field: "leadOwnerMembershipId" },
-  { label: "Deal Owner", field: "dealOwnerMembershipId" },
-  { label: "Account Owner", field: "accountOwnerMembershipId" },
-  { label: "Delivery Owner", field: "deliveryOwnerMembershipId" },
+const OWNER_ROLE_FIELDS: ReadonlyArray<keyof TeamAttentionProjection["owners"]> = [
+  "leadOwnerMembershipId",
+  "dealOwnerMembershipId",
+  "accountOwnerMembershipId",
+  "deliveryOwnerMembershipId",
 ];
 
 /**
@@ -349,39 +335,39 @@ const OWNER_ROLE_LABELS: ReadonlyArray<{ label: string; field: keyof TeamAttenti
  * consume it or invent a competing commercial type (§8: "no role or
  * ownership label silently grants... authority").
  */
-function renderTeamAttentionSection(view: TeamAttentionViewState | undefined): string {
+function renderTeamAttentionSection(copy: ShellCopy, view: TeamAttentionViewState | undefined): string {
   if (view === undefined || view.kind !== "READY") {
     return `
   <section aria-labelledby="team-attention-heading">
-    <h2 id="team-attention-heading">Team &amp; attention</h2>
-    <p class="status status-neutral" role="status">Unavailable</p>
-    <p>Team and attention context could not be loaded for this project. This does not affect your project status above.</p>
+    <h2 id="team-attention-heading">${escapeHtml(copy.teamAttentionHeading)}</h2>
+    <p class="status status-neutral" role="status">${escapeHtml(copy.teamUnavailableStatus)}</p>
+    <p>${escapeHtml(copy.teamUnavailableBody)}</p>
   </section>`;
   }
 
   const { projection } = view;
   const roleLine =
     projection.viewerRole !== undefined
-      ? `<p>Your role: ${escapeHtml(projection.viewerRole)}</p>`
-      : `<p>Your role: not established</p>`;
-  const ownerItems = OWNER_ROLE_LABELS.map(({ label, field }) => {
+      ? `<p>${escapeHtml(copy.yourRole(projection.viewerRole))}</p>`
+      : `<p>${escapeHtml(copy.yourRoleNotEstablished)}</p>`;
+  const ownerItems = OWNER_ROLE_FIELDS.map((field) => {
     const membershipId = projection.owners[field];
-    return `<li>${escapeHtml(label)}: ${membershipId !== undefined ? escapeHtml(membershipId) : "not assigned"}</li>`;
+    return `<li>${escapeHtml(copy.ownerLabel[field])}: ${membershipId !== undefined ? escapeHtml(membershipId) : escapeHtml(copy.notAssigned)}</li>`;
   }).join("\n    ");
   const attentionLine =
     projection.attention !== undefined
-      ? `<p class="status status-${projection.attention.isActive ? "warning" : "success"}" role="status">Attention: ${escapeHtml(projection.attention.internalAttentionLevel)}${projection.attention.reason !== undefined ? ` — ${escapeHtml(projection.attention.reason)}` : ""}</p>`
-      : `<p class="status status-neutral" role="status">Attention: no data available</p>`;
+      ? `<p class="status status-${projection.attention.isActive ? "warning" : "success"}" role="status">${escapeHtml(copy.attentionLabel(projection.attention.internalAttentionLevel, projection.attention.reason))}</p>`
+      : `<p class="status status-neutral" role="status">${escapeHtml(copy.attentionNoData)}</p>`;
 
   return `
   <section aria-labelledby="team-attention-heading">
-    <h2 id="team-attention-heading">Team &amp; attention</h2>
+    <h2 id="team-attention-heading">${escapeHtml(copy.teamAttentionHeading)}</h2>
     ${roleLine}
     <ul>
     ${ownerItems}
     </ul>
     ${attentionLine}
-    <p>Commercial: Unavailable — pending separate commercial-authority checkpoint</p>
+    <p>${escapeHtml(copy.commercialUnavailable)}</p>
   </section>`;
 }
 
@@ -393,32 +379,33 @@ function renderTeamAttentionSection(view: TeamAttentionViewState | undefined): s
  * section reaches around it into a private domain shape.
  */
 function renderSnapshotBody(
+  copy: ShellCopy,
   snapshot: ClientProjectSnapshot,
   options?: { blocked?: boolean; teamAttention?: TeamAttentionViewState },
 ): string {
   const header = `
   <section aria-labelledby="project-identity-heading">
-    <h2 id="project-identity-heading">Project</h2>
-    <p>Customer: ${escapeHtml(snapshot.ownership.customerId)}</p>
-    <p>Project: ${escapeHtml(snapshot.ownership.projectId)}</p>
-    <p>Overall status: <strong>${escapeHtml(snapshot.deliveryStatus.overallStatus)}</strong></p>
+    <h2 id="project-identity-heading">${escapeHtml(copy.projectHeading)}</h2>
+    <p>${escapeHtml(copy.customerLabel(snapshot.ownership.customerId))}</p>
+    <p>${escapeHtml(copy.projectLabel(snapshot.ownership.projectId))}</p>
+    <p>${copy.overallStatusLabel(escapeHtml(snapshot.deliveryStatus.overallStatus))}</p>
   </section>`;
-  const blockerSection = options?.blocked === true ? renderBlockerSection(snapshot.timeline) : "";
+  const blockerSection = options?.blocked === true ? renderBlockerSection(copy, snapshot.timeline) : "";
   const workingArtifactSection =
-    snapshot.workingArtifact !== undefined ? renderWorkingArtifactSection(snapshot.workingArtifact) : "";
+    snapshot.workingArtifact !== undefined ? renderWorkingArtifactSection(copy, snapshot.workingArtifact) : "";
   return `
   ${header}
   ${blockerSection}
-  ${renderNextActionSection(snapshot.nextAction)}
-  ${renderTimelineSection(snapshot.timeline)}
+  ${renderNextActionSection(copy, snapshot.nextAction)}
+  ${renderTimelineSection(copy, snapshot.timeline)}
   ${workingArtifactSection}
-  ${renderCapabilitiesSection(snapshot.capabilities)}
-  ${renderCommunicationsSection(snapshot.recentCommunications)}
-  ${renderAdvisorSection(snapshot)}
-  ${renderTeamAttentionSection(options?.teamAttention)}
+  ${renderCapabilitiesSection(copy, snapshot.capabilities)}
+  ${renderCommunicationsSection(copy, snapshot.recentCommunications)}
+  ${renderAdvisorSection(copy, snapshot)}
+  ${renderTeamAttentionSection(copy, options?.teamAttention)}
   <section aria-labelledby="verified-work-heading">
-    <h2 id="verified-work-heading">Verified completed work</h2>
-    <p>${snapshot.verifiedCompletedJobIds.length} item(s) verified complete.</p>
+    <h2 id="verified-work-heading">${escapeHtml(copy.verifiedWorkHeading)}</h2>
+    <p>${escapeHtml(copy.verifiedWorkCount(snapshot.verifiedCompletedJobIds.length))}</p>
   </section>`;
 }
 
@@ -427,18 +414,30 @@ function renderSnapshotBody(
  * rendering - none of them can be mistaken for `READY` because only the
  * `READY` branch ever calls `renderSnapshotBody`, and only `READY` ever
  * receives a `ClientProjectSnapshot` at all.
+ *
+ * APP-I18N-001: `locale` defaults to `"en"` when omitted - the exact
+ * current (pre-localization) rendering behavior - so every existing
+ * caller/test that does not yet pass a locale is entirely unaffected.
+ * Live requests always pass an explicit, request-resolved locale (see
+ * `request-handler.ts`'s `resolveRequestLocale`, whose own default is
+ * Turkish per the Türkiye-launch primary requirement); this function's
+ * own default is a backward-compatibility convenience, not the live
+ * system's actual default.
  */
-export function renderShellPage(content: ShellPageContent): RenderedShellPage {
+export function renderShellPage(content: ShellPageContent, locale: Locale = "en"): RenderedShellPage {
+  const copy = resolveShellCopy(locale);
   switch (content.kind) {
     case "LOADING":
       return {
         status: 200,
         contentType: "text/html; charset=utf-8",
         html: renderPage({
-          title: "Loading",
-          statusLabel: "Loading — please wait",
+          locale,
+          copy,
+          title: copy.loading.title,
+          statusLabel: copy.loading.status,
           statusTone: "neutral",
-          bodyHtml: "<p>This page is loading. It is not yet showing your project status.</p>",
+          bodyHtml: `<p>${escapeHtml(copy.loading.body)}</p>`,
         }),
       };
     case "EMPTY":
@@ -446,10 +445,12 @@ export function renderShellPage(content: ShellPageContent): RenderedShellPage {
         status: 200,
         contentType: "text/html; charset=utf-8",
         html: renderPage({
-          title: "Not started",
-          statusLabel: "Not started yet",
+          locale,
+          copy,
+          title: copy.notStarted.title,
+          statusLabel: copy.notStarted.status,
           statusTone: "neutral",
-          bodyHtml: "<p>This project does not have any recorded work yet.</p>",
+          bodyHtml: `<p>${escapeHtml(copy.notStarted.body)}</p>`,
         }),
       };
     case "UNAVAILABLE":
@@ -457,8 +458,10 @@ export function renderShellPage(content: ShellPageContent): RenderedShellPage {
         status: 503,
         contentType: "text/html; charset=utf-8",
         html: renderPage({
-          title: "Temporarily unavailable",
-          statusLabel: "Temporarily unavailable",
+          locale,
+          copy,
+          title: copy.unavailable.title,
+          statusLabel: copy.unavailable.status,
           statusTone: "warning",
           bodyHtml: `<p>${escapeHtml(content.reason)}</p>`,
         }),
@@ -468,8 +471,10 @@ export function renderShellPage(content: ShellPageContent): RenderedShellPage {
         status: 501,
         contentType: "text/html; charset=utf-8",
         html: renderPage({
-          title: "Not supported",
-          statusLabel: "Not supported yet",
+          locale,
+          copy,
+          title: copy.unsupported.title,
+          statusLabel: copy.unsupported.status,
           statusTone: "neutral",
           bodyHtml: `<p>${escapeHtml(content.reason)}</p>`,
         }),
@@ -479,10 +484,12 @@ export function renderShellPage(content: ShellPageContent): RenderedShellPage {
         status: 200,
         contentType: "text/html; charset=utf-8",
         html: renderPage({
-          title: "Blocked",
-          statusLabel: "Blocked — attention needed",
+          locale,
+          copy,
+          title: copy.blockedPage.title,
+          statusLabel: copy.blockedPage.status,
           statusTone: "warning",
-          bodyHtml: renderSnapshotBody(content.snapshot, {
+          bodyHtml: renderSnapshotBody(copy, content.snapshot, {
             blocked: true,
             ...(content.teamAttention !== undefined ? { teamAttention: content.teamAttention } : {}),
           }),
@@ -493,10 +500,12 @@ export function renderShellPage(content: ShellPageContent): RenderedShellPage {
         status: 500,
         contentType: "text/html; charset=utf-8",
         html: renderPage({
-          title: "Something went wrong",
-          statusLabel: "Something went wrong",
+          locale,
+          copy,
+          title: copy.errorPage.title,
+          statusLabel: copy.errorPage.status,
           statusTone: "danger",
-          bodyHtml: "<p>We could not load this page. No project data is shown.</p>",
+          bodyHtml: `<p>${escapeHtml(copy.errorPage.body)}</p>`,
         }),
       };
     case "NOT_FOUND":
@@ -504,10 +513,12 @@ export function renderShellPage(content: ShellPageContent): RenderedShellPage {
         status: 404,
         contentType: "text/html; charset=utf-8",
         html: renderPage({
-          title: "Not found",
-          statusLabel: "Not found",
+          locale,
+          copy,
+          title: copy.notFound.title,
+          statusLabel: copy.notFound.status,
           statusTone: "neutral",
-          bodyHtml: "<p>We could not find this project.</p>",
+          bodyHtml: `<p>${escapeHtml(copy.notFound.body)}</p>`,
         }),
       };
     case "UNAUTHENTICATED":
@@ -515,10 +526,12 @@ export function renderShellPage(content: ShellPageContent): RenderedShellPage {
         status: 401,
         contentType: "text/html; charset=utf-8",
         html: renderPage({
-          title: "Sign-in required",
-          statusLabel: "Sign-in required",
+          locale,
+          copy,
+          title: copy.unauthenticated.title,
+          statusLabel: copy.unauthenticated.status,
           statusTone: "warning",
-          bodyHtml: "<p>You must be signed in to view this page.</p>",
+          bodyHtml: `<p>${escapeHtml(copy.unauthenticated.body)}</p>`,
         }),
       };
     case "FORBIDDEN_TENANT_SCOPE":
@@ -526,10 +539,12 @@ export function renderShellPage(content: ShellPageContent): RenderedShellPage {
         status: 403,
         contentType: "text/html; charset=utf-8",
         html: renderPage({
-          title: "Access denied",
-          statusLabel: "Access denied",
+          locale,
+          copy,
+          title: copy.forbidden.title,
+          statusLabel: copy.forbidden.status,
           statusTone: "danger",
-          bodyHtml: "<p>You do not have access to this project.</p>",
+          bodyHtml: `<p>${escapeHtml(copy.forbidden.body)}</p>`,
         }),
       };
     case "READY":
@@ -537,10 +552,13 @@ export function renderShellPage(content: ShellPageContent): RenderedShellPage {
         status: 200,
         contentType: "text/html; charset=utf-8",
         html: renderPage({
-          title: "Project status",
-          statusLabel: "Signed in",
+          locale,
+          copy,
+          title: copy.ready.title,
+          statusLabel: copy.ready.status,
           statusTone: "success",
           bodyHtml: renderSnapshotBody(
+            copy,
             content.snapshot,
             content.teamAttention !== undefined ? { teamAttention: content.teamAttention } : undefined,
           ),
