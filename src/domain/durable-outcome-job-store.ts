@@ -1,12 +1,36 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  appendFileSync,
+  existsSync,
+  readdirSync,
+  linkSync,
+  unlinkSync,
+} from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { TenantScope } from "./tenant-scope.js";
-import type { OutcomeJob } from "./outcome-job.js";
+import { validatePersistedOutcomeJob, type OutcomeJob } from "./outcome-job.js";
 
 export class InvalidDurableOutcomeJobStoreError extends Error {
   constructor(reason: string) {
     super(`Invalid DurableOutcomeJobStore operation: ${reason}`);
     this.name = "InvalidDurableOutcomeJobStoreError";
+  }
+}
+
+export class CorruptedOutcomeJobLineError extends Error {
+  constructor(filePath: string, lineNumber: number, reason: string) {
+    super(`Corrupted durable outcome job line (${filePath}:${lineNumber}): ${reason}`);
+    this.name = "CorruptedOutcomeJobLineError";
+  }
+}
+
+export class CorruptedOutcomeJobLockError extends Error {
+  constructor(lockPath: string, reason: string) {
+    super(`Corrupted durable outcome job creation lock (${lockPath}): ${reason}`);
+    this.name = "CorruptedOutcomeJobLockError";
   }
 }
 
@@ -50,6 +74,7 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
   constructor(baseDir: string) {
     this.baseDir = baseDir;
     mkdirSync(this.baseDir, { recursive: true });
+    mkdirSync(this.creationLockDir(), { recursive: true });
   }
 
   private filePathFor(tenantId: TenantScope["tenantId"]): string {
@@ -57,16 +82,133 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
     return join(this.baseDir, `${safeKey}.jsonl`);
   }
 
+  private creationLockDir(): string {
+    return join(this.baseDir, ".creation-locks");
+  }
+
+  /**
+   * AUD-DURABILITY-GAP: one lock path per (tenantId, jobId) pair - this is
+   * the sole arbiter of "who actually created this jobId first",
+   * independent of `filePathFor`'s per-tenant jsonl sharding. Unlike
+   * `durable-connector-connection-store.ts`'s `withTenantLock`, this lock
+   * is never released: it is a permanent creation claim, not a transient
+   * mutex, and doubles as the durable proof of the winning payload.
+   */
+  private creationLockPathFor(
+    tenantId: TenantScope["tenantId"],
+    jobId: OutcomeJob["jobId"],
+  ): string {
+    const tenantKey = Buffer.from(tenantId, "utf8").toString("base64url");
+    const jobKey = Buffer.from(jobId, "utf8").toString("base64url");
+    return join(this.creationLockDir(), `${tenantKey}.${jobKey}.lock`);
+  }
+
+  /**
+   * Rev68 F1 (forward-port of AUD-DURABILITY-GAP's PR #30, corrected):
+   * PR #30's `putIfAbsent` admitted a process-kill window after a
+   * successful `linkSync(tmpPath, lockPath)` but before the following
+   * `appendFileSync(jsonl)` - the creation lock becomes authoritative for
+   * arbitration the instant it exists, but `get()`/`list()` only ever
+   * reconstructed state from the jsonl file, so a crash in that window
+   * left a permanently invisible-but-claimed jobId: a later caller would
+   * see `get() === undefined`, lose its own `linkSync` with `EEXIST`, and
+   * (in PR #30's version) return the lock winner as `created: false`
+   * without ever repairing the jsonl file - subsequent reads could remain
+   * inconsistent forever.
+   *
+   * Every read now reconciles first: any creation lock for this tenant
+   * whose jobId is not yet reflected in the jsonl file is healed by
+   * appending its own (independently validated) content, so a fresh store
+   * instance over the same `baseDir` always converges to the same durable
+   * set regardless of exactly where a prior process was killed. A lock
+   * file that fails validation, or whose own embedded `tenantId` does not
+   * match the tenant it is filed under, is corruption - not an ordinary
+   * crash artifact - and fails closed rather than being silently skipped
+   * or silently healed with the wrong identity.
+   */
+  private reconcileOrphanedLocks(
+    tenantId: TenantScope["tenantId"],
+    knownJobIds: ReadonlySet<OutcomeJob["jobId"]>,
+  ): OutcomeJob[] {
+    const lockDir = this.creationLockDir();
+    const tenantKey = Buffer.from(tenantId, "utf8").toString("base64url");
+    const prefix = `${tenantKey}.`;
+    const healed: OutcomeJob[] = [];
+    for (const entry of readdirSync(lockDir)) {
+      if (!entry.startsWith(prefix) || !entry.endsWith(".lock")) {
+        continue; // a different tenant's lock, or leftover .tmp litter
+      }
+      const lockPath = join(lockDir, entry);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(readFileSync(lockPath, "utf8"));
+      } catch (cause) {
+        throw new CorruptedOutcomeJobLockError(
+          lockPath,
+          `lock file is not valid JSON (${(cause as Error).message})`,
+        );
+      }
+      let job: OutcomeJob;
+      try {
+        job = validatePersistedOutcomeJob(parsed);
+      } catch (cause) {
+        throw new CorruptedOutcomeJobLockError(
+          lockPath,
+          `lock file failed OutcomeJob validation (${(cause as Error).message})`,
+        );
+      }
+      if (job.tenantId !== tenantId) {
+        throw new CorruptedOutcomeJobLockError(
+          lockPath,
+          `lock file's own tenantId "${job.tenantId}" does not match the tenant it is filed under ("${tenantId}")`,
+        );
+      }
+      if (knownJobIds.has(job.jobId)) {
+        continue; // already durably reflected in jsonl - the normal case
+      }
+      appendFileSync(this.filePathFor(tenantId), `${JSON.stringify(job)}\n`, "utf8");
+      healed.push(job);
+    }
+    return healed;
+  }
+
+  /**
+   * AUD-DURABILITY-GAP: replay no longer trusts `JSON.parse(line) as
+   * OutcomeJob` - each line is re-run through `validatePersistedOutcomeJob`
+   * and fails closed (throws) rather than silently flowing a
+   * malformed/forged record into `dedupedByJobId`/callers.
+   */
   private readAll(tenantId: TenantScope["tenantId"]): OutcomeJob[] {
     const filePath = this.filePathFor(tenantId);
-    if (!existsSync(filePath)) {
-      return [];
+    const fromJsonl: OutcomeJob[] = [];
+    if (existsSync(filePath)) {
+      const content = readFileSync(filePath, "utf8");
+      const lines = content.split("\n").filter((line) => line.trim().length > 0);
+      for (const [index, line] of lines.entries()) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line);
+        } catch (cause) {
+          throw new CorruptedOutcomeJobLineError(
+            filePath,
+            index + 1,
+            `line is not valid JSON (${(cause as Error).message})`,
+          );
+        }
+        try {
+          fromJsonl.push(validatePersistedOutcomeJob(parsed));
+        } catch (cause) {
+          throw new CorruptedOutcomeJobLineError(
+            filePath,
+            index + 1,
+            `line failed OutcomeJob validation (${(cause as Error).message})`,
+          );
+        }
+      }
     }
-    const content = readFileSync(filePath, "utf8");
-    return content
-      .split("\n")
-      .filter((line) => line.trim().length > 0)
-      .map((line) => JSON.parse(line) as OutcomeJob);
+    const knownJobIds = new Set(fromJsonl.map((job) => job.jobId));
+    const healed = this.reconcileOrphanedLocks(tenantId, knownJobIds);
+    return [...fromJsonl, ...healed];
   }
 
   private dedupedByJobId(jobs: ReadonlyArray<OutcomeJob>): Map<OutcomeJob["jobId"], OutcomeJob> {
@@ -81,6 +223,36 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
     return byJobId;
   }
 
+  /**
+   * AUD-DURABILITY-GAP (Rev74 direction, Rev68 forward-port corrections):
+   * the write itself is a single atomic `appendFileSync` call, not a
+   * read-modify-write cycle. Creation is arbitrated by a single OS-atomic
+   * operation rather than any content comparison: this call first writes
+   * its own job to a uniquely-named temp file (private to this call - no
+   * other writer can observe or race it), then attempts `linkSync` of that
+   * temp file onto a jobId-scoped lock path (`creationLockPathFor`).
+   * `linkSync` either creates the destination directory entry or fails
+   * with `EEXIST`, atomically, with no window in which a second caller
+   * could observe a half-created lock - so exactly one writer's `linkSync`
+   * can ever succeed for a given jobId, regardless of whether competing
+   * payloads are identical, and the outcome never depends on comparing any
+   * content at all (the original TOCTOU fix this replaces could not
+   * disambiguate two racing writers submitting byte-identical payloads).
+   *
+   * A losing writer never reads the lock file directly: it re-resolves the
+   * jobId through `get()`, the exact same reconciliation path (Rev68 F1)
+   * every other reader uses, so a winner that crashed between `linkSync`
+   * and its own `appendFileSync` is transparently healed here too, and a
+   * corrupted lock fails closed instead of this call inventing its own
+   * separate (and potentially inconsistent) lock-reading logic.
+   *
+   * Rev68 F2 correction: the cross-writer conflict check below compares
+   * the full tenantId+customerId+projectId tuple, not just tenant+project
+   * - PR #30 predated this repository's later customer-isolation
+   * hardening (current forward `putIfAbsent`'s own "existing" branch above
+   * already required customerId; the lock-arbitration branch had not been
+   * updated to match).
+   */
   putIfAbsent(job: OutcomeJob): PersistJobResult {
     const existing = this.get(job.tenantId, job.jobId);
     if (existing !== undefined) {
@@ -95,14 +267,57 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
       }
       return { job: existing, created: false };
     }
-    const filePath = this.filePathFor(job.tenantId);
-    const line = `${JSON.stringify(job)}\n`;
-    if (existsSync(filePath)) {
-      const existingContent = readFileSync(filePath, "utf8");
-      writeFileSync(filePath, existingContent + line, "utf8");
-    } else {
-      writeFileSync(filePath, line, "utf8");
+
+    const lockPath = this.creationLockPathFor(job.tenantId, job.jobId);
+    const tmpPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(tmpPath, JSON.stringify(job), "utf8");
+    let wonCreation: boolean;
+    try {
+      linkSync(tmpPath, lockPath);
+      wonCreation = true;
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw cause;
+      }
+      wonCreation = false;
+    } finally {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        // best-effort cleanup only - the published lock (via the hard
+        // link) already carries its own independent copy of the content,
+        // so a failure to remove the private temp file cannot corrupt it.
+      }
     }
+
+    if (!wonCreation) {
+      const winner = this.get(job.tenantId, job.jobId);
+      if (winner === undefined) {
+        // The lock exists (EEXIST was just observed) but reconciliation
+        // could not resolve it - unreachable via this store's own code
+        // paths (a creation lock is never deleted once written), kept as
+        // a fail-closed guard rather than a silent `undefined` return.
+        throw new InvalidDurableOutcomeJobStoreError(
+          `internal error: creation lock for jobId "${job.jobId}" exists but could not be resolved`,
+        );
+      }
+      if (
+        winner.tenantId !== job.tenantId ||
+        winner.customerId !== job.customerId ||
+        winner.projectId !== job.projectId
+      ) {
+        throw new InvalidDurableOutcomeJobStoreError(
+          `jobId "${job.jobId}" is already persisted under a different tenant/customer/project`,
+        );
+      }
+      return { job: winner, created: false };
+    }
+
+    // This call holds the creation lock - it is the true, sole creator
+    // for this jobId. No other writer can reach this point for the same
+    // jobId, so the append below is pure durability bookkeeping, not part
+    // of the race arbitration.
+    appendFileSync(this.filePathFor(job.tenantId), `${JSON.stringify(job)}\n`, "utf8");
     return { job, created: true };
   }
 

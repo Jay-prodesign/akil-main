@@ -1,0 +1,47 @@
+# AUD-DURABILITY-GAP — Rev68 Forward-Port (F1 + F2)
+
+## Authorization
+
+Brain Rev68 (`PR #30 AUD-DURABILITY-GAP exact-head + current-lineage composition review — CHANGES_REQUIRED`): PR #30's `linkSync`-based atomic-creation-lock direction is accepted as materially stronger than the prior content-comparison race fix, but PR #30 itself is NOT PASS/VERIFIED and must not be merged/composed as-is. Two load-bearing findings named:
+
+- **F1 — creation-lock crash consistency gap**: a process-kill window after a successful `linkSync(tmpPath, lockPath)` but before the following `appendFileSync(jsonl)` leaves a durable creation lock the jsonl file cannot see; a later caller sees `get() === undefined`, loses its own `linkSync` with `EEXIST`, and PR #30's version returned the lock winner as `created: false` without ever repairing jsonl — subsequent reads could remain inconsistent forever.
+- **F2 — customer-isolation composition gap**: PR #30's losing-writer branch validated the lock winner only against `tenantId`/`projectId`, predating this repository's later customer-isolation hardening (the current forward `putIfAbsent`'s pre-existing "already exists in jsonl" branch already required `customerId`; the lock-arbitration branch had not been updated to match).
+
+Continuation contract: do NOT reimplement the entire old PR #30 or rewrite its history — forward-port only the accepted durability/replay primitives onto the current forward source lineage (cut from `main` exact head `3226c76fa338e425e553638e5f5f48924182a1c0`), preserving all later CXP customer-isolation/collision-safe corrections. Push a new topology-safe exact head/PR, `HOLD_MERGE`/`NOT SAFE_MERGE`, Founder gate NONE, then return for independent Brain exact-head review. Rev66 completion-confidence STOP_PROOF remains NOT FINAL until this durability edge closes.
+
+## What was forward-ported vs. corrected
+
+Read PR #30's actual diff (`git diff` against its exact head `cefff35bbc444cdb77eff998565779e93ceafed0`) rather than trusting any doc-comment description of it. Ported:
+
+- `validatePersistedOutcomeJob` (`src/domain/outcome-job.ts`): re-validates a persisted `OutcomeJob` against its own shape (all seven fields, `state` against the eleven known `OutcomeJobState` literals) rather than trusting a blind `JSON.parse(...) as OutcomeJob` cast on replay.
+- The `.creation-locks` directory / one `linkSync`-arbitrated lock file per `(tenantId, jobId)` in `FileDurableOutcomeJobStore.putIfAbsent` (`src/domain/durable-outcome-job-store.ts`): creation is arbitrated by an OS-atomic `linkSync`, never by content comparison, closing the case two racing writers submit byte-identical payloads (which a comparison-based fix cannot disambiguate at all).
+
+**Corrected, not merely copied:**
+
+- **F1 self-healing (design change from PR #30):** rather than PR #30's approach of only reading the lock file directly on the loser's `EEXIST` path, every `readAll()` call now reconciles first: any creation lock for a tenant whose jobId is not yet reflected in that tenant's jsonl file is healed by appending its own (independently re-validated) content. `get()`, `list()`, and `putIfAbsent`'s own internal absence-check all go through this same `readAll()`, so a winner that crashed between `linkSync` and its own `appendFileSync` is transparently healed by *any* subsequent reader — not just a losing writer retrying the exact same jobId. A lock file that fails validation, or whose own embedded `tenantId` does not match the tenant it is filed under, fails closed with a new `CorruptedOutcomeJobLockError` rather than being silently skipped or healed under the wrong identity.
+- **F2 (tightened):** the cross-writer conflict check inside `putIfAbsent`'s `!wonCreation` branch now compares the full `tenantId`+`customerId`+`projectId` tuple, matching the pre-existing top-of-function "already exists" branch's own check. Because F1's redesign makes `get()` reconcile transparently, this branch's own duplicate check is — by construction — reachable only under a genuine cross-process race (in any single-process call, `get()`'s own reconciliation already resolves and returns the lock-derived job via the top branch before the `linkSync` attempt is ever reached); it is kept as correct, structurally-verified defense-in-depth for that race, consistent with the top branch's already-established logic. This limitation is disclosed honestly below rather than claimed as independently unit-tested.
+
+## Adversarial tests added
+
+`tests/durable-outcome-job-store.test.ts`:
+- Corrupted (malformed JSON) jsonl line — `CorruptedOutcomeJobLineError` (ported from PR #30, still applicable).
+- Forged jsonl line with an invalid `OutcomeJobState` — `CorruptedOutcomeJobLineError` (ported).
+- **F1 crash-recovery witness**: a creation lock pre-created with no corresponding jsonl record (the exact crash artifact F1 describes) is healed by `get()`; a second, independent store instance over the same `baseDir` sees the healed job too (durable, not merely in-memory); a subsequent `putIfAbsent` for the same jobId does not create a duplicate.
+- **F1 corrupted-lock fail-closed proof**: a lock file containing malformed JSON, and separately a lock file with a structurally invalid `OutcomeJobState`, both fail closed with `CorruptedOutcomeJobLockError` on read.
+- **F2 cross-customer lock-winner witness**: a lock pre-created for one customer, then a same-tenant/same-projectId-string/same-jobId job for a *different* customer is rejected — `assert.throws` pins the specific `"...different tenant/customer/project"` message (not merely the error class), so the test cannot pass for an unrelated reason.
+
+`tests/durable-outcome-job-store-concurrency.test.ts` + `tests/helpers/outcome-job-race-worker.ts` (new): 8 real, separate OS processes (not in-process `Promise.all`, which cannot reproduce a true race under Node's single-threaded execution) race `putIfAbsent` with an identical jobId and byte-identical payload, synchronized via the same ready/go-file pattern already established for CONN-001 (`connector-connection-race-worker.ts`). Exactly one process reports `CREATED`, the rest `EXISTED`; the store's own durable state agrees after all workers exit, and a fresh store instance reconstructs the same single job.
+
+## Sanity-check disclosure
+
+Temporarily disabled F1's reconciliation (`reconcileOrphanedLocks` short-circuited to return `[]`) and reran the full `durable-outcome-job-store.test.ts` file: exactly the 3 tests that depend on reconciliation failed (F1 crash-recovery witness, F1 corrupted-lock fail-closed proof, F2 cross-customer lock-winner witness), all 7 others (including the two `CXP-001G` pre-existing customer-isolation tests) still passed. Restored the fix and reconfirmed all 11 tests in the file pass.
+
+**Disclosed limitation, not silently omitted:** the F2 customerId comparison specifically inside `putIfAbsent`'s `!wonCreation` branch (as opposed to the top-of-function "already exists" branch, which already had this check pre-Rev68) is reachable only under a genuine concurrent-process race — `get()`'s own reconciliation resolves and returns any pre-existing lock-derived job via the top branch before a single in-process call ever reaches the `linkSync` attempt. This branch's correctness was verified by direct code inspection (identical, obviously-correct comparison logic mirroring the top branch) rather than by an independent single-process unit test; the real OS-process concurrency test proves the `linkSync` arbitration itself is race-safe, but does not specifically exercise a customer-mismatch variant of that race (both racing workers in that test use the same tenant/customer/project by design, to isolate the OS-atomicity property alone).
+
+## Evidence
+
+**1731/1731 tests pass** (1725 base + 6 new: 5 in `durable-outcome-job-store.test.ts`, 1 in the new concurrency test file), strict `tsc --noEmit -p .` clean, clean `dist/` rebuild, zero new runtime dependency (`node:fs`'s `linkSync`/`unlinkSync`/`readdirSync`/`appendFileSync` and `node:crypto`'s `randomUUID`, all already used elsewhere in this repository for the identical `CONN-001` lock pattern).
+
+## Scope and topology
+
+Branch cut from PR #96's exact head (the current forward lineage tip after the Rev66 audit closed). No `MAIN` mutation, no existing PR topology change, no product/roadmap scope change. Customer-isolation is a HIGH/PROTECTED surface per Rev68 F2's own framing, so this correction is `IMPLEMENTED / SELF-VALIDATED` only — Claude's authority ends here; PASS/VERIFIED/SAFE_MERGE can only be declared by Brain or the Founder. `HOLD_MERGE` / `NOT SAFE_MERGE`. Founder gate: NONE.
