@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, appendFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { EngineeringEventEnvelope, TaskId, RunId } from "./engineering-event-envelope.js";
 import { reconstructState, type EngineeringRunState } from "./engineering-run-state.js";
@@ -63,15 +63,24 @@ export class FileDurableEngineeringStore implements DurableEngineeringStore {
     return join(this.baseDir, `${safeKey}.jsonl`);
   }
 
+  /**
+   * Rev71 (repo-wide Rev66 audit closure) correction: the previous
+   * "read whole file, concatenate, rewrite whole file" implementation was
+   * not atomic across processes - two concurrent `appendEvent` calls for
+   * the same run could both read the same current content, both compute
+   * `existing + line`, and one's `writeFileSync` would silently discard
+   * the other's event (a lost update), directly contradicting this
+   * store's own documented invariant that "nothing is silently dropped at
+   * the storage layer." A single `appendFileSync` call is one atomic
+   * `write(2)` in append mode - Node/the OS handle file creation and the
+   * append position, so no read-modify-write cycle (and therefore no lost
+   * update) is possible, matching the same fix already applied to this
+   * repository's other durable stores (`FileDurableOutcomeJobStore`,
+   * `FileDurableExternalSaleBootstrapStore`).
+   */
   appendEvent(event: EngineeringEventEnvelope): void {
     const filePath = this.filePathFor(event.projectRef, event.taskId, event.runId);
-    const line = `${JSON.stringify(event)}\n`;
-    if (existsSync(filePath)) {
-      const existing = readFileSync(filePath, "utf8");
-      writeFileSync(filePath, existing + line, "utf8");
-    } else {
-      writeFileSync(filePath, line, "utf8");
-    }
+    appendFileSync(filePath, `${JSON.stringify(event)}\n`, "utf8");
   }
 
   getEvents(

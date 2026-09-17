@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTenantScope } from "../src/domain/tenant-scope.js";
@@ -23,6 +23,7 @@ import {
   FileDurableExternalSaleBootstrapStore,
   InvalidDurableExternalSaleBootstrapStoreError,
   CorruptedExternalSaleBootstrapLineError,
+  CorruptedExternalSaleBootstrapLockError,
 } from "../src/domain/durable-external-sale-bootstrap-store.js";
 
 function freshStoreDir(): string {
@@ -32,6 +33,12 @@ function freshStoreDir(): string {
 function tenantFilePath(dir: string, tenantId: string): string {
   const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
   return join(dir, `${safeKey}.jsonl`);
+}
+
+function creationLockPathFor(dir: string, tenantId: string, saleId: string): string {
+  const tenantKey = Buffer.from(tenantId, "utf8").toString("base64url");
+  const saleKey = Buffer.from(saleId, "utf8").toString("base64url");
+  return join(dir, ".creation-locks", `${tenantKey}.${saleKey}.lock`);
 }
 
 function baseFixture(tenantSuffix = "a") {
@@ -384,5 +391,57 @@ test("S11 (positive replay): a legitimate persisted record still reconstructs co
     assert.deepEqual(storeB.get(tenantScope.tenantId, saleId), result);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Rev71 F1 crash-recovery witness (forward-port of durable-outcome-job-store.ts's Rev68 F1): a creation lock left behind by a process killed after linkSync but before its jsonl append is self-healed - get()/putIfAbsent() converge to exactly one durable visible record, with no duplicate creation", () => {
+  const dir = freshStoreDir();
+  try {
+    const { tenantScope, saleId, result } = bootstrapFor("f1-crash", "order-f1-crash");
+    const store = new FileDurableExternalSaleBootstrapStore(dir);
+
+    const lockPath = creationLockPathFor(dir, tenantScope.tenantId, saleId);
+    mkdirSync(join(dir, ".creation-locks"), { recursive: true });
+    writeFileSync(lockPath, JSON.stringify({ saleId, result }), "utf8");
+
+    const gotten = store.get(tenantScope.tenantId, saleId);
+    assert.deepEqual(gotten, result);
+
+    const restarted = new FileDurableExternalSaleBootstrapStore(dir);
+    assert.deepEqual(restarted.get(tenantScope.tenantId, saleId), result);
+
+    const retried = store.putIfAbsent(tenantScope.tenantId, saleId, result);
+    assert.equal(retried.created, false);
+    assert.deepEqual(retried.result, result);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Rev71 F1 corrupted-lock fail-closed proof: a creation lock containing malformed JSON, or content failing validation, is corruption, not an ordinary crash artifact - reads fail closed with CorruptedExternalSaleBootstrapLockError", () => {
+  const malformedDir = freshStoreDir();
+  try {
+    const { tenantScope, saleId } = bootstrapFor("f1-lock-corrupt-a", "order-f1-lock-corrupt-a");
+    const store = new FileDurableExternalSaleBootstrapStore(malformedDir);
+    const lockPath = creationLockPathFor(malformedDir, tenantScope.tenantId, saleId);
+    mkdirSync(join(malformedDir, ".creation-locks"), { recursive: true });
+    writeFileSync(lockPath, "{not valid json", "utf8");
+
+    assert.throws(() => store.get(tenantScope.tenantId, saleId), CorruptedExternalSaleBootstrapLockError);
+  } finally {
+    rmSync(malformedDir, { recursive: true, force: true });
+  }
+
+  const invalidShapeDir = freshStoreDir();
+  try {
+    const { tenantScope, saleId } = bootstrapFor("f1-lock-corrupt-b", "order-f1-lock-corrupt-b");
+    const store = new FileDurableExternalSaleBootstrapStore(invalidShapeDir);
+    const lockPath = creationLockPathFor(invalidShapeDir, tenantScope.tenantId, saleId);
+    mkdirSync(join(invalidShapeDir, ".creation-locks"), { recursive: true });
+    writeFileSync(lockPath, JSON.stringify({ saleId, result: { not: "a valid result" } }), "utf8");
+
+    assert.throws(() => store.get(tenantScope.tenantId, saleId), CorruptedExternalSaleBootstrapLockError);
+  } finally {
+    rmSync(invalidShapeDir, { recursive: true, force: true });
   }
 });
