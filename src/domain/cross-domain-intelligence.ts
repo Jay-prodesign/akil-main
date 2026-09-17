@@ -55,6 +55,7 @@ export type IntelligenceEvidenceKind = "OBSERVED" | "DERIVED";
  */
 export interface IntelligenceInsight {
   readonly tenantScope: TenantScope;
+  readonly customerId: string;
   readonly projectRef: string;
   readonly domain: IntelligenceSourceDomain;
   readonly subjectRef: string;
@@ -82,6 +83,7 @@ export interface ReconciledInsight {
 
 export interface CrossDomainIntelligenceRequest {
   readonly tenantScope: TenantScope;
+  readonly customerId: string;
   readonly projectRef: string;
   readonly insights: ReadonlyArray<IntelligenceInsight>;
   readonly freshnessThresholdMs: number;
@@ -100,6 +102,7 @@ export interface RejectedIntelligenceInsight {
 
 export interface CrossDomainIntelligenceSnapshot {
   readonly tenantScope: TenantScope;
+  readonly customerId: string;
   readonly projectRef: string;
   readonly asOf: string;
   readonly reconciled: ReadonlyArray<ReconciledInsight>;
@@ -120,8 +123,11 @@ function requireNonEmptyString(value: unknown, field: string): string {
  *
  * Fail-closed on scope mismatch (§10: "tenant/customer confidential data
  * stays access-scoped" / "no cross-client data leakage"): an insight whose
- * `tenantScope`/`projectRef` differs from the request's is rejected, never
- * silently included. Also fail-closed on an empty `sourceRef` (an insight
+ * `tenantScope`/`customerId`/`projectRef` differs from the request's is
+ * rejected, never silently included - `projectRef` alone is not globally
+ * unique across customers within a tenant (see `project.ts`), so
+ * `customerId` is required alongside it, not merely `tenantScope` (CXP-001Q).
+ * Also fail-closed on an empty `sourceRef` (an insight
  * with no real provenance pointer is not an insight) and on a `capturedAt`
  * in the future relative to `asOf` (evidence cannot be "captured" after the
  * point in time the snapshot is being built for - without this check a
@@ -139,6 +145,7 @@ function requireNonEmptyString(value: unknown, field: string): string {
 export function buildCrossDomainIntelligenceSnapshot(
   request: CrossDomainIntelligenceRequest,
 ): CrossDomainIntelligenceSnapshot {
+  const customerId = requireNonEmptyString(request.customerId, "customerId");
   const projectRef = requireNonEmptyString(request.projectRef, "projectRef");
   const asOf = requireNonEmptyString(request.asOf, "asOf");
   const asOfMs = Date.parse(asOf);
@@ -165,11 +172,12 @@ export function buildCrossDomainIntelligenceSnapshot(
     }
     if (
       insight.tenantScope.tenantId !== request.tenantScope.tenantId ||
+      insight.customerId !== customerId ||
       insight.projectRef !== projectRef
     ) {
       rejectedInsights.push({
         insight,
-        reason: "insight tenantScope/projectRef does not match the request scope",
+        reason: "insight tenantScope/customerId/projectRef does not match the request scope",
       });
       continue;
     }
@@ -228,6 +236,7 @@ export function buildCrossDomainIntelligenceSnapshot(
 
   return {
     tenantScope: request.tenantScope,
+    customerId,
     projectRef,
     asOf,
     reconciled,
