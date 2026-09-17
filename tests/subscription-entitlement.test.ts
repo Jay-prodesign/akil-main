@@ -456,6 +456,9 @@ test("S25 (Rev60 F2, defense in depth): applySubscriptionLifecycleFact fails clo
     factId: "f-malformed",
     factType: "ACTIVATION_VERIFIED",
     occurredAt: "not-a-real-timestamp",
+    subscriptionId: pending.subscriptionId,
+    tenantId: pending.tenantId,
+    customerId: pending.customerId,
     storefrontRef: pending.storefrontRef,
     externalSubscriptionContractRef: pending.externalSubscriptionContractRef,
     externalFactRef: "ext-ref",
@@ -516,4 +519,66 @@ test("S27 (Rev60 F3, adversarial - recovery-before-failure, replay-safe): out-of
   const replayedFail = applySubscriptionLifecycleFact(afterFailedArrivesLate, failFact);
   assert.deepEqual(replayedRecover, afterFailedArrivesLate);
   assert.deepEqual(replayedFail, afterFailedArrivesLate);
+});
+
+// ---------------------------------------------------------------------------
+// Rev61 F2 (full subscription/tenant/customer lineage, not just storefront/
+// contract) adversarial tests.
+// ---------------------------------------------------------------------------
+
+test("S28 (Rev61 F2, adversarial): applySubscriptionLifecycleFact rejects a genuine fact from a different subscription even when both subscriptions share the identical storefrontRef + externalSubscriptionContractRef", () => {
+  // storefrontRef/externalSubscriptionContractRef alone are not a global identity - createPendingSubscription
+  // never enforces their uniqueness across tenants, so two distinct, independently-created subscriptions can
+  // legitimately reuse the same opaque strings. Only the added subscriptionId/tenantId/customerId lineage
+  // distinguishes them.
+  const sharedStorefrontRef = "storefront-shared.example.com";
+  const sharedContractRef = "ext-contract-shared-28";
+
+  const linkageRegistryA = createExternalCustomerLinkageRegistry();
+  const linkageA = linkageRegistryA.linkOnce({ storefrontRef: sharedStorefrontRef, externalCustomerRef: "sc-28a", tenantScope: tenantA, customer: customerA, linkedAt: "2026-09-17T00:00:00.000Z" });
+  const mappingRegistryA = createExternalSubscriptionPlanMappingRegistry();
+  const mappingA = mappingRegistryA.admit({ storefrontRef: sharedStorefrontRef, externalProductOrVariantRef: "prod-28a", externalSellingPlanRef: "sp-28a", plan: planA, authorizingWorker: elevatedWorker(), evidenceRef: "internal://tests/s28-a", admittedAt: "2026-09-17T00:00:00.000Z" });
+  const subscriptionA = createPendingSubscription({ subscriptionId: "sub-28a", customerLinkage: linkageA, planMapping: mappingA, externalSubscriptionContractRef: sharedContractRef });
+
+  const planB = createSubscriptionPlan({ tenantScope: tenantB, subscriptionPlanId: "plan-pro-b", displayName: "Pro (tenant B)", grantedEntitlementRefs: ["feature:advisor"] });
+  const linkageRegistryB = createExternalCustomerLinkageRegistry();
+  const linkageB = linkageRegistryB.linkOnce({ storefrontRef: sharedStorefrontRef, externalCustomerRef: "sc-28b", tenantScope: tenantB, customer: customerB, linkedAt: "2026-09-17T00:00:00.000Z" });
+  const mappingRegistryB = createExternalSubscriptionPlanMappingRegistry();
+  const mappingB = mappingRegistryB.admit({ storefrontRef: sharedStorefrontRef, externalProductOrVariantRef: "prod-28b", externalSellingPlanRef: "sp-28b", plan: planB, authorizingWorker: elevatedWorker(), evidenceRef: "internal://tests/s28-b", admittedAt: "2026-09-17T00:00:00.000Z" });
+  const subscriptionB = createPendingSubscription({ subscriptionId: "sub-28b", customerLinkage: linkageB, planMapping: mappingB, externalSubscriptionContractRef: sharedContractRef });
+
+  // Confirm the shared-identity precondition actually holds before asserting the fix.
+  assert.equal(subscriptionA.storefrontRef, subscriptionB.storefrontRef);
+  assert.equal(subscriptionA.externalSubscriptionContractRef, subscriptionB.externalSubscriptionContractRef);
+  assert.notEqual(subscriptionA.tenantId, subscriptionB.tenantId);
+  assert.notEqual(subscriptionA.subscriptionId, subscriptionB.subscriptionId);
+
+  const factForB = verifiedFact(subscriptionB, { factId: "f-s28-for-b", factType: "ACTIVATION_VERIFIED", occurredAt: "2026-09-17T00:00:00.000Z" });
+
+  assert.throws(() => applySubscriptionLifecycleFact(subscriptionA, factForB), InvalidSubscriptionEntitlementError);
+  assert.equal(subscriptionA.status, "PENDING_ACTIVATION");
+  // The identical fact genuinely applies to its own subscription B.
+  const activatedB = applySubscriptionLifecycleFact(subscriptionB, factForB);
+  assert.equal(activatedB.status, "ACTIVE");
+});
+
+test("S29 (Rev61 F2, adversarial - cloned-fact mismatch witness): applySubscriptionLifecycleFact independently checks subscriptionId/tenantId/customerId even when storefrontRef/externalSubscriptionContractRef already match, proving the full-lineage guard is load-bearing on its own", () => {
+  const { linkage, mapping } = admittedLinkageAndMapping();
+  const pending = createPendingSubscription({ subscriptionId: "sub-29", customerLinkage: linkage, planMapping: mapping, externalSubscriptionContractRef: "ext-contract-29" });
+  const genuineFact = verifiedFact(pending, { factId: "f-s29", factType: "ACTIVATION_VERIFIED", occurredAt: "2026-09-17T00:00:00.000Z" });
+
+  // A structurally cloned fact, identical in every field except a tampered subscriptionId - storefrontRef and
+  // externalSubscriptionContractRef still match the target subscription exactly.
+  const clonedWithForeignSubscriptionId: SubscriptionLifecycleFact = { ...genuineFact, subscriptionId: "sub-someone-else" as typeof genuineFact.subscriptionId };
+  assert.throws(() => applySubscriptionLifecycleFact(pending, clonedWithForeignSubscriptionId), InvalidSubscriptionEntitlementError);
+
+  const clonedWithForeignTenantId: SubscriptionLifecycleFact = { ...genuineFact, tenantId: tenantB.tenantId };
+  assert.throws(() => applySubscriptionLifecycleFact(pending, clonedWithForeignTenantId), InvalidSubscriptionEntitlementError);
+
+  const clonedWithForeignCustomerId: SubscriptionLifecycleFact = { ...genuineFact, customerId: customerB.customerId };
+  assert.throws(() => applySubscriptionLifecycleFact(pending, clonedWithForeignCustomerId), InvalidSubscriptionEntitlementError);
+
+  // The genuine, untampered fact still applies correctly.
+  const activated = applySubscriptionLifecycleFact(pending, genuineFact);
+  assert.equal(activated.status, "ACTIVE");
 });

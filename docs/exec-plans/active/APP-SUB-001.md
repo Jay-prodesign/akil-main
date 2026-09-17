@@ -55,9 +55,23 @@ Brain's independent exact-head review found three genuine acceptance-criteria ga
 
 Per Rev60's explicit instruction, this correction was pushed as a new commit on the existing `claude/app-sub-001-embedded-subscription-entitlement-core` branch/PR #93 (not a replacement task/branch), for independent Brain re-review without Founder relay.
 
+## Rev61 correction (Brain CHANGES_REQUIRED on corrected exact head `0929ddfb6141f1a2c376e95051516675ea0d6798`, same branch/PR #93)
+
+Brain's independent re-review of the Rev60 correction accepted F1 (trusted `AdmittedWorker`-gated plan-mapping admission) and closed F3 (temporal re-fold + `CANCELED`-from-`PENDING_ACTIVATION`), but found one remaining load-bearing F2 gap: `SubscriptionLifecycleFact` preserved only `storefrontRef`/`externalSubscriptionContractRef`, and `createPendingSubscription` never enforces global uniqueness of that pair across different AKILTA tenants/customers - two genuinely distinct subscriptions could legitimately reuse the same opaque storefront/contract strings, and a fact truly constructed for one would then incorrectly pass the other's lineage check.
+
+**Fix:** `SubscriptionLifecycleFact` gained `subscriptionId`/`tenantId`/`customerId`, always derived directly from the trusted `Subscription` supplied to `createVerifiedSubscriptionLifecycleFact` (never independently caller-supplied, so a fact can never be constructed with lineage the caller merely asserts). `applySubscriptionLifecycleFact` now requires the complete five-field tuple (`subscriptionId`/`tenantId`/`customerId`/`storefrontRef`/`externalSubscriptionContractRef`) to match before applying a fact, closing the shared-opaque-string cross-tenant gap.
+
+**Tests:** two new adversarial tests - `S28` (two independently-created subscriptions for different tenants sharing the identical `storefrontRef`/`externalSubscriptionContractRef`; a genuine fact constructed for one is proven to fail closed against the other, while still genuinely applying to its own subscription) and `S29` (a cloned-fact mismatch witness: a genuine fact with only `subscriptionId`, only `tenantId`, or only `customerId` tampered - storefront/contract left matching - is independently rejected, proving the new lineage checks are load-bearing on their own, not merely redundant with the storefront/contract check). **1722/1722 tests pass** (1720 base + 2 new), strict typecheck clean, clean `dist/` rebuild, zero new runtime dependency.
+
+**Sanity-check disclosure (Rev61 guard):** the three new `subscriptionId`/`tenantId`/`customerId` lineage checks in `applySubscriptionLifecycleFact` were disabled together (storefront/contract checks left intact) - this caused exactly `S28`/`S29` to fail, nothing else. Restored and the full suite reconfirmed green (1722/1722).
+
+**Preserved, untouched by this correction:** accepted Rev61 F1/F3 behavior, provider-neutral naming, customer-link collision safety, role separation, gateway/card non-coupling, and no live-effect scope.
+
+Per Rev61's explicit instruction, this correction was pushed as a new commit on the same PR #93 branch, for independent Brain re-review without Founder relay. PR #94 remains non-authoritative until PR #93 closes on a PASSed exact head.
+
 ## Status
 
-`IMPLEMENTED / SELF-VALIDATED` (Rev60-corrected). `HOLD_MERGE` — inherited stacked lineage; independent Brain exact-head re-review required before any merge disposition. Not self-declared `VERIFIED`/`PASS`/`SAFE_MERGE`.
+`IMPLEMENTED / SELF-VALIDATED` (Rev61-corrected). `HOLD_MERGE` — inherited stacked lineage; independent Brain exact-head re-review required before any merge disposition. Not self-declared `VERIFIED`/`PASS`/`SAFE_MERGE`.
 
 ## Deliberately deferred, not fabricated
 

@@ -349,11 +349,25 @@ export type SubscriptionLifecycleFactType =
  * target `Subscription`'s own fields exactly, checked both at construction
  * (see `createVerifiedSubscriptionLifecycleFact`) and again at application
  * (see `applySubscriptionLifecycleFact`) as defense in depth.
+ *
+ * Rev61 F2 correction: storefront/contract alone are not a global identity -
+ * `createPendingSubscription` never enforces `(storefrontRef,
+ * externalSubscriptionContractRef)` uniqueness across different AKILTA
+ * tenants/customers, so two genuinely distinct subscriptions could reuse the
+ * same opaque storefront/contract strings, and a fact truly constructed for
+ * one would then incorrectly pass the other's lineage check. `subscriptionId`,
+ * `tenantId`, and `customerId` close that: they are always derived only from
+ * the trusted `Subscription` supplied to `createVerifiedSubscriptionLifecycleFact`
+ * (never independently caller-supplied), and `applySubscriptionLifecycleFact`
+ * requires the complete five-field tuple to match before applying a fact.
  */
 export interface SubscriptionLifecycleFact {
   readonly factId: string;
   readonly factType: SubscriptionLifecycleFactType;
   readonly occurredAt: string;
+  readonly subscriptionId: SubscriptionId;
+  readonly tenantId: TenantScope["tenantId"];
+  readonly customerId: Customer["customerId"];
   readonly storefrontRef: string;
   readonly externalSubscriptionContractRef: string;
   readonly externalFactRef: string;
@@ -361,17 +375,22 @@ export interface SubscriptionLifecycleFact {
 }
 
 /**
- * Rev60 F2 correction: the only construction path for a
+ * Rev60/Rev61 F2 correction: the only construction path for a
  * `SubscriptionLifecycleFact`. The caller must already have resolved which
  * `Subscription` a verified external event pertains to (e.g. by looking up
  * `externalSubscriptionContractRef` in a subscription store) and supplies
  * that exact `Subscription` here; the given `storefrontRef` and
  * `externalSubscriptionContractRef` must match it exactly, or construction
- * fails closed immediately. This is deliberately the smallest possible
- * provenance boundary - it reuses the already-resolved `Subscription`
- * (itself only ever derived from a trusted `ExternalCustomerLinkage` +
- * `ExternalSubscriptionPlanMapping`) as the AKILTA subscription/customer/
- * tenant coherence anchor, rather than inventing a second identity model.
+ * fails closed immediately. `subscriptionId`/`tenantId`/`customerId` are
+ * never accepted as separate inputs at all - they are always copied
+ * directly from the supplied trusted `Subscription`, so a fact can never be
+ * constructed with lineage the caller merely asserts rather than the
+ * lineage its own resolved `Subscription` actually carries. This is
+ * deliberately the smallest possible provenance boundary - it reuses the
+ * already-resolved `Subscription` (itself only ever derived from a trusted
+ * `ExternalCustomerLinkage` + `ExternalSubscriptionPlanMapping`) as the
+ * AKILTA subscription/customer/tenant coherence anchor, rather than
+ * inventing a second identity model.
  */
 export function createVerifiedSubscriptionLifecycleFact(input: {
   subscription: Subscription;
@@ -406,6 +425,9 @@ export function createVerifiedSubscriptionLifecycleFact(input: {
     factId,
     factType: input.factType,
     occurredAt,
+    subscriptionId: input.subscription.subscriptionId,
+    tenantId: input.subscription.tenantId,
+    customerId: input.subscription.customerId,
     storefrontRef,
     externalSubscriptionContractRef,
     externalFactRef,
@@ -537,9 +559,12 @@ function foldFactsInTemporalOrder(
 }
 
 /**
- * Pure reducer, fail-closed on cross-subscription contamination (Rev60 F2)
- * and malformed timestamps, and replay/order-safe by full temporal re-fold
- * (Rev60 F3): a duplicate `factId` is always a safe no-op, and any other
+ * Pure reducer, fail-closed on cross-subscription contamination (Rev60/
+ * Rev61 F2 - checked as the complete `subscriptionId`/`tenantId`/
+ * `customerId`/`storefrontRef`/`externalSubscriptionContractRef` tuple,
+ * since storefront/contract alone are not a global identity) and malformed
+ * timestamps, and replay/order-safe by full temporal re-fold (Rev60 F3): a
+ * duplicate `factId` is always a safe no-op, and any other
  * fact - however it arrives relative to the others already on file - is
  * inserted into the subscription's own fact log and the *entire* log is
  * re-folded in true `occurredAt` order, so out-of-order delivery can never
@@ -549,11 +574,14 @@ function foldFactsInTemporalOrder(
  */
 export function applySubscriptionLifecycleFact(subscription: Subscription, fact: SubscriptionLifecycleFact): Subscription {
   if (
+    fact.subscriptionId !== subscription.subscriptionId ||
+    fact.tenantId !== subscription.tenantId ||
+    fact.customerId !== subscription.customerId ||
     fact.storefrontRef !== subscription.storefrontRef ||
     fact.externalSubscriptionContractRef !== subscription.externalSubscriptionContractRef
   ) {
     throw new InvalidSubscriptionEntitlementError(
-      `lifecycle fact "${fact.factId}" (storefront "${fact.storefrontRef}", contract "${fact.externalSubscriptionContractRef}") does not match this subscription's own storefront "${subscription.storefrontRef}" / contract "${subscription.externalSubscriptionContractRef}" - a cross-subscription lifecycle fact is never applied`,
+      `lifecycle fact "${fact.factId}" (subscription "${fact.subscriptionId}", tenant "${fact.tenantId}", customer "${fact.customerId}", storefront "${fact.storefrontRef}", contract "${fact.externalSubscriptionContractRef}") does not match this subscription's own lineage (subscription "${subscription.subscriptionId}", tenant "${subscription.tenantId}", customer "${subscription.customerId}", storefront "${subscription.storefrontRef}", contract "${subscription.externalSubscriptionContractRef}") - a cross-subscription lifecycle fact is never applied`,
     );
   }
   if (Number.isNaN(Date.parse(fact.occurredAt))) {
