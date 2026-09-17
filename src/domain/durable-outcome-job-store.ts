@@ -34,6 +34,13 @@ export class CorruptedOutcomeJobLockError extends Error {
   }
 }
 
+export class OutcomeJobTenantLockTimeoutError extends Error {
+  constructor(tenantId: string) {
+    super(`Timed out waiting for the durable outcome-job tenant journal lock for tenant "${tenantId}"`);
+    this.name = "OutcomeJobTenantLockTimeoutError";
+  }
+}
+
 export interface PersistJobResult {
   readonly job: OutcomeJob;
   readonly created: boolean;
@@ -70,11 +77,14 @@ export interface DurableOutcomeJobStore {
  */
 export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
   private readonly baseDir: string;
+  private static readonly TENANT_LOCK_TIMEOUT_MS = 5000;
+  private static readonly TENANT_LOCK_RETRY_BACKOFF_MS = 5;
 
   constructor(baseDir: string) {
     this.baseDir = baseDir;
     mkdirSync(this.baseDir, { recursive: true });
     mkdirSync(this.creationLockDir(), { recursive: true });
+    mkdirSync(this.tenantLockDir(), { recursive: true });
   }
 
   private filePathFor(tenantId: TenantScope["tenantId"]): string {
@@ -84,6 +94,134 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
 
   private creationLockDir(): string {
     return join(this.baseDir, ".creation-locks");
+  }
+
+  private tenantLockDir(): string {
+    return join(this.baseDir, ".tenant-locks");
+  }
+
+  private tenantLockPathFor(tenantId: TenantScope["tenantId"]): string {
+    const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
+    return join(this.tenantLockDir(), `${safeKey}.lock`);
+  }
+
+  /**
+   * Rev69 correction: reuses the exact transient-mutex `linkSync` pattern
+   * already established in `durable-connector-connection-store.ts`'s
+   * `withTenantLock`, but under its own lock namespace (`.tenant-locks`,
+   * distinct from `.creation-locks`) - this lock arbitrates "who may
+   * physically write to this tenant's jsonl journal right now", a
+   * separate concern from the per-jobId creation lock's "who created this
+   * jobId first". `linkSync(tmpPath, lockPath)` either creates the
+   * destination directory entry or fails with `EEXIST`, atomically, with
+   * no window in which a second process could observe a half-acquired
+   * lock, so exactly one process can hold it for a given tenant at a
+   * time. A bounded timeout throws `OutcomeJobTenantLockTimeoutError`
+   * rather than deadlocking forever against a lock abandoned by a
+   * crashed process.
+   */
+  private withTenantJournalLock<T>(tenantId: TenantScope["tenantId"], criticalSection: () => T): T {
+    const lockPath = this.tenantLockPathFor(tenantId);
+    const tmpPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(tmpPath, String(process.pid), "utf8");
+    const deadline = Date.now() + FileDurableOutcomeJobStore.TENANT_LOCK_TIMEOUT_MS;
+    for (;;) {
+      try {
+        linkSync(tmpPath, lockPath);
+        break;
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "EEXIST") {
+          try {
+            unlinkSync(tmpPath);
+          } catch {
+            // best-effort cleanup only
+          }
+          throw cause;
+        }
+        if (Date.now() > deadline) {
+          try {
+            unlinkSync(tmpPath);
+          } catch {
+            // best-effort cleanup only
+          }
+          throw new OutcomeJobTenantLockTimeoutError(tenantId);
+        }
+        Atomics.wait(
+          new Int32Array(new SharedArrayBuffer(4)),
+          0,
+          0,
+          FileDurableOutcomeJobStore.TENANT_LOCK_RETRY_BACKOFF_MS,
+        );
+      }
+    }
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // best-effort cleanup only - lockPath (the hard-linked copy) is what
+      // actually arbitrates ownership from here on.
+    }
+    try {
+      return criticalSection();
+    } finally {
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // best-effort: if this somehow fails, the lock would be
+        // permanently stuck, which the caller-visible timeout above
+        // bounds for the next acquirer rather than deadlocking forever.
+      }
+    }
+  }
+
+  /**
+   * Rev69 correction: the sole physical-append path for this tenant's
+   * jsonl journal. Both `putIfAbsent`'s own winning-creator append and
+   * `reconcileOrphanedLocks`'s healing append now go through this method
+   * instead of a raw unlocked `appendFileSync` - Brain Rev69 found the
+   * prior design's reconciliation append was not single-writer: a
+   * creator-vs-reconciler race (the winner's own append racing a
+   * concurrent reader's healing of the same not-yet-durable lock) or a
+   * multi-reconciler race (several concurrent readers all healing the
+   * same orphaned lock) could physically append duplicate jsonl lines for
+   * the same jobId, masked only by `dedupedByJobId`'s read-time
+   * first-wins behavior - the raw journal itself was not idempotent.
+   *
+   * Every writer now serializes through `withTenantJournalLock` and
+   * re-checks presence with a *fresh* read taken *inside* the lock
+   * (never a snapshot taken before acquiring it) before appending -
+   * exactly one process can hold the lock for a tenant at a time, so
+   * exactly one physical append can ever happen for a given jobId,
+   * regardless of how many creators/reconcilers race for it. This inner
+   * presence check is a lightweight jobId-only scan (not a full
+   * `validatePersistedOutcomeJob` pass) - it exists purely to make the
+   * write idempotent; `readAll`'s own independent, unlocked validation
+   * pass remains the sole source of truth for corrupted/forged content.
+   */
+  private appendJobIfAbsentLocked(tenantId: TenantScope["tenantId"], job: OutcomeJob): void {
+    this.withTenantJournalLock(tenantId, () => {
+      const filePath = this.filePathFor(tenantId);
+      if (existsSync(filePath)) {
+        const lines = readFileSync(filePath, "utf8")
+          .split("\n")
+          .filter((line) => line.trim().length > 0);
+        for (const line of lines) {
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(line);
+          } catch {
+            continue; // a corrupted line is readAll's problem to raise, not this idempotency check's
+          }
+          if (
+            typeof parsed === "object" &&
+            parsed !== null &&
+            (parsed as Record<string, unknown>)["jobId"] === job.jobId
+          ) {
+            return; // already durably present - idempotent no-op
+          }
+        }
+      }
+      appendFileSync(filePath, `${JSON.stringify(job)}\n`, "utf8");
+    });
   }
 
   /**
@@ -166,7 +304,7 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
       if (knownJobIds.has(job.jobId)) {
         continue; // already durably reflected in jsonl - the normal case
       }
-      appendFileSync(this.filePathFor(tenantId), `${JSON.stringify(job)}\n`, "utf8");
+      this.appendJobIfAbsentLocked(tenantId, job);
       healed.push(job);
     }
     return healed;
@@ -314,10 +452,12 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
     }
 
     // This call holds the creation lock - it is the true, sole creator
-    // for this jobId. No other writer can reach this point for the same
-    // jobId, so the append below is pure durability bookkeeping, not part
-    // of the race arbitration.
-    appendFileSync(this.filePathFor(job.tenantId), `${JSON.stringify(job)}\n`, "utf8");
+    // for this jobId. No other writer can create a *different* jsonl
+    // entry for it, but a concurrent reader could still be mid-way
+    // through healing this exact lock (Rev69) - appendJobIfAbsentLocked's
+    // own tenant-journal lock and fresh-read presence check make this
+    // append idempotent against that race, not merely "pure bookkeeping".
+    this.appendJobIfAbsentLocked(job.tenantId, job);
     return { job, created: true };
   }
 

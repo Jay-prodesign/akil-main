@@ -1,4 +1,4 @@
-# AUD-DURABILITY-GAP — Rev68 Forward-Port (F1 + F2)
+# AUD-DURABILITY-GAP — Rev68 Forward-Port (F1 + F2) + Rev69 Correction
 
 ## Authorization
 
@@ -38,9 +38,21 @@ Temporarily disabled F1's reconciliation (`reconcileOrphanedLocks` short-circuit
 
 **Disclosed limitation, not silently omitted:** the F2 customerId comparison specifically inside `putIfAbsent`'s `!wonCreation` branch (as opposed to the top-of-function "already exists" branch, which already had this check pre-Rev68) is reachable only under a genuine concurrent-process race — `get()`'s own reconciliation resolves and returns any pre-existing lock-derived job via the top branch before a single in-process call ever reaches the `linkSync` attempt. This branch's correctness was verified by direct code inspection (identical, obviously-correct comparison logic mirroring the top branch) rather than by an independent single-process unit test; the real OS-process concurrency test proves the `linkSync` arbitration itself is race-safe, but does not specifically exercise a customer-mismatch variant of that race (both racing workers in that test use the same tenant/customer/project by design, to isolate the OS-atomicity property alone).
 
-## Evidence
+## Evidence (Rev68 forward-port, before Rev69)
 
 **1731/1731 tests pass** (1725 base + 6 new: 5 in `durable-outcome-job-store.test.ts`, 1 in the new concurrency test file), strict `tsc --noEmit -p .` clean, clean `dist/` rebuild, zero new runtime dependency (`node:fs`'s `linkSync`/`unlinkSync`/`readdirSync`/`appendFileSync` and `node:crypto`'s `randomUUID`, all already used elsewhere in this repository for the identical `CONN-001` lock pattern).
+
+## Rev69 correction — journal append was not single-writer
+
+Brain independently reviewed PR #97's exact head `e8eabf72eab0b608c1a4d727774c02d15556344a` and found a genuine gap in the Rev68 F1 design itself: `reconcileOrphanedLocks`'s healing append, and `putIfAbsent`'s own winning-creator append, both called a raw unlocked `appendFileSync` with no synchronization between them. A creator-vs-reconciler race (the true creator's own append racing a concurrent reader's healing of the same not-yet-durable lock) or a multi-reconciler race (several concurrent readers all healing the same orphaned lock) could physically append duplicate jsonl lines for the same jobId — masked at read time by `dedupedByJobId`'s first-wins behavior, but a real defect in the raw journal itself, which this store's own docs claim is idempotent by construction.
+
+**Fix**: added a second, distinct lock namespace (`.tenant-locks`, separate from `.creation-locks`) via `withTenantJournalLock` — a transient per-tenant mutex reusing the exact `linkSync`-based pattern already established in `durable-connector-connection-store.ts`'s `withTenantLock`. Every physical jsonl append (both the winning creator's own append and every reconciliation-driven healing append) now goes through a single `appendJobIfAbsentLocked` method: acquire the tenant lock, take a **fresh** read of the jsonl file **inside** the lock (never a snapshot taken before acquiring it), check whether the jobId is already present, and append only if absent. Since exactly one process can hold the tenant lock at a time and the presence check is always fresh, exactly one physical append can ever happen for a given jobId regardless of how many creators/reconcilers race for it.
+
+**Adversarial test (Rev69's explicit "physical one-record adversarial proof" requirement)**: `tests/durable-outcome-job-store-reconciliation-race.test.ts` + `tests/helpers/outcome-job-reconcile-race-worker.ts` (new). Pre-creates the exact Rev68 F1 crash artifact (an orphaned creation lock, no jsonl record), then spawns 8 real, separate OS processes — a mix of `get()`, `list()`, and a losing `putIfAbsent()` call (which, since the lock already exists, takes the identical reconciling path) — all racing via the same ready/go-file synchronization to heal the SAME orphaned lock. The assertion reads the **raw physical jsonl file directly** (not through the store's own deduping API, which would mask a duplicate-append defect) and requires exactly one line for that jobId.
+
+**Sanity-check disclosure**: reverted `appendJobIfAbsentLocked` to an unlocked, unconditional `appendFileSync` (no tenant lock, no presence check) and reran the new test 8 times: 7/8 runs correctly failed with more than one physical line, 1/8 passed spuriously (expected for a genuine OS-scheduling race — not every run is guaranteed to hit the window, consistent with this repository's other real-process concurrency tests). Restored the fix and reconfirmed the test passes reliably (5/5 additional runs).
+
+**1732/1732 tests pass** (1731 prior + 1 new), strict typecheck clean, clean `dist/` rebuild, zero new runtime dependency.
 
 ## Scope and topology
 
