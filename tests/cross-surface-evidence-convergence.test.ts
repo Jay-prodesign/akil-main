@@ -43,6 +43,7 @@ test("X1: a FACT customer evidence item converges to CONFIRMED", () => {
   assert.equal(converged.disposition, "CONFIRMED");
   assert.equal(converged.originalStatus, "FACT");
   assert.equal(converged.sourceRef, "evidence-1");
+  assert.equal(converged.tenantId, tenantScope.tenantId);
 });
 
 test("X2: a HYPOTHESIS customer evidence item converges to UNCERTAIN", () => {
@@ -158,6 +159,7 @@ test("X4: a CURRENT reconciled insight converges to CONFIRMED", () => {
   assert.equal(converged.sourceSurface, "CROSS_DOMAIN_INTELLIGENCE");
   assert.equal(converged.disposition, "CONFIRMED");
   assert.equal(converged.originalStatus, "CURRENT");
+  assert.equal(converged.tenantId, tenantScope.tenantId);
 });
 
 test("X5: a STALE reconciled insight converges to UNCERTAIN", () => {
@@ -193,7 +195,9 @@ function effectAttempt(state: "NOT_STARTED" | "APPLIED" | "VERIFIED" | "FAILED" 
 }
 
 test("X7: a VERIFIED effect attempt converges to CONFIRMED", () => {
-  assert.equal(convergeExternalEffectAttempt(effectAttempt("VERIFIED")).disposition, "CONFIRMED");
+  const converged = convergeExternalEffectAttempt(effectAttempt("VERIFIED"));
+  assert.equal(converged.disposition, "CONFIRMED");
+  assert.equal(converged.tenantId, tenantScope.tenantId);
 });
 
 test("X8 (adversarial, readback-authoritative honesty): a merely APPLIED (not yet verified) effect attempt converges to UNCERTAIN, never CONFIRMED", () => {
@@ -261,7 +265,9 @@ function metricReadModel(status: "REPORTED_FRESH" | "REPORTED_STALE" | "MISSING"
 }
 
 test("X13: a REPORTED_FRESH metric read-model converges to CONFIRMED", () => {
-  assert.equal(convergeMetricReadModel(metricReadModel("REPORTED_FRESH")).disposition, "CONFIRMED");
+  const converged = convergeMetricReadModel(metricReadModel("REPORTED_FRESH"));
+  assert.equal(converged.disposition, "CONFIRMED");
+  assert.equal(converged.tenantId, tenantScope.tenantId);
 });
 
 test("X14: a REPORTED_STALE metric read-model converges to UNCERTAIN", () => {
@@ -324,4 +330,166 @@ test("X20 (customer-safe projection, structural absence): CustomerSafeEvidenceSu
   const summary = projectCustomerSafeEvidenceSummary(snapshot);
   const keys = Object.keys(summary).sort();
   assert.deepEqual(keys, ["itemCount", "overallDisposition", "subjectRef"]);
+});
+
+// --- CXP-001S: tenant-lineage hardening ---
+
+const tenantB = createTenantScope("tenant-conv-2");
+const customerB = createCustomer({ tenantScope: tenantB, customerId: "cust-b", displayName: "Foreign Co" });
+const projectB = createProject({
+  tenantScope: tenantB,
+  customer: customerB,
+  projectId: "project-b",
+  ownerRef: "owner-b",
+  state: "ACTIVE",
+});
+
+test("CXP-001S (adversarial): buildConvergedEvidenceSnapshot rejects a genuinely foreign-tenant converged item, even though it converts cleanly through the public converter - this must fail on the pre-correction implementation", () => {
+  const foreignItem = createCustomerEvidenceItem({
+    tenantScope: tenantB,
+    project: projectB,
+    evidenceRef: "evidence-foreign",
+    kind: "FACT",
+    subject: "foreign tenant's own fact",
+    sourceLocator: "https://foreign.example.com",
+  });
+  const foreignConverged = convergeCustomerEvidenceItem(foreignItem);
+  assert.equal(foreignConverged.tenantId, tenantB.tenantId);
+
+  assert.throws(
+    () =>
+      buildConvergedEvidenceSnapshot({
+        tenantScope,
+        subjectRef: "subject-1",
+        items: [foreignConverged],
+      }),
+    InvalidCrossSurfaceEvidenceError,
+  );
+});
+
+test("CXP-001S (adversarial): a foreign-tenant item mixed in among genuine same-tenant items is still rejected - not merely skipped or diluted", () => {
+  const foreignAttempt = effectAttempt("VERIFIED"); // tenantA copy, then forge a foreign one below
+  const foreignConverged = { ...convergeExternalEffectAttempt(foreignAttempt), tenantId: tenantB.tenantId as never };
+  const genuineConverged = convergeCustomerEvidenceItem(
+    createCustomerEvidenceItem({
+      tenantScope,
+      project,
+      evidenceRef: "evidence-genuine",
+      kind: "FACT",
+      subject: "genuine tenant-a fact",
+      sourceLocator: "https://example.com",
+    }),
+  );
+  assert.throws(
+    () =>
+      buildConvergedEvidenceSnapshot({
+        tenantScope,
+        subjectRef: "subject-1",
+        items: [genuineConverged, foreignConverged],
+      }),
+    InvalidCrossSurfaceEvidenceError,
+  );
+});
+
+test("CXP-001S: a same-tenant valid mixed-surface snapshot (customer evidence + telemetry + intelligence + external effect, all genuinely tenant-A) still converges and aggregates correctly", () => {
+  const snapshot = buildConvergedEvidenceSnapshot({
+    tenantScope,
+    subjectRef: "subject-1",
+    items: [
+      convergeCustomerEvidenceItem(
+        createCustomerEvidenceItem({
+          tenantScope,
+          project,
+          evidenceRef: "evidence-mixed",
+          kind: "FACT",
+          subject: "site is live",
+          sourceLocator: "https://example.com",
+        }),
+      ),
+      convergeExternalEffectAttempt(effectAttempt("VERIFIED")),
+      convergeMetricReadModel(metricReadModel("REPORTED_FRESH")),
+      convergeIntelligenceInsight(reconciledInsight("CURRENT")),
+    ],
+  });
+  assert.equal(snapshot.items.length, 4);
+  assert.ok(snapshot.items.every((item) => item.tenantId === tenantScope.tenantId));
+  assert.equal(projectCustomerSafeEvidenceSummary(snapshot).overallDisposition, "CONFIRMED");
+});
+
+test("CXP-001S (adversarial): convergeIntelligenceInsight derives tenantId from a genuinely different backing lineage, not a coincidental match with the default test tenant", () => {
+  const otherTenantScope = createTenantScope("tenant-conv-reconciled-other");
+  const otherCustomer = createCustomer({ tenantScope: otherTenantScope, customerId: "cust-other", displayName: "Other Co" });
+  const snapshot = buildCrossDomainIntelligenceSnapshot({
+    tenantScope: otherTenantScope,
+    projectRef: "project-other",
+    customerId: otherCustomer.customerId,
+    asOf: "2026-01-01T00:00:00.000Z",
+    freshnessThresholdMs: 60_000,
+    insights: [
+      {
+        tenantScope: otherTenantScope,
+        projectRef: "project-other",
+        customerId: otherCustomer.customerId,
+        domain: "SALES",
+        subjectRef: "subject-other",
+        kind: "OBSERVED",
+        value: "closed-won",
+        capturedAt: "2026-01-01T00:00:00.000Z",
+        sourceRef: "source-other",
+      },
+    ],
+  });
+  const converged = convergeIntelligenceInsight(snapshot.reconciled[0]!);
+  assert.equal(converged.tenantId, otherTenantScope.tenantId);
+  assert.notEqual(converged.tenantId, tenantScope.tenantId);
+});
+
+test("CXP-001S (adversarial): convergeIntelligenceInsight fails closed on an empty insights lineage rather than fabricating a tenant identity", () => {
+  assert.throws(
+    () =>
+      convergeIntelligenceInsight({
+        subjectRef: "subject-empty",
+        status: "CURRENT",
+        insights: [],
+        agreedValue: "x",
+      }),
+    InvalidCrossSurfaceEvidenceError,
+  );
+});
+
+test("CXP-001S (adversarial): convergeIntelligenceInsight fails closed on an internally incoherent (tenant-disagreeing) insights lineage rather than picking an arbitrary element's tenant", () => {
+  const otherTenantScope = createTenantScope("tenant-conv-incoherent-other");
+  assert.throws(
+    () =>
+      convergeIntelligenceInsight({
+        subjectRef: "subject-incoherent",
+        status: "CURRENT",
+        insights: [
+          {
+            tenantScope,
+            projectRef: "project-1",
+            customerId: customer.customerId,
+            domain: "SALES",
+            subjectRef: "subject-incoherent",
+            kind: "OBSERVED",
+            value: "closed-won",
+            capturedAt: "2026-01-01T00:00:00.000Z",
+            sourceRef: "source-1",
+          },
+          {
+            tenantScope: otherTenantScope,
+            projectRef: "project-1",
+            customerId: customer.customerId,
+            domain: "SALES",
+            subjectRef: "subject-incoherent",
+            kind: "OBSERVED",
+            value: "closed-won",
+            capturedAt: "2026-01-01T00:00:00.000Z",
+            sourceRef: "source-1",
+          },
+        ],
+        agreedValue: "closed-won",
+      }),
+    InvalidCrossSurfaceEvidenceError,
+  );
 });

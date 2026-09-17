@@ -43,6 +43,7 @@ export type ConvergedEvidenceSourceSurface =
 export type ConvergedEvidenceDisposition = "CONFIRMED" | "UNCERTAIN" | "CONTRADICTED" | "UNAVAILABLE";
 
 export interface ConvergedEvidenceItem {
+  readonly tenantId: TenantScope["tenantId"];
   readonly sourceSurface: ConvergedEvidenceSourceSurface;
   readonly disposition: ConvergedEvidenceDisposition;
   readonly sourceRef: string;
@@ -60,6 +61,7 @@ export function convergeCustomerEvidenceItem(item: CustomerEvidenceItem): Conver
   const disposition: ConvergedEvidenceDisposition =
     item.kind === "FACT" ? "CONFIRMED" : item.kind === "HYPOTHESIS" ? "UNCERTAIN" : "UNAVAILABLE";
   return {
+    tenantId: item.tenantId,
     sourceSurface: "CUSTOMER_EVIDENCE",
     disposition,
     sourceRef: item.evidenceRef,
@@ -72,11 +74,35 @@ export function convergeCustomerEvidenceItem(item: CustomerEvidenceItem): Conver
  * settled (`CURRENT`) from unsettled (`STALE`) from actively disputed
  * (`CONFLICTING`) - this is a direct, lossless projection of that same
  * distinction onto the shared vocabulary.
+ *
+ * CXP-001S correction: `ReconciledInsight` itself carries no tenant
+ * identity - only its backing `insights` lineage does
+ * (`IntelligenceInsight.tenantScope`). `buildCrossDomainIntelligenceSnapshot`
+ * already only ever groups insights that passed its own tenant/customer/
+ * projectRef scope match into one `ReconciledInsight`, so every entry in
+ * `insight.insights` is expected to already share one tenantId - this
+ * function trusts that upstream invariant but still fails closed (rather
+ * than silently trusting a caller-assembled `ReconciledInsight`) on an
+ * empty lineage or on any internal tenantId disagreement, instead of
+ * picking an arbitrary element's tenant as if it were established fact.
  */
 export function convergeIntelligenceInsight(insight: ReconciledInsight): ConvergedEvidenceItem {
+  const [first, ...rest] = insight.insights;
+  if (first === undefined) {
+    throw new InvalidCrossSurfaceEvidenceError(
+      "cannot converge a ReconciledInsight with an empty insights lineage - no trusted source tenant identity exists to derive",
+    );
+  }
+  const tenantId = first.tenantScope.tenantId;
+  if (rest.some((i) => i.tenantScope.tenantId !== tenantId)) {
+    throw new InvalidCrossSurfaceEvidenceError(
+      "cannot converge a ReconciledInsight whose backing insights lineage disagrees on tenantId - incoherent source lineage",
+    );
+  }
   const disposition: ConvergedEvidenceDisposition =
     insight.status === "CURRENT" ? "CONFIRMED" : insight.status === "STALE" ? "UNCERTAIN" : "CONTRADICTED";
   return {
+    tenantId,
     sourceSurface: "CROSS_DOMAIN_INTELLIGENCE",
     disposition,
     sourceRef: insight.subjectRef,
@@ -100,6 +126,7 @@ const EFFECT_STATE_TO_DISPOSITION: Readonly<Record<ExternalEffectAttemptState, C
 
 export function convergeExternalEffectAttempt(attempt: ExternalEffectAttempt): ConvergedEvidenceItem {
   return {
+    tenantId: attempt.tenantId,
     sourceSurface: "EXTERNAL_EFFECT",
     disposition: EFFECT_STATE_TO_DISPOSITION[attempt.state],
     sourceRef: attempt.attemptId,
@@ -116,6 +143,7 @@ const METRIC_STATUS_TO_DISPOSITION: Readonly<Record<MetricReadModelStatus, Conve
 
 export function convergeMetricReadModel(metric: MetricReadModel): ConvergedEvidenceItem {
   return {
+    tenantId: metric.tenantId,
     sourceSurface: "TELEMETRY",
     disposition: METRIC_STATUS_TO_DISPOSITION[metric.status],
     sourceRef: metric.metricRef,
@@ -133,6 +161,14 @@ export interface ConvergedEvidenceSnapshot {
  * Pure aggregation only - this module never fetches or re-derives
  * evidence itself; the caller supplies already-converged items (via the
  * four `converge*` functions above) for exactly one subject.
+ *
+ * CXP-001S correction: every `converge*()` function now derives
+ * `tenantId` from its own source object, never from a caller-supplied
+ * label - so this is the actual enforcement point. A `ConvergedEvidenceItem`
+ * whose `tenantId` does not match `input.tenantScope.tenantId` is
+ * rejected outright rather than silently included in the snapshot; a
+ * genuine foreign-tenant item can no longer influence another tenant's
+ * customer-safe summary.
  */
 export function buildConvergedEvidenceSnapshot(input: {
   tenantScope: TenantScope;
@@ -142,6 +178,13 @@ export function buildConvergedEvidenceSnapshot(input: {
   const subjectRef = requireNonEmptyString(input.subjectRef, "subjectRef");
   if (!Array.isArray(input.items)) {
     throw new InvalidCrossSurfaceEvidenceError("items must be an array");
+  }
+  for (const [index, item] of input.items.entries()) {
+    if (item.tenantId !== input.tenantScope.tenantId) {
+      throw new InvalidCrossSurfaceEvidenceError(
+        `items[${index}] belongs to a different tenant than the given tenantScope - cross-tenant evidence contamination is not permitted`,
+      );
+    }
   }
   return { tenantId: input.tenantScope.tenantId, subjectRef, items: input.items };
 }
