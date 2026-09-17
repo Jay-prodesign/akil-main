@@ -19,20 +19,20 @@ function moduleCodeOnly(): string {
     .replace(/\/\/.*$/gm, "");
 }
 
-test("B1 (Shopify-role -> AKILTA-authority non-escalation, structural): subscription-entitlement.ts imports nothing from authority.ts or organization-membership.ts - Shopify roles/permissions have no code path into AKILTA IAM through this module", () => {
+test("B1 (external-role -> AKILTA-authority non-escalation, structural): subscription-entitlement.ts imports nothing from authority.ts or organization-membership.ts - external-platform roles/permissions have no code path into AKILTA IAM through this module", () => {
   const content = moduleSource();
   assert.doesNotMatch(content, /from ["']\.\/authority\.js["']/);
   assert.doesNotMatch(content, /from ["']\.\/organization-membership\.js["']/);
 });
 
-test("B2 (Shopify-role -> AKILTA-authority non-escalation, structural): outside its own explanatory comments, the module's actual code defines no OrganizationRole/permission/AuthorityContext-shaped field or function anywhere", () => {
+test("B2 (external-role -> AKILTA-authority non-escalation, structural): outside its own explanatory comments, the module's actual code defines no OrganizationRole/permission/AuthorityContext-shaped field or function anywhere", () => {
   const content = moduleCodeOnly();
   assert.doesNotMatch(content, /OrganizationRole/);
   assert.doesNotMatch(content, /AuthorityContext/);
   assert.doesNotMatch(content, /requirePermission|requireProtectedActionAuthorization|requireSameTenant/);
 });
 
-test("B3 (gateway/provider independence, structural): outside its own explanatory comments, no Stripe/bank-POS/Paraşüt or generic payment-gateway SDK identifier is imported or referenced anywhere in this module's actual code", () => {
+test("B3 (gateway/provider independence, structural): outside its own explanatory comments, no payment-gateway SDK identifier is imported or referenced anywhere in this module's actual code", () => {
   const content = moduleCodeOnly();
   for (const forbidden of ["stripe", "Stripe", "paraşüt", "Parasut", "creditCard", "cardNumber", "cvv", "PaymentGateway"]) {
     assert.doesNotMatch(content, new RegExp(forbidden), `expected no reference to ${forbidden}`);
@@ -60,13 +60,13 @@ test("B5 (zero new runtime dependency): the module has no import statement outsi
 test("B6: module exports exactly the expected surface", () => {
   const exportedKeys = Object.keys(SubscriptionEntitlement).sort();
   assert.deepEqual(exportedKeys, [
-    "AmbiguousShopifyCustomerLinkageError",
+    "AmbiguousExternalCustomerLinkageError",
+    "ExternalSubscriptionPlanMappingAlreadyAdmittedError",
     "InvalidSubscriptionEntitlementError",
-    "ShopifySubscriptionPlanMappingAlreadyAdmittedError",
     "applySubscriptionLifecycleFact",
+    "createExternalCustomerLinkageRegistry",
+    "createExternalSubscriptionPlanMappingRegistry",
     "createPendingSubscription",
-    "createShopifyCustomerLinkageRegistry",
-    "createShopifySubscriptionPlanMappingRegistry",
     "createSubscriptionPlan",
     "deriveEntitlement",
     "reconstructSubscription",
@@ -74,20 +74,20 @@ test("B6: module exports exactly the expected surface", () => {
 });
 
 test("B7 (immutable-once-admitted, write-before-guard ordering): admit() checks the already-admitted-mismatch guard before ever writing the map", () => {
-  const fnStart = moduleSource().indexOf("export function createShopifySubscriptionPlanMappingRegistry");
+  const fnStart = moduleSource().indexOf("export function createExternalSubscriptionPlanMappingRegistry");
   const nextFnStart = moduleSource().indexOf("export function", fnStart + 1);
   const fnBody = moduleSource().slice(fnStart, nextFnStart >= 0 ? nextFnStart : undefined);
-  const guardIndex = fnBody.indexOf("ShopifySubscriptionPlanMappingAlreadyAdmittedError");
+  const guardIndex = fnBody.indexOf("ExternalSubscriptionPlanMappingAlreadyAdmittedError");
   const setIndex = fnBody.indexOf("admitted.set(");
   assert.ok(guardIndex >= 0 && setIndex >= 0);
   assert.ok(guardIndex < setIndex, "the already-admitted guard must run before the map is ever written");
 });
 
 test("B8 (ambiguous-linkage guard ordering): linkOnce() checks the ambiguous-mismatch guard before ever writing the map", () => {
-  const fnStart = moduleSource().indexOf("export function createShopifyCustomerLinkageRegistry");
+  const fnStart = moduleSource().indexOf("export function createExternalCustomerLinkageRegistry");
   const nextFnStart = moduleSource().indexOf("export function", fnStart + 1);
   const fnBody = moduleSource().slice(fnStart, nextFnStart >= 0 ? nextFnStart : undefined);
-  const guardIndex = fnBody.indexOf("AmbiguousShopifyCustomerLinkageError");
+  const guardIndex = fnBody.indexOf("AmbiguousExternalCustomerLinkageError");
   const setIndex = fnBody.indexOf("linked.set(");
   assert.ok(guardIndex >= 0 && setIndex >= 0);
   assert.ok(guardIndex < setIndex, "the ambiguous-linkage guard must run before the map is ever written");

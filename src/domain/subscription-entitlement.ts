@@ -3,21 +3,26 @@ import type { Customer } from "./customer.js";
 
 /**
  * APP-SUB-001 (AA-005 Rev59): the smallest repository-native AKILTA
- * subscription/entitlement domain compatible with a Shopify-first
+ * subscription/entitlement domain compatible with an embedded external
  * commerce launch. AKILTA owns `SubscriptionPlan`/`Subscription`/
- * `Entitlement` truth; Shopify (and any app installed on it) owns
- * checkout, recurring charge execution, and card/payment-method storage.
- * Every Shopify identifier that reaches this module (shop domain,
- * customer id, product/variant id, selling-plan id, subscription
- * contract id, order/payment/refund/cancellation id) is treated as
- * external provenance/evidence only - never as AKILTA authority, and
- * never sufficient by itself to activate or widen anything. This module
- * has no import from `authority.ts` or `organization-membership.ts` at
- * all (see `tests/app-sub-001-boundary-scan.test.ts`) - Shopify
- * shop/customer/staff roles and permissions cannot reach, create, widen,
- * or mutate AKILTA `OrganizationRole`/membership/READ/WRITE/EXECUTE/
- * protected-action authority through this module, structurally, not by
- * convention.
+ * `Entitlement` truth; the external commerce platform (checkout,
+ * recurring charge execution, and card/payment-method storage) is a
+ * separate, unnamed system this repository never couples to by name -
+ * this repository's own project boundary keeps AKILTA free of any
+ * hardcoded commerce-platform dependency, so every external reference
+ * here is a deliberately generic, platform-agnostic pointer rather than
+ * a named-platform type. Every external identifier that reaches this
+ * module (storefront reference, external customer id, product/variant
+ * id, selling-plan id, subscription contract id, order/payment/refund/
+ * cancellation id) is treated as external provenance/evidence only -
+ * never as AKILTA authority, and never sufficient by itself to activate
+ * or widen anything. This module has no import from `authority.ts` or
+ * `organization-membership.ts` at all (see
+ * `tests/app-sub-001-boundary-scan.test.ts`) - an external platform's
+ * own shop/customer/staff roles and permissions cannot reach, create,
+ * widen, or mutate AKILTA `OrganizationRole`/membership/READ/WRITE/
+ * EXECUTE/protected-action authority through this module, structurally,
+ * not by convention.
  *
  * `SubscriptionPlan` is deliberately distinct from `ProjectPlanVersion`
  * (`project-plan.ts`): the former is AKILTA's own commercial-plan catalog
@@ -33,8 +38,8 @@ import type { Customer } from "./customer.js";
  * `connection-authority.ts`'s own `SecretRef` "opaque reference, never
  * real secret material" discipline. Live webhook signature verification,
  * app credentials, and network transport are later, separately protected
- * integration effects - not fabricated here. No direct Stripe/bank-POS/
- * Paraşüt credential or adapter exists anywhere in this module (see the
+ * integration effects - not fabricated here. No direct payment-gateway
+ * credential or adapter exists anywhere in this module (see the
  * boundary-scan test's "gateway/provider independence" proof).
  */
 
@@ -45,21 +50,21 @@ export class InvalidSubscriptionEntitlementError extends Error {
   }
 }
 
-export class AmbiguousShopifyCustomerLinkageError extends Error {
-  constructor(shopDomain: string, shopifyCustomerId: string) {
+export class AmbiguousExternalCustomerLinkageError extends Error {
+  constructor(storefrontRef: string, externalCustomerRef: string) {
     super(
-      `Shopify customer "${shopifyCustomerId}" in shop "${shopDomain}" is already linked to a different AKILTA tenant/customer - an ambiguous external identity is never silently repointed`,
+      `External customer "${externalCustomerRef}" in storefront "${storefrontRef}" is already linked to a different AKILTA tenant/customer - an ambiguous external identity is never silently repointed`,
     );
-    this.name = "AmbiguousShopifyCustomerLinkageError";
+    this.name = "AmbiguousExternalCustomerLinkageError";
   }
 }
 
-export class ShopifySubscriptionPlanMappingAlreadyAdmittedError extends Error {
-  constructor(shopDomain: string, shopifyProductOrVariantId: string, shopifySellingPlanId: string) {
+export class ExternalSubscriptionPlanMappingAlreadyAdmittedError extends Error {
+  constructor(storefrontRef: string, externalProductOrVariantRef: string, externalSellingPlanRef: string) {
     super(
-      `Shopify product/variant "${shopifyProductOrVariantId}" + selling plan "${shopifySellingPlanId}" in shop "${shopDomain}" is already admitted to a different SubscriptionPlan - re-admitting a different mapping is never silently accepted`,
+      `External product/variant "${externalProductOrVariantRef}" + selling plan "${externalSellingPlanRef}" in storefront "${storefrontRef}" is already admitted to a different SubscriptionPlan - re-admitting a different mapping is never silently accepted`,
     );
-    this.name = "ShopifySubscriptionPlanMappingAlreadyAdmittedError";
+    this.name = "ExternalSubscriptionPlanMappingAlreadyAdmittedError";
   }
 }
 
@@ -112,66 +117,67 @@ export function createSubscriptionPlan(input: {
 }
 
 // ---------------------------------------------------------------------------
-// Shopify customer identity -> AKILTA tenant/customer linkage. Collision-safe
-// keying (JSON.stringify of the identity tuple) mirrors this corridor's own
-// established injective-encoding discipline (CXP-001K/L/R/U/V/W): shopDomain
-// and shopifyCustomerId are validated only as non-empty strings, never as
-// delimiter-free, so raw concatenation would not be a collision-safe key.
+// External customer identity -> AKILTA tenant/customer linkage.
+// Collision-safe keying (JSON.stringify of the identity tuple) mirrors this
+// corridor's own established injective-encoding discipline (CXP-001K/L/R/
+// U/V/W): storefrontRef and externalCustomerRef are validated only as
+// non-empty strings, never as delimiter-free, so raw concatenation would
+// not be a collision-safe key.
 // ---------------------------------------------------------------------------
 
-export interface ShopifyCustomerLinkage {
-  readonly shopDomain: string;
-  readonly shopifyCustomerId: string;
+export interface ExternalCustomerLinkage {
+  readonly storefrontRef: string;
+  readonly externalCustomerRef: string;
   readonly tenantId: TenantScope["tenantId"];
   readonly customerId: Customer["customerId"];
   readonly linkedAt: string;
 }
 
-function shopifyCustomerKey(shopDomain: string, shopifyCustomerId: string): string {
-  return JSON.stringify([shopDomain, shopifyCustomerId]);
+function externalCustomerKey(storefrontRef: string, externalCustomerRef: string): string {
+  return JSON.stringify([storefrontRef, externalCustomerRef]);
 }
 
-export interface ShopifyCustomerLinkageRegistry {
+export interface ExternalCustomerLinkageRegistry {
   /**
-   * The only construction path for a `ShopifyCustomerLinkage`. Re-linking
-   * the identical `(shopDomain, shopifyCustomerId)` pair to the identical
-   * tenant/customer is a safe no-op (idempotent under retry/replay);
-   * re-linking it to a *different* tenant/customer fails closed with
-   * `AmbiguousShopifyCustomerLinkageError` rather than silently repointing
-   * an existing customer's commerce identity.
+   * The only construction path for an `ExternalCustomerLinkage`. Re-linking
+   * the identical `(storefrontRef, externalCustomerRef)` pair to the
+   * identical tenant/customer is a safe no-op (idempotent under retry/
+   * replay); re-linking it to a *different* tenant/customer fails closed
+   * with `AmbiguousExternalCustomerLinkageError` rather than silently
+   * repointing an existing customer's commerce identity.
    */
   linkOnce(input: {
-    shopDomain: unknown;
-    shopifyCustomerId: unknown;
+    storefrontRef: unknown;
+    externalCustomerRef: unknown;
     tenantScope: TenantScope;
     customer: Customer;
     linkedAt: unknown;
-  }): ShopifyCustomerLinkage;
+  }): ExternalCustomerLinkage;
   /** Fail-closed by construction: an unmapped identity resolves to `undefined`, never a guess. */
-  resolve(shopDomain: string, shopifyCustomerId: string): ShopifyCustomerLinkage | undefined;
+  resolve(storefrontRef: string, externalCustomerRef: string): ExternalCustomerLinkage | undefined;
 }
 
-export function createShopifyCustomerLinkageRegistry(): ShopifyCustomerLinkageRegistry {
-  const linked = new Map<string, ShopifyCustomerLinkage>();
+export function createExternalCustomerLinkageRegistry(): ExternalCustomerLinkageRegistry {
+  const linked = new Map<string, ExternalCustomerLinkage>();
   return {
     linkOnce(input) {
-      const shopDomain = requireNonEmptyString(input.shopDomain, "shopDomain");
-      const shopifyCustomerId = requireNonEmptyString(input.shopifyCustomerId, "shopifyCustomerId");
+      const storefrontRef = requireNonEmptyString(input.storefrontRef, "storefrontRef");
+      const externalCustomerRef = requireNonEmptyString(input.externalCustomerRef, "externalCustomerRef");
       const linkedAt = requireNonEmptyString(input.linkedAt, "linkedAt");
       if (input.customer.tenantId !== input.tenantScope.tenantId) {
         throw new InvalidSubscriptionEntitlementError("customer must belong to the given tenantScope");
       }
-      const key = shopifyCustomerKey(shopDomain, shopifyCustomerId);
+      const key = externalCustomerKey(storefrontRef, externalCustomerRef);
       const existing = linked.get(key);
       if (existing !== undefined) {
         if (existing.tenantId !== input.tenantScope.tenantId || existing.customerId !== input.customer.customerId) {
-          throw new AmbiguousShopifyCustomerLinkageError(shopDomain, shopifyCustomerId);
+          throw new AmbiguousExternalCustomerLinkageError(storefrontRef, externalCustomerRef);
         }
         return existing;
       }
-      const linkage: ShopifyCustomerLinkage = {
-        shopDomain,
-        shopifyCustomerId,
+      const linkage: ExternalCustomerLinkage = {
+        storefrontRef,
+        externalCustomerRef,
         tenantId: input.tenantScope.tenantId,
         customerId: input.customer.customerId,
         linkedAt,
@@ -179,26 +185,26 @@ export function createShopifyCustomerLinkageRegistry(): ShopifyCustomerLinkageRe
       linked.set(key, linkage);
       return linkage;
     },
-    resolve(shopDomain, shopifyCustomerId) {
-      return linked.get(shopifyCustomerKey(shopDomain, shopifyCustomerId));
+    resolve(storefrontRef, externalCustomerRef) {
+      return linked.get(externalCustomerKey(storefrontRef, externalCustomerRef));
     },
   };
 }
 
 // ---------------------------------------------------------------------------
-// Shopify product/variant + selling-plan -> AKILTA SubscriptionPlan mapping.
-// Mirrors `service-catalog-admission.ts`'s own single-gate, immutable-once-
-// admitted discipline - a caller-fabricated mapping (a free "this Shopify
-// product means this SubscriptionPlan" assertion with no admission gate)
-// is exactly the un-trusted-catalog-lookup gap that module's own doc
-// comments already named as unacceptable for a different domain; this is
-// the smallest task-local admission boundary for this one.
+// External product/variant + selling-plan -> AKILTA SubscriptionPlan
+// mapping. Mirrors `service-catalog-admission.ts`'s own single-gate,
+// immutable-once-admitted discipline - a caller-fabricated mapping (a free
+// "this external product means this SubscriptionPlan" assertion with no
+// admission gate) is exactly the un-trusted-catalog-lookup gap that
+// module's own doc comments already named as unacceptable for a different
+// domain; this is the smallest task-local admission boundary for this one.
 // ---------------------------------------------------------------------------
 
-export interface ShopifySubscriptionPlanMapping {
-  readonly shopDomain: string;
-  readonly shopifyProductOrVariantId: string;
-  readonly shopifySellingPlanId: string;
+export interface ExternalSubscriptionPlanMapping {
+  readonly storefrontRef: string;
+  readonly externalProductOrVariantRef: string;
+  readonly externalSellingPlanRef: string;
   readonly tenantId: TenantScope["tenantId"];
   readonly subscriptionPlanId: SubscriptionPlanId;
   readonly admittedByAuthorityId: string;
@@ -206,55 +212,55 @@ export interface ShopifySubscriptionPlanMapping {
   readonly admittedAt: string;
 }
 
-function shopifyPlanMappingKey(shopDomain: string, shopifyProductOrVariantId: string, shopifySellingPlanId: string): string {
-  return JSON.stringify([shopDomain, shopifyProductOrVariantId, shopifySellingPlanId]);
+function externalPlanMappingKey(storefrontRef: string, externalProductOrVariantRef: string, externalSellingPlanRef: string): string {
+  return JSON.stringify([storefrontRef, externalProductOrVariantRef, externalSellingPlanRef]);
 }
 
-export interface ShopifySubscriptionPlanMappingRegistry {
+export interface ExternalSubscriptionPlanMappingRegistry {
   /**
-   * The only construction path for a `ShopifySubscriptionPlanMapping`.
+   * The only construction path for an `ExternalSubscriptionPlanMapping`.
    * Re-admitting the identical mapping to the identical `SubscriptionPlan`
    * is a safe no-op; admitting a *different* `SubscriptionPlan` for an
-   * already-admitted Shopify product/selling-plan pair fails closed.
+   * already-admitted external product/selling-plan pair fails closed.
    */
   admit(input: {
-    shopDomain: unknown;
-    shopifyProductOrVariantId: unknown;
-    shopifySellingPlanId: unknown;
+    storefrontRef: unknown;
+    externalProductOrVariantRef: unknown;
+    externalSellingPlanRef: unknown;
     plan: SubscriptionPlan;
     admittedByAuthorityId: unknown;
     evidenceRef: unknown;
     admittedAt: unknown;
-  }): ShopifySubscriptionPlanMapping;
+  }): ExternalSubscriptionPlanMapping;
   resolve(
-    shopDomain: string,
-    shopifyProductOrVariantId: string,
-    shopifySellingPlanId: string,
-  ): ShopifySubscriptionPlanMapping | undefined;
+    storefrontRef: string,
+    externalProductOrVariantRef: string,
+    externalSellingPlanRef: string,
+  ): ExternalSubscriptionPlanMapping | undefined;
 }
 
-export function createShopifySubscriptionPlanMappingRegistry(): ShopifySubscriptionPlanMappingRegistry {
-  const admitted = new Map<string, ShopifySubscriptionPlanMapping>();
+export function createExternalSubscriptionPlanMappingRegistry(): ExternalSubscriptionPlanMappingRegistry {
+  const admitted = new Map<string, ExternalSubscriptionPlanMapping>();
   return {
     admit(input) {
-      const shopDomain = requireNonEmptyString(input.shopDomain, "shopDomain");
-      const shopifyProductOrVariantId = requireNonEmptyString(input.shopifyProductOrVariantId, "shopifyProductOrVariantId");
-      const shopifySellingPlanId = requireNonEmptyString(input.shopifySellingPlanId, "shopifySellingPlanId");
+      const storefrontRef = requireNonEmptyString(input.storefrontRef, "storefrontRef");
+      const externalProductOrVariantRef = requireNonEmptyString(input.externalProductOrVariantRef, "externalProductOrVariantRef");
+      const externalSellingPlanRef = requireNonEmptyString(input.externalSellingPlanRef, "externalSellingPlanRef");
       const admittedByAuthorityId = requireNonEmptyString(input.admittedByAuthorityId, "admittedByAuthorityId");
       const evidenceRef = requireNonEmptyString(input.evidenceRef, "evidenceRef");
       const admittedAt = requireNonEmptyString(input.admittedAt, "admittedAt");
-      const key = shopifyPlanMappingKey(shopDomain, shopifyProductOrVariantId, shopifySellingPlanId);
+      const key = externalPlanMappingKey(storefrontRef, externalProductOrVariantRef, externalSellingPlanRef);
       const existing = admitted.get(key);
       if (existing !== undefined) {
         if (existing.subscriptionPlanId !== input.plan.subscriptionPlanId || existing.tenantId !== input.plan.tenantId) {
-          throw new ShopifySubscriptionPlanMappingAlreadyAdmittedError(shopDomain, shopifyProductOrVariantId, shopifySellingPlanId);
+          throw new ExternalSubscriptionPlanMappingAlreadyAdmittedError(storefrontRef, externalProductOrVariantRef, externalSellingPlanRef);
         }
         return existing;
       }
-      const mapping: ShopifySubscriptionPlanMapping = {
-        shopDomain,
-        shopifyProductOrVariantId,
-        shopifySellingPlanId,
+      const mapping: ExternalSubscriptionPlanMapping = {
+        storefrontRef,
+        externalProductOrVariantRef,
+        externalSellingPlanRef,
         tenantId: input.plan.tenantId,
         subscriptionPlanId: input.plan.subscriptionPlanId,
         admittedByAuthorityId,
@@ -264,8 +270,8 @@ export function createShopifySubscriptionPlanMappingRegistry(): ShopifySubscript
       admitted.set(key, mapping);
       return mapping;
     },
-    resolve(shopDomain, shopifyProductOrVariantId, shopifySellingPlanId) {
-      return admitted.get(shopifyPlanMappingKey(shopDomain, shopifyProductOrVariantId, shopifySellingPlanId));
+    resolve(storefrontRef, externalProductOrVariantRef, externalSellingPlanRef) {
+      return admitted.get(externalPlanMappingKey(storefrontRef, externalProductOrVariantRef, externalSellingPlanRef));
     },
   };
 }
@@ -300,8 +306,8 @@ export type SubscriptionLifecycleFactType =
  * state.ts`'s own fencing/dedup discipline): applying the identical
  * `factId` twice - even after later facts have moved the subscription
  * further - is always a safe no-op, never a regression. `externalFactRef`
- * is an opaque Shopify evidence pointer (order/payment/refund/cancellation
- * id) - never interpreted, never a credential.
+ * is an opaque external-platform evidence pointer (order/payment/refund/
+ * cancellation id) - never interpreted, never a credential.
  *
  * Checkout intent, a draft order, an unpaid order, or any unverifiable
  * provider state must never be represented as an `ACTIVATION_VERIFIED` (or
@@ -322,8 +328,8 @@ export interface Subscription {
   readonly tenantId: TenantScope["tenantId"];
   readonly customerId: Customer["customerId"];
   readonly subscriptionPlanId: SubscriptionPlanId;
-  readonly shopDomain: string;
-  readonly shopifySubscriptionContractRef: string;
+  readonly storefrontRef: string;
+  readonly externalSubscriptionContractRef: string;
   readonly status: SubscriptionStatus;
   readonly currentPeriodEnd: string | undefined;
   readonly appliedFactIds: ReadonlyArray<string>;
@@ -332,35 +338,35 @@ export interface Subscription {
 /**
  * The only construction path for a `Subscription`: tenant/customer/plan
  * identity is always derived from an already-resolved, trusted
- * `ShopifyCustomerLinkage` + `ShopifySubscriptionPlanMapping` - never
+ * `ExternalCustomerLinkage` + `ExternalSubscriptionPlanMapping` - never
  * accepted as free caller-supplied strings. A subscription is always born
  * `PENDING_ACTIVATION`; only a later verified `ACTIVATION_VERIFIED` fact
  * can move it to `ACTIVE`.
  */
 export function createPendingSubscription(input: {
   subscriptionId: unknown;
-  customerLinkage: ShopifyCustomerLinkage;
-  planMapping: ShopifySubscriptionPlanMapping;
-  shopifySubscriptionContractRef: unknown;
+  customerLinkage: ExternalCustomerLinkage;
+  planMapping: ExternalSubscriptionPlanMapping;
+  externalSubscriptionContractRef: unknown;
 }): Subscription {
-  if (input.customerLinkage.shopDomain !== input.planMapping.shopDomain) {
-    throw new InvalidSubscriptionEntitlementError("customerLinkage and planMapping must belong to the same Shopify shop");
+  if (input.customerLinkage.storefrontRef !== input.planMapping.storefrontRef) {
+    throw new InvalidSubscriptionEntitlementError("customerLinkage and planMapping must belong to the same storefront");
   }
   if (input.customerLinkage.tenantId !== input.planMapping.tenantId) {
     throw new InvalidSubscriptionEntitlementError("customerLinkage and planMapping must belong to the same AKILTA tenant");
   }
   const subscriptionId = requireNonEmptyString(input.subscriptionId, "subscriptionId") as SubscriptionId;
-  const shopifySubscriptionContractRef = requireNonEmptyString(
-    input.shopifySubscriptionContractRef,
-    "shopifySubscriptionContractRef",
+  const externalSubscriptionContractRef = requireNonEmptyString(
+    input.externalSubscriptionContractRef,
+    "externalSubscriptionContractRef",
   );
   return {
     subscriptionId,
     tenantId: input.customerLinkage.tenantId,
     customerId: input.customerLinkage.customerId,
     subscriptionPlanId: input.planMapping.subscriptionPlanId,
-    shopDomain: input.customerLinkage.shopDomain,
-    shopifySubscriptionContractRef,
+    storefrontRef: input.customerLinkage.storefrontRef,
+    externalSubscriptionContractRef,
     status: "PENDING_ACTIVATION",
     currentPeriodEnd: undefined,
     appliedFactIds: [],

@@ -4,14 +4,14 @@ import { createTenantScope } from "../src/domain/tenant-scope.js";
 import { createCustomer } from "../src/domain/customer.js";
 import {
   createSubscriptionPlan,
-  createShopifyCustomerLinkageRegistry,
-  createShopifySubscriptionPlanMappingRegistry,
+  createExternalCustomerLinkageRegistry,
+  createExternalSubscriptionPlanMappingRegistry,
   createPendingSubscription,
   applySubscriptionLifecycleFact,
   reconstructSubscription,
   deriveEntitlement,
-  AmbiguousShopifyCustomerLinkageError,
-  ShopifySubscriptionPlanMappingAlreadyAdmittedError,
+  AmbiguousExternalCustomerLinkageError,
+  ExternalSubscriptionPlanMappingAlreadyAdmittedError,
   InvalidSubscriptionEntitlementError,
   type SubscriptionLifecycleFact,
 } from "../src/domain/subscription-entitlement.js";
@@ -38,59 +38,59 @@ test("S1: a SubscriptionPlan is bound to its own tenant and carries only non-emp
   assert.deepEqual(planA.grantedEntitlementRefs, ["feature:advisor", "feature:priority-support"]);
 });
 
-test("S2 (trusted customer mapping): linkOnce is idempotent for the identical (shop, shopifyCustomerId, tenant, customer) tuple", () => {
-  const registry = createShopifyCustomerLinkageRegistry();
-  const first = registry.linkOnce({ shopDomain: "shop.myshopify.com", shopifyCustomerId: "sc-1", tenantScope: tenantA, customer: customerA, linkedAt: "2026-09-17T00:00:00.000Z" });
-  const second = registry.linkOnce({ shopDomain: "shop.myshopify.com", shopifyCustomerId: "sc-1", tenantScope: tenantA, customer: customerA, linkedAt: "2026-09-17T00:00:00.000Z" });
+test("S2 (trusted customer mapping): linkOnce is idempotent for the identical (shop, externalCustomerRef, tenant, customer) tuple", () => {
+  const registry = createExternalCustomerLinkageRegistry();
+  const first = registry.linkOnce({ storefrontRef: "storefront.example.com", externalCustomerRef: "sc-1", tenantScope: tenantA, customer: customerA, linkedAt: "2026-09-17T00:00:00.000Z" });
+  const second = registry.linkOnce({ storefrontRef: "storefront.example.com", externalCustomerRef: "sc-1", tenantScope: tenantA, customer: customerA, linkedAt: "2026-09-17T00:00:00.000Z" });
   assert.deepEqual(first, second);
 });
 
-test("S3 (ambiguous external identity rejection): re-linking the same Shopify customer to a different AKILTA customer fails closed", () => {
-  const registry = createShopifyCustomerLinkageRegistry();
-  registry.linkOnce({ shopDomain: "shop.myshopify.com", shopifyCustomerId: "sc-2", tenantScope: tenantA, customer: customerA, linkedAt: "2026-09-17T00:00:00.000Z" });
+test("S3 (ambiguous external identity rejection): re-linking the same external customer to a different AKILTA customer fails closed", () => {
+  const registry = createExternalCustomerLinkageRegistry();
+  registry.linkOnce({ storefrontRef: "storefront.example.com", externalCustomerRef: "sc-2", tenantScope: tenantA, customer: customerA, linkedAt: "2026-09-17T00:00:00.000Z" });
   assert.throws(
-    () => registry.linkOnce({ shopDomain: "shop.myshopify.com", shopifyCustomerId: "sc-2", tenantScope: tenantA, customer: customerA2, linkedAt: "2026-09-17T00:00:00.000Z" }),
-    AmbiguousShopifyCustomerLinkageError,
+    () => registry.linkOnce({ storefrontRef: "storefront.example.com", externalCustomerRef: "sc-2", tenantScope: tenantA, customer: customerA2, linkedAt: "2026-09-17T00:00:00.000Z" }),
+    AmbiguousExternalCustomerLinkageError,
   );
 });
 
-test("S4 (ambiguous external identity rejection, cross-tenant): re-linking the same Shopify customer to a different AKILTA tenant fails closed", () => {
-  const registry = createShopifyCustomerLinkageRegistry();
-  registry.linkOnce({ shopDomain: "shop.myshopify.com", shopifyCustomerId: "sc-3", tenantScope: tenantA, customer: customerA, linkedAt: "2026-09-17T00:00:00.000Z" });
+test("S4 (ambiguous external identity rejection, cross-tenant): re-linking the same external customer to a different AKILTA tenant fails closed", () => {
+  const registry = createExternalCustomerLinkageRegistry();
+  registry.linkOnce({ storefrontRef: "storefront.example.com", externalCustomerRef: "sc-3", tenantScope: tenantA, customer: customerA, linkedAt: "2026-09-17T00:00:00.000Z" });
   assert.throws(
-    () => registry.linkOnce({ shopDomain: "shop.myshopify.com", shopifyCustomerId: "sc-3", tenantScope: tenantB, customer: customerB, linkedAt: "2026-09-17T00:00:00.000Z" }),
-    AmbiguousShopifyCustomerLinkageError,
+    () => registry.linkOnce({ storefrontRef: "storefront.example.com", externalCustomerRef: "sc-3", tenantScope: tenantB, customer: customerB, linkedAt: "2026-09-17T00:00:00.000Z" }),
+    AmbiguousExternalCustomerLinkageError,
   );
 });
 
-test("S5 (fail-closed on missing mapping): resolve() returns undefined for an unmapped Shopify customer, never a guess", () => {
-  const registry = createShopifyCustomerLinkageRegistry();
-  assert.equal(registry.resolve("shop.myshopify.com", "sc-does-not-exist"), undefined);
+test("S5 (fail-closed on missing mapping): resolve() returns undefined for an unmapped external customer, never a guess", () => {
+  const registry = createExternalCustomerLinkageRegistry();
+  assert.equal(registry.resolve("storefront.example.com", "sc-does-not-exist"), undefined);
 });
 
-test("S6 (collision-safe customer-linkage key): two distinct (shopDomain, shopifyCustomerId) tuples whose components straddle the raw delimiter never collide", () => {
-  const registry = createShopifyCustomerLinkageRegistry();
-  // Old-style `${shopDomain}::${shopifyCustomerId}` would collide for these two tuples.
-  const shopDomainA = "a::b";
-  const shopifyCustomerIdA = "c";
-  const shopDomainB = "a";
-  const shopifyCustomerIdB = "b::c";
+test("S6 (collision-safe customer-linkage key): two distinct (storefrontRef, externalCustomerRef) tuples whose components straddle the raw delimiter never collide", () => {
+  const registry = createExternalCustomerLinkageRegistry();
+  // Old-style `${storefrontRef}::${externalCustomerRef}` would collide for these two tuples.
+  const storefrontRefA = "a::b";
+  const externalCustomerRefA = "c";
+  const storefrontRefB = "a";
+  const externalCustomerRefB = "b::c";
   const oldKey = (shop: string, cust: string) => `${shop}::${cust}`;
-  assert.equal(oldKey(shopDomainA, shopifyCustomerIdA), oldKey(shopDomainB, shopifyCustomerIdB));
+  assert.equal(oldKey(storefrontRefA, externalCustomerRefA), oldKey(storefrontRefB, externalCustomerRefB));
 
-  registry.linkOnce({ shopDomain: shopDomainA, shopifyCustomerId: shopifyCustomerIdA, tenantScope: tenantA, customer: customerA, linkedAt: "2026-09-17T00:00:00.000Z" });
-  registry.linkOnce({ shopDomain: shopDomainB, shopifyCustomerId: shopifyCustomerIdB, tenantScope: tenantB, customer: customerB, linkedAt: "2026-09-17T00:00:00.000Z" });
+  registry.linkOnce({ storefrontRef: storefrontRefA, externalCustomerRef: externalCustomerRefA, tenantScope: tenantA, customer: customerA, linkedAt: "2026-09-17T00:00:00.000Z" });
+  registry.linkOnce({ storefrontRef: storefrontRefB, externalCustomerRef: externalCustomerRefB, tenantScope: tenantB, customer: customerB, linkedAt: "2026-09-17T00:00:00.000Z" });
 
-  assert.equal(registry.resolve(shopDomainA, shopifyCustomerIdA)?.customerId, customerA.customerId);
-  assert.equal(registry.resolve(shopDomainB, shopifyCustomerIdB)?.customerId, customerB.customerId);
+  assert.equal(registry.resolve(storefrontRefA, externalCustomerRefA)?.customerId, customerA.customerId);
+  assert.equal(registry.resolve(storefrontRefB, externalCustomerRefB)?.customerId, customerB.customerId);
 });
 
 test("S7 (trusted plan mapping): admit is idempotent for the identical mapping and immutable against a different SubscriptionPlan", () => {
-  const registry = createShopifySubscriptionPlanMappingRegistry();
+  const registry = createExternalSubscriptionPlanMappingRegistry();
   const admitInput = {
-    shopDomain: "shop.myshopify.com",
-    shopifyProductOrVariantId: "prod-1",
-    shopifySellingPlanId: "sp-1",
+    storefrontRef: "storefront.example.com",
+    externalProductOrVariantRef: "prod-1",
+    externalSellingPlanRef: "sp-1",
     plan: planA,
     admittedByAuthorityId: "founder-1",
     evidenceRef: "internal://tests/plan-mapping",
@@ -108,29 +108,29 @@ test("S7 (trusted plan mapping): admit is idempotent for the identical mapping a
   });
   assert.throws(
     () => registry.admit({ ...admitInput, plan: otherPlan }),
-    ShopifySubscriptionPlanMappingAlreadyAdmittedError,
+    ExternalSubscriptionPlanMappingAlreadyAdmittedError,
   );
 });
 
 test("S8: an OutcomeJobExecutionNotRoutedError-style fail-closed default - resolve() on an unadmitted plan mapping returns undefined", () => {
-  const registry = createShopifySubscriptionPlanMappingRegistry();
-  assert.equal(registry.resolve("shop.myshopify.com", "prod-none", "sp-none"), undefined);
+  const registry = createExternalSubscriptionPlanMappingRegistry();
+  assert.equal(registry.resolve("storefront.example.com", "prod-none", "sp-none"), undefined);
 });
 
 function admittedLinkageAndMapping() {
-  const customerLinkageRegistry = createShopifyCustomerLinkageRegistry();
+  const customerLinkageRegistry = createExternalCustomerLinkageRegistry();
   const linkage = customerLinkageRegistry.linkOnce({
-    shopDomain: "shop.myshopify.com",
-    shopifyCustomerId: "sc-100",
+    storefrontRef: "storefront.example.com",
+    externalCustomerRef: "sc-100",
     tenantScope: tenantA,
     customer: customerA,
     linkedAt: "2026-09-17T00:00:00.000Z",
   });
-  const planMappingRegistry = createShopifySubscriptionPlanMappingRegistry();
+  const planMappingRegistry = createExternalSubscriptionPlanMappingRegistry();
   const mapping = planMappingRegistry.admit({
-    shopDomain: "shop.myshopify.com",
-    shopifyProductOrVariantId: "prod-100",
-    shopifySellingPlanId: "sp-100",
+    storefrontRef: "storefront.example.com",
+    externalProductOrVariantRef: "prod-100",
+    externalSellingPlanRef: "sp-100",
     plan: planA,
     admittedByAuthorityId: "founder-1",
     evidenceRef: "internal://tests/plan-mapping-100",
@@ -145,7 +145,7 @@ test("S9: createPendingSubscription derives tenant/customer/plan identity only f
     subscriptionId: "sub-1",
     customerLinkage: linkage,
     planMapping: mapping,
-    shopifySubscriptionContractRef: "shopify-contract-1",
+    externalSubscriptionContractRef: "ext-contract-1",
   });
   assert.equal(subscription.status, "PENDING_ACTIVATION");
   assert.equal(subscription.tenantId, tenantA.tenantId);
@@ -159,7 +159,7 @@ test("S10 (checkout intent/unverified never activates): with no ACTIVATION_VERIF
     subscriptionId: "sub-2",
     customerLinkage: linkage,
     planMapping: mapping,
-    shopifySubscriptionContractRef: "shopify-contract-2",
+    externalSubscriptionContractRef: "ext-contract-2",
   });
   assert.equal(subscription.status, "PENDING_ACTIVATION");
   const entitlement = deriveEntitlement(subscription, planA);
@@ -173,7 +173,7 @@ test("S11 (verified activation): a genuine ACTIVATION_VERIFIED fact activates th
     subscriptionId: "sub-3",
     customerLinkage: linkage,
     planMapping: mapping,
-    shopifySubscriptionContractRef: "shopify-contract-3",
+    externalSubscriptionContractRef: "ext-contract-3",
   });
   const activated = applySubscriptionLifecycleFact(
     pending,
@@ -188,7 +188,7 @@ test("S11 (verified activation): a genuine ACTIVATION_VERIFIED fact activates th
 
 test("S12 (renewal): a RENEWAL_VERIFIED fact keeps the subscription ACTIVE and advances currentPeriodEnd", () => {
   const { linkage, mapping } = admittedLinkageAndMapping();
-  const pending = createPendingSubscription({ subscriptionId: "sub-4", customerLinkage: linkage, planMapping: mapping, shopifySubscriptionContractRef: "shopify-contract-4" });
+  const pending = createPendingSubscription({ subscriptionId: "sub-4", customerLinkage: linkage, planMapping: mapping, externalSubscriptionContractRef: "ext-contract-4" });
   const activated = applySubscriptionLifecycleFact(pending, fact({ factId: "f-activate", factType: "ACTIVATION_VERIFIED", newPeriodEnd: "2026-10-17T00:00:00.000Z" }));
   const renewed = applySubscriptionLifecycleFact(activated, fact({ factId: "f-renew", factType: "RENEWAL_VERIFIED", newPeriodEnd: "2026-11-17T00:00:00.000Z" }));
   assert.equal(renewed.status, "ACTIVE");
@@ -197,7 +197,7 @@ test("S12 (renewal): a RENEWAL_VERIFIED fact keeps the subscription ACTIVE and a
 
 test("S13 (payment failure/past-due revokes entitlement): a PAYMENT_FAILED fact moves ACTIVE to PAST_DUE and entitlement becomes inactive", () => {
   const { linkage, mapping } = admittedLinkageAndMapping();
-  const pending = createPendingSubscription({ subscriptionId: "sub-5", customerLinkage: linkage, planMapping: mapping, shopifySubscriptionContractRef: "shopify-contract-5" });
+  const pending = createPendingSubscription({ subscriptionId: "sub-5", customerLinkage: linkage, planMapping: mapping, externalSubscriptionContractRef: "ext-contract-5" });
   const activated = applySubscriptionLifecycleFact(pending, fact({ factId: "f-activate", factType: "ACTIVATION_VERIFIED" }));
   const pastDue = applySubscriptionLifecycleFact(activated, fact({ factId: "f-fail", factType: "PAYMENT_FAILED" }));
   assert.equal(pastDue.status, "PAST_DUE");
@@ -206,7 +206,7 @@ test("S13 (payment failure/past-due revokes entitlement): a PAYMENT_FAILED fact 
 
 test("S14 (payment recovery restores entitlement): a PAYMENT_RECOVERED fact after PAST_DUE restores ACTIVE and entitlement", () => {
   const { linkage, mapping } = admittedLinkageAndMapping();
-  const pending = createPendingSubscription({ subscriptionId: "sub-6", customerLinkage: linkage, planMapping: mapping, shopifySubscriptionContractRef: "shopify-contract-6" });
+  const pending = createPendingSubscription({ subscriptionId: "sub-6", customerLinkage: linkage, planMapping: mapping, externalSubscriptionContractRef: "ext-contract-6" });
   const activated = applySubscriptionLifecycleFact(pending, fact({ factId: "f-activate", factType: "ACTIVATION_VERIFIED" }));
   const pastDue = applySubscriptionLifecycleFact(activated, fact({ factId: "f-fail", factType: "PAYMENT_FAILED" }));
   const recovered = applySubscriptionLifecycleFact(pastDue, fact({ factId: "f-recover", factType: "PAYMENT_RECOVERED" }));
@@ -216,7 +216,7 @@ test("S14 (payment recovery restores entitlement): a PAYMENT_RECOVERED fact afte
 
 test("S15 (cancellation revocation): a CANCELED fact from ACTIVE is terminal and revokes entitlement", () => {
   const { linkage, mapping } = admittedLinkageAndMapping();
-  const pending = createPendingSubscription({ subscriptionId: "sub-7", customerLinkage: linkage, planMapping: mapping, shopifySubscriptionContractRef: "shopify-contract-7" });
+  const pending = createPendingSubscription({ subscriptionId: "sub-7", customerLinkage: linkage, planMapping: mapping, externalSubscriptionContractRef: "ext-contract-7" });
   const activated = applySubscriptionLifecycleFact(pending, fact({ factId: "f-activate", factType: "ACTIVATION_VERIFIED" }));
   const canceled = applySubscriptionLifecycleFact(activated, fact({ factId: "f-cancel", factType: "CANCELED" }));
   assert.equal(canceled.status, "CANCELED");
@@ -228,7 +228,7 @@ test("S15 (cancellation revocation): a CANCELED fact from ACTIVE is terminal and
 
 test("S16 (expiry revocation): an EXPIRED fact from PAST_DUE is terminal and revokes entitlement", () => {
   const { linkage, mapping } = admittedLinkageAndMapping();
-  const pending = createPendingSubscription({ subscriptionId: "sub-8", customerLinkage: linkage, planMapping: mapping, shopifySubscriptionContractRef: "shopify-contract-8" });
+  const pending = createPendingSubscription({ subscriptionId: "sub-8", customerLinkage: linkage, planMapping: mapping, externalSubscriptionContractRef: "ext-contract-8" });
   const activated = applySubscriptionLifecycleFact(pending, fact({ factId: "f-activate", factType: "ACTIVATION_VERIFIED" }));
   const pastDue = applySubscriptionLifecycleFact(activated, fact({ factId: "f-fail", factType: "PAYMENT_FAILED" }));
   const expired = applySubscriptionLifecycleFact(pastDue, fact({ factId: "f-expire", factType: "EXPIRED" }));
@@ -238,7 +238,7 @@ test("S16 (expiry revocation): an EXPIRED fact from PAST_DUE is terminal and rev
 
 test("S17 (pause/resume): PAUSED then RESUMED returns to ACTIVE", () => {
   const { linkage, mapping } = admittedLinkageAndMapping();
-  const pending = createPendingSubscription({ subscriptionId: "sub-9", customerLinkage: linkage, planMapping: mapping, shopifySubscriptionContractRef: "shopify-contract-9" });
+  const pending = createPendingSubscription({ subscriptionId: "sub-9", customerLinkage: linkage, planMapping: mapping, externalSubscriptionContractRef: "ext-contract-9" });
   const activated = applySubscriptionLifecycleFact(pending, fact({ factId: "f-activate", factType: "ACTIVATION_VERIFIED" }));
   const paused = applySubscriptionLifecycleFact(activated, fact({ factId: "f-pause", factType: "PAUSED" }));
   assert.equal(paused.status, "PAUSED");
@@ -249,7 +249,7 @@ test("S17 (pause/resume): PAUSED then RESUMED returns to ACTIVE", () => {
 
 test("S18 (duplicate/replay safety): applying the identical factId twice is a no-op", () => {
   const { linkage, mapping } = admittedLinkageAndMapping();
-  const pending = createPendingSubscription({ subscriptionId: "sub-10", customerLinkage: linkage, planMapping: mapping, shopifySubscriptionContractRef: "shopify-contract-10" });
+  const pending = createPendingSubscription({ subscriptionId: "sub-10", customerLinkage: linkage, planMapping: mapping, externalSubscriptionContractRef: "ext-contract-10" });
   const activateFact = fact({ factId: "f-activate-dup", factType: "ACTIVATION_VERIFIED", newPeriodEnd: "2026-10-17T00:00:00.000Z" });
   const once = applySubscriptionLifecycleFact(pending, activateFact);
   const twice = applySubscriptionLifecycleFact(once, activateFact);
@@ -258,7 +258,7 @@ test("S18 (duplicate/replay safety): applying the identical factId twice is a no
 
 test("S19 (replay safety against regression - the load-bearing case): replaying a stale PAYMENT_FAILED fact after a later PAYMENT_RECOVERED fact never regresses the subscription", () => {
   const { linkage, mapping } = admittedLinkageAndMapping();
-  const pending = createPendingSubscription({ subscriptionId: "sub-11", customerLinkage: linkage, planMapping: mapping, shopifySubscriptionContractRef: "shopify-contract-11" });
+  const pending = createPendingSubscription({ subscriptionId: "sub-11", customerLinkage: linkage, planMapping: mapping, externalSubscriptionContractRef: "ext-contract-11" });
   const activated = applySubscriptionLifecycleFact(pending, fact({ factId: "f-activate", factType: "ACTIVATION_VERIFIED" }));
   const failFact = fact({ factId: "f-fail", factType: "PAYMENT_FAILED" });
   const pastDue = applySubscriptionLifecycleFact(activated, failFact);
@@ -271,7 +271,7 @@ test("S19 (replay safety against regression - the load-bearing case): replaying 
 
 test("S20 (reconstruction proves restart-safety): reconstructSubscription over a full fact log produces the identical state as incremental application", () => {
   const { linkage, mapping } = admittedLinkageAndMapping();
-  const pending = createPendingSubscription({ subscriptionId: "sub-12", customerLinkage: linkage, planMapping: mapping, shopifySubscriptionContractRef: "shopify-contract-12" });
+  const pending = createPendingSubscription({ subscriptionId: "sub-12", customerLinkage: linkage, planMapping: mapping, externalSubscriptionContractRef: "ext-contract-12" });
   const facts: ReadonlyArray<SubscriptionLifecycleFact> = [
     fact({ factId: "f1", factType: "ACTIVATION_VERIFIED", newPeriodEnd: "2026-10-17T00:00:00.000Z" }),
     fact({ factId: "f2", factType: "PAYMENT_FAILED" }),
@@ -285,7 +285,7 @@ test("S20 (reconstruction proves restart-safety): reconstructSubscription over a
 
 test("S21 (tenant isolation): deriveEntitlement rejects a plan from a different tenant than the subscription", () => {
   const { linkage, mapping } = admittedLinkageAndMapping();
-  const pending = createPendingSubscription({ subscriptionId: "sub-13", customerLinkage: linkage, planMapping: mapping, shopifySubscriptionContractRef: "shopify-contract-13" });
+  const pending = createPendingSubscription({ subscriptionId: "sub-13", customerLinkage: linkage, planMapping: mapping, externalSubscriptionContractRef: "ext-contract-13" });
   const activated = applySubscriptionLifecycleFact(pending, fact({ factId: "f-activate", factType: "ACTIVATION_VERIFIED" }));
   const foreignPlan = createSubscriptionPlan({
     tenantScope: tenantB,
@@ -296,20 +296,20 @@ test("S21 (tenant isolation): deriveEntitlement rejects a plan from a different 
   assert.throws(() => deriveEntitlement(activated, foreignPlan), InvalidSubscriptionEntitlementError);
 });
 
-test("S22 (cross-shop rejection): createPendingSubscription rejects a linkage/mapping pair from different Shopify shops", () => {
-  const customerLinkageRegistry = createShopifyCustomerLinkageRegistry();
+test("S22 (cross-shop rejection): createPendingSubscription rejects a linkage/mapping pair from different storefronts", () => {
+  const customerLinkageRegistry = createExternalCustomerLinkageRegistry();
   const linkage = customerLinkageRegistry.linkOnce({
-    shopDomain: "shop-one.myshopify.com",
-    shopifyCustomerId: "sc-x",
+    storefrontRef: "storefront-one.example.com",
+    externalCustomerRef: "sc-x",
     tenantScope: tenantA,
     customer: customerA,
     linkedAt: "2026-09-17T00:00:00.000Z",
   });
-  const planMappingRegistry = createShopifySubscriptionPlanMappingRegistry();
+  const planMappingRegistry = createExternalSubscriptionPlanMappingRegistry();
   const mapping = planMappingRegistry.admit({
-    shopDomain: "shop-two.myshopify.com",
-    shopifyProductOrVariantId: "prod-x",
-    shopifySellingPlanId: "sp-x",
+    storefrontRef: "storefront-two.example.com",
+    externalProductOrVariantRef: "prod-x",
+    externalSellingPlanRef: "sp-x",
     plan: planA,
     admittedByAuthorityId: "founder-1",
     evidenceRef: "internal://tests/cross-shop",
@@ -321,7 +321,7 @@ test("S22 (cross-shop rejection): createPendingSubscription rejects a linkage/ma
         subscriptionId: "sub-14",
         customerLinkage: linkage,
         planMapping: mapping,
-        shopifySubscriptionContractRef: "shopify-contract-14",
+        externalSubscriptionContractRef: "ext-contract-14",
       }),
     InvalidSubscriptionEntitlementError,
   );
