@@ -1,5 +1,6 @@
 import type { TenantScope } from "./tenant-scope.js";
 import type { Customer } from "./customer.js";
+import type { AdmittedWorker } from "./worker-routing-policy.js";
 
 /**
  * APP-SUB-001 (AA-005 Rev59): the smallest repository-native AKILTA
@@ -222,13 +223,27 @@ export interface ExternalSubscriptionPlanMappingRegistry {
    * Re-admitting the identical mapping to the identical `SubscriptionPlan`
    * is a safe no-op; admitting a *different* `SubscriptionPlan` for an
    * already-admitted external product/selling-plan pair fails closed.
+   *
+   * Rev60 F1 correction: this previously accepted a bare, caller-supplied
+   * `admittedByAuthorityId` string with no admission/authority binding at
+   * all - a free label, never an actual admitted-authority decision, so an
+   * external platform's own untrusted role could "admit" a plan mapping
+   * just by asserting a plausible-looking id. Mirrors
+   * `service-catalog-admission.ts`'s own Rev102 F2 fix exactly: reuses
+   * `worker-routing-policy.ts`'s existing, already-established, non-
+   * tenant-scoped admitted-identity/authority-level primitive
+   * (`AdmittedWorker`) rather than inventing a second IAM model. An
+   * `authorizingWorker` that is not `trustStatus: "ADMITTED"` or not
+   * `authorityLevel: "ELEVATED"` can never admit a mapping - an unproven/
+   * untrusted/standard-authority caller label can no longer silently
+   * become trusted subscription-plan-mapping authority.
    */
   admit(input: {
     storefrontRef: unknown;
     externalProductOrVariantRef: unknown;
     externalSellingPlanRef: unknown;
     plan: SubscriptionPlan;
-    admittedByAuthorityId: unknown;
+    authorizingWorker: AdmittedWorker;
     evidenceRef: unknown;
     admittedAt: unknown;
   }): ExternalSubscriptionPlanMapping;
@@ -246,7 +261,17 @@ export function createExternalSubscriptionPlanMappingRegistry(): ExternalSubscri
       const storefrontRef = requireNonEmptyString(input.storefrontRef, "storefrontRef");
       const externalProductOrVariantRef = requireNonEmptyString(input.externalProductOrVariantRef, "externalProductOrVariantRef");
       const externalSellingPlanRef = requireNonEmptyString(input.externalSellingPlanRef, "externalSellingPlanRef");
-      const admittedByAuthorityId = requireNonEmptyString(input.admittedByAuthorityId, "admittedByAuthorityId");
+      if (input.authorizingWorker.trustStatus !== "ADMITTED") {
+        throw new InvalidSubscriptionEntitlementError(
+          `authorizingWorker must have trustStatus "ADMITTED" (got "${input.authorizingWorker.trustStatus}") - an unproven/untrusted caller cannot admit a subscription-plan mapping`,
+        );
+      }
+      if (input.authorizingWorker.authorityLevel !== "ELEVATED") {
+        throw new InvalidSubscriptionEntitlementError(
+          `authorizingWorker must have authorityLevel "ELEVATED" (got "${input.authorizingWorker.authorityLevel}") - only elevated-authority workers may admit a trusted subscription-plan mapping`,
+        );
+      }
+      const admittedByAuthorityId = input.authorizingWorker.workerId;
       const evidenceRef = requireNonEmptyString(input.evidenceRef, "evidenceRef");
       const admittedAt = requireNonEmptyString(input.admittedAt, "admittedAt");
       const key = externalPlanMappingKey(storefrontRef, externalProductOrVariantRef, externalSellingPlanRef);
@@ -314,13 +339,78 @@ export type SubscriptionLifecycleFactType =
  * any other) fact - this module has no field or fact type for an
  * unverified claim at all, so the honest way to represent one is to never
  * construct a fact for it, not to construct one and mark it "pending."
+ *
+ * Rev60 F2 correction: this previously carried no subscription-identifying
+ * provenance at all - nothing bound a fact to the one `Subscription` it
+ * actually pertains to, so a fact genuinely about one subscription could be
+ * (by caller bug or cross-subscription contamination) applied to a wholly
+ * different one and would be accepted unconditionally. `storefrontRef` and
+ * `externalSubscriptionContractRef` are that binding: they must match the
+ * target `Subscription`'s own fields exactly, checked both at construction
+ * (see `createVerifiedSubscriptionLifecycleFact`) and again at application
+ * (see `applySubscriptionLifecycleFact`) as defense in depth.
  */
 export interface SubscriptionLifecycleFact {
   readonly factId: string;
   readonly factType: SubscriptionLifecycleFactType;
   readonly occurredAt: string;
+  readonly storefrontRef: string;
+  readonly externalSubscriptionContractRef: string;
   readonly externalFactRef: string;
   readonly newPeriodEnd?: string;
+}
+
+/**
+ * Rev60 F2 correction: the only construction path for a
+ * `SubscriptionLifecycleFact`. The caller must already have resolved which
+ * `Subscription` a verified external event pertains to (e.g. by looking up
+ * `externalSubscriptionContractRef` in a subscription store) and supplies
+ * that exact `Subscription` here; the given `storefrontRef` and
+ * `externalSubscriptionContractRef` must match it exactly, or construction
+ * fails closed immediately. This is deliberately the smallest possible
+ * provenance boundary - it reuses the already-resolved `Subscription`
+ * (itself only ever derived from a trusted `ExternalCustomerLinkage` +
+ * `ExternalSubscriptionPlanMapping`) as the AKILTA subscription/customer/
+ * tenant coherence anchor, rather than inventing a second identity model.
+ */
+export function createVerifiedSubscriptionLifecycleFact(input: {
+  subscription: Subscription;
+  storefrontRef: unknown;
+  externalSubscriptionContractRef: unknown;
+  factId: unknown;
+  factType: SubscriptionLifecycleFactType;
+  occurredAt: unknown;
+  externalFactRef: unknown;
+  newPeriodEnd?: unknown;
+}): SubscriptionLifecycleFact {
+  const storefrontRef = requireNonEmptyString(input.storefrontRef, "storefrontRef");
+  const externalSubscriptionContractRef = requireNonEmptyString(
+    input.externalSubscriptionContractRef,
+    "externalSubscriptionContractRef",
+  );
+  if (
+    storefrontRef !== input.subscription.storefrontRef ||
+    externalSubscriptionContractRef !== input.subscription.externalSubscriptionContractRef
+  ) {
+    throw new InvalidSubscriptionEntitlementError(
+      `lifecycle fact provenance (storefront "${storefrontRef}", contract "${externalSubscriptionContractRef}") does not match the target subscription's own storefront "${input.subscription.storefrontRef}" / contract "${input.subscription.externalSubscriptionContractRef}" - a fact can never be constructed for a subscription it does not actually belong to`,
+    );
+  }
+  const factId = requireNonEmptyString(input.factId, "factId");
+  const occurredAt = requireNonEmptyString(input.occurredAt, "occurredAt");
+  if (Number.isNaN(Date.parse(occurredAt))) {
+    throw new InvalidSubscriptionEntitlementError("occurredAt must be a valid ISO timestamp");
+  }
+  const externalFactRef = requireNonEmptyString(input.externalFactRef, "externalFactRef");
+  return {
+    factId,
+    factType: input.factType,
+    occurredAt,
+    storefrontRef,
+    externalSubscriptionContractRef,
+    externalFactRef,
+    ...(input.newPeriodEnd === undefined ? {} : { newPeriodEnd: requireNonEmptyString(input.newPeriodEnd, "newPeriodEnd") }),
+  };
 }
 
 export interface Subscription {
@@ -332,7 +422,7 @@ export interface Subscription {
   readonly externalSubscriptionContractRef: string;
   readonly status: SubscriptionStatus;
   readonly currentPeriodEnd: string | undefined;
-  readonly appliedFactIds: ReadonlyArray<string>;
+  readonly appliedFacts: ReadonlyArray<SubscriptionLifecycleFact>;
 }
 
 /**
@@ -369,10 +459,21 @@ export function createPendingSubscription(input: {
     externalSubscriptionContractRef,
     status: "PENDING_ACTIVATION",
     currentPeriodEnd: undefined,
-    appliedFactIds: [],
+    appliedFacts: [],
   };
 }
 
+/**
+ * Rev60 F3 correction: `CANCELED` is now also a legal transition from
+ * `PENDING_ACTIVATION` (a subscription can genuinely be verified-canceled
+ * before it was ever activated). This is load-bearing together with the
+ * temporal re-fold in `applySubscriptionLifecycleFact`: without it, a
+ * verified cancellation that truly occurred before activation - but is
+ * delivered to this reducer after the activation fact - would have no
+ * legal transition to record itself against even once correctly re-
+ * ordered by `occurredAt`, and would be silently discarded exactly as
+ * Rev60 F3 found.
+ */
 function resolveNextStatus(from: SubscriptionStatus, factType: SubscriptionLifecycleFactType): SubscriptionStatus | undefined {
   switch (factType) {
     case "ACTIVATION_VERIFIED":
@@ -388,38 +489,83 @@ function resolveNextStatus(from: SubscriptionStatus, factType: SubscriptionLifec
     case "RESUMED":
       return from === "PAUSED" ? "ACTIVE" : undefined;
     case "CANCELED":
-      return from === "ACTIVE" || from === "PAST_DUE" || from === "PAUSED" ? "CANCELED" : undefined;
+      return from === "PENDING_ACTIVATION" || from === "ACTIVE" || from === "PAST_DUE" || from === "PAUSED"
+        ? "CANCELED"
+        : undefined;
     case "EXPIRED":
       return from === "PAST_DUE" ? "EXPIRED" : undefined;
   }
 }
 
-/**
- * Pure reducer, never throws on a structurally well-formed fact: a
- * duplicate `factId` (replay) or a fact that names no legal transition
- * from the subscription's current status (stale/out-of-order delivery) is
- * always a safe no-op that still records `factId` as seen - so a later
- * replay of that same stale fact remains a no-op too, and the
- * subscription's own status/period are never regressed by a fact a later
- * one has already superseded.
- */
-export function applySubscriptionLifecycleFact(subscription: Subscription, fact: SubscriptionLifecycleFact): Subscription {
-  if (subscription.appliedFactIds.includes(fact.factId)) {
-    return subscription;
-  }
-  const nextStatus = resolveNextStatus(subscription.status, fact.factType);
-  if (nextStatus === undefined) {
-    return { ...subscription, appliedFactIds: [...subscription.appliedFactIds, fact.factId] };
-  }
-  return {
-    ...subscription,
-    status: nextStatus,
-    currentPeriodEnd: fact.newPeriodEnd ?? subscription.currentPeriodEnd,
-    appliedFactIds: [...subscription.appliedFactIds, fact.factId],
-  };
+function factSequenceKey(fact: SubscriptionLifecycleFact): [number, string] {
+  return [Date.parse(fact.occurredAt), fact.factId];
 }
 
-/** Replays a full fact log against a freshly created pending subscription - restart/reconstruction is provably identical to incremental application. */
+/**
+ * Rev60 F3 correction: folds a full fact set in true `occurredAt` order
+ * (factId as a deterministic tiebreaker) from a subscription's birth
+ * state, rather than trusting delivery order. A fact that names no legal
+ * transition at its position in the *true* sequence contributes nothing to
+ * status/period but is still retained in the log, so a subsequently-
+ * arriving fact that is chronologically earlier can be correctly re-
+ * inserted into its true position and re-folded - this is what makes
+ * out-of-order delivery (e.g. a `PAYMENT_RECOVERED` webhook arriving before
+ * the `PAYMENT_FAILED` one it responds to, or a verified cancellation
+ * arriving after a later-delivered-but-earlier-occurring activation)
+ * resolve to the same final state regardless of arrival order.
+ */
+function foldFactsInTemporalOrder(
+  base: Subscription,
+  facts: ReadonlyArray<SubscriptionLifecycleFact>,
+): Subscription {
+  const sorted = [...facts].sort((a, b) => {
+    const [ta, ida] = factSequenceKey(a);
+    const [tb, idb] = factSequenceKey(b);
+    if (ta !== tb) return ta - tb;
+    return ida < idb ? -1 : ida > idb ? 1 : 0;
+  });
+  let status: SubscriptionStatus = "PENDING_ACTIVATION";
+  let currentPeriodEnd: string | undefined = undefined;
+  for (const candidate of sorted) {
+    const nextStatus = resolveNextStatus(status, candidate.factType);
+    if (nextStatus !== undefined) {
+      status = nextStatus;
+      currentPeriodEnd = candidate.newPeriodEnd ?? currentPeriodEnd;
+    }
+  }
+  return { ...base, status, currentPeriodEnd, appliedFacts: sorted };
+}
+
+/**
+ * Pure reducer, fail-closed on cross-subscription contamination (Rev60 F2)
+ * and malformed timestamps, and replay/order-safe by full temporal re-fold
+ * (Rev60 F3): a duplicate `factId` is always a safe no-op, and any other
+ * fact - however it arrives relative to the others already on file - is
+ * inserted into the subscription's own fact log and the *entire* log is
+ * re-folded in true `occurredAt` order, so out-of-order delivery can never
+ * produce a status/entitlement inconsistent with the true verified fact
+ * sequence, and a terminal negative fact (e.g. a verified cancellation)
+ * can never be escaped by a chronologically-earlier fact arriving later.
+ */
+export function applySubscriptionLifecycleFact(subscription: Subscription, fact: SubscriptionLifecycleFact): Subscription {
+  if (
+    fact.storefrontRef !== subscription.storefrontRef ||
+    fact.externalSubscriptionContractRef !== subscription.externalSubscriptionContractRef
+  ) {
+    throw new InvalidSubscriptionEntitlementError(
+      `lifecycle fact "${fact.factId}" (storefront "${fact.storefrontRef}", contract "${fact.externalSubscriptionContractRef}") does not match this subscription's own storefront "${subscription.storefrontRef}" / contract "${subscription.externalSubscriptionContractRef}" - a cross-subscription lifecycle fact is never applied`,
+    );
+  }
+  if (Number.isNaN(Date.parse(fact.occurredAt))) {
+    throw new InvalidSubscriptionEntitlementError(`lifecycle fact "${fact.factId}" has an invalid occurredAt timestamp`);
+  }
+  if (subscription.appliedFacts.some((applied) => applied.factId === fact.factId)) {
+    return subscription;
+  }
+  return foldFactsInTemporalOrder(subscription, [...subscription.appliedFacts, fact]);
+}
+
+/** Replays a full fact log against a freshly created pending subscription - restart/reconstruction is provably identical to incremental application, and to any other delivery order of the same fact set (Rev60 F3). */
 export function reconstructSubscription(
   initial: ReturnType<typeof createPendingSubscription>,
   facts: ReadonlyArray<SubscriptionLifecycleFact>,

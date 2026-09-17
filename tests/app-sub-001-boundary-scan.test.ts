@@ -68,6 +68,7 @@ test("B6: module exports exactly the expected surface", () => {
     "createExternalSubscriptionPlanMappingRegistry",
     "createPendingSubscription",
     "createSubscriptionPlan",
+    "createVerifiedSubscriptionLifecycleFact",
     "deriveEntitlement",
     "reconstructSubscription",
   ]);
