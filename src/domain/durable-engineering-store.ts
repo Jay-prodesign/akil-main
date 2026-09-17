@@ -10,8 +10,19 @@ export class InvalidDurableEngineeringStoreError extends Error {
   }
 }
 
+/**
+ * Bounded scan correction (same class as Brain Rev44 F1/F2, CXP-001K/L/R):
+ * `projectRef`/`taskId`/`runId` are validated only as non-empty trimmed
+ * strings, never as delimiter-free, so raw `::`-delimited concatenation
+ * is not actually collision-safe - two distinct tuples with a component
+ * containing `::` could resolve to the same key and therefore the same
+ * on-disk run-state file, silently interleaving two unrelated
+ * engineering runs' event logs. `JSON.stringify` of the identity tuple
+ * as an array is injective for this purpose: JSON string escaping means
+ * two distinct tuples can never serialize to the same string.
+ */
 function runKey(projectRef: string, taskId: TaskId, runId: RunId): string {
-  return `${projectRef}::${taskId}::${runId}`;
+  return JSON.stringify([projectRef, taskId, runId]);
 }
 
 /**
