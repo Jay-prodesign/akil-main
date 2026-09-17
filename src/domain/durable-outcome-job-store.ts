@@ -106,6 +106,26 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
   }
 
   /**
+   * Rev70: a `process.kill(pid, 0)` liveness probe - signal `0` sends no
+   * actual signal, it only tests whether a process with this pid exists
+   * and is signalable. `ESRCH` means no such process; anything else
+   * (including `EPERM`, a live process owned by another user) cannot
+   * safely be concluded dead, so it is treated as alive. This can be
+   * fooled by PID reuse (the OS assigning a crashed holder's old pid to
+   * an unrelated new process before this check runs) - the only possible
+   * error direction from that is a false "still alive" result, which
+   * only costs an extra wait/backoff cycle, never an unsafe reclaim.
+   */
+  private isProcessAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (cause) {
+      return (cause as NodeJS.ErrnoException).code !== "ESRCH";
+    }
+  }
+
+  /**
    * Rev69 correction: reuses the exact transient-mutex `linkSync` pattern
    * already established in `durable-connector-connection-store.ts`'s
    * `withTenantLock`, but under its own lock namespace (`.tenant-locks`,
@@ -116,14 +136,33 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
    * destination directory entry or fails with `EEXIST`, atomically, with
    * no window in which a second process could observe a half-acquired
    * lock, so exactly one process can hold it for a given tenant at a
-   * time. A bounded timeout throws `OutcomeJobTenantLockTimeoutError`
-   * rather than deadlocking forever against a lock abandoned by a
-   * crashed process.
+   * time.
+   *
+   * Rev70 correction: Brain found the transient mutex itself could be
+   * permanently abandoned if its holder process died after acquiring it
+   * (between the successful `linkSync` and the `finally` block's
+   * `unlinkSync(lockPath)`) - every future acquirer would only ever time
+   * out, never reclaim it. The lock file's content now records its
+   * holder's pid; on `EEXIST`, before backing off, this checks whether
+   * the recorded holder is still alive via `isProcessAlive`. This is
+   * *not* an unsafe blind deletion: reclaiming a dead holder's lock file
+   * never bypasses `linkSync`'s own atomicity - it only removes a stale
+   * directory entry so a *fresh* `linkSync` race can occur immediately
+   * after, and that fresh race is exactly what still arbitrates "who
+   * actually holds it now." If two processes both conclude the holder is
+   * dead and both reclaim, at most one of their subsequent `linkSync`
+   * calls can succeed; the other observes `EEXIST` again and re-evaluates
+   * the (now genuinely live) new holder, never proceeding under the
+   * illusion of exclusive ownership. A lock file whose content cannot be
+   * parsed for a live pid is never force-deleted - only a *provably dead*
+   * recorded holder triggers reclaim; anything else falls through to the
+   * ordinary backoff/timeout path, which still fails closed rather than
+   * deadlocking forever.
    */
   private withTenantJournalLock<T>(tenantId: TenantScope["tenantId"], criticalSection: () => T): T {
     const lockPath = this.tenantLockPathFor(tenantId);
     const tmpPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
-    writeFileSync(tmpPath, String(process.pid), "utf8");
+    writeFileSync(tmpPath, JSON.stringify({ pid: process.pid }), "utf8");
     const deadline = Date.now() + FileDurableOutcomeJobStore.TENANT_LOCK_TIMEOUT_MS;
     for (;;) {
       try {
@@ -138,6 +177,42 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
           }
           throw cause;
         }
+
+        let holderPid: number | undefined;
+        let lockAlreadyGone = false;
+        try {
+          const raw = JSON.parse(readFileSync(lockPath, "utf8")) as unknown;
+          if (
+            typeof raw === "object" &&
+            raw !== null &&
+            typeof (raw as Record<string, unknown>)["pid"] === "number"
+          ) {
+            holderPid = (raw as { pid: number })["pid"];
+          }
+        } catch (readCause) {
+          if ((readCause as NodeJS.ErrnoException).code === "ENOENT") {
+            lockAlreadyGone = true;
+          }
+          // Any other read/parse failure (corrupted content, or a
+          // genuinely unreadable file) cannot safely confirm the holder
+          // is dead - fall through to the ordinary backoff/timeout path
+          // below rather than force-deleting it.
+        }
+
+        if (lockAlreadyGone) {
+          continue; // released or reclaimed by someone else - retry linkSync immediately, no backoff
+        }
+        if (holderPid !== undefined && !this.isProcessAlive(holderPid)) {
+          try {
+            unlinkSync(lockPath);
+          } catch {
+            // lost the reclaim race to another process, or it was
+            // released normally in the meantime - either way, safe to
+            // retry linkSync fresh below.
+          }
+          continue;
+        }
+
         if (Date.now() > deadline) {
           try {
             unlinkSync(tmpPath);
@@ -166,9 +241,9 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
       try {
         unlinkSync(lockPath);
       } catch {
-        // best-effort: if this somehow fails, the lock would be
-        // permanently stuck, which the caller-visible timeout above
-        // bounds for the next acquirer rather than deadlocking forever.
+        // best-effort: if this somehow fails, the next acquirer's own
+        // liveness check (this process is still alive, so it won't
+        // reclaim) bounds it via the ordinary timeout instead.
       }
     }
   }

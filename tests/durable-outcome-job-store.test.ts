@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTenantScope } from "../src/domain/tenant-scope.js";
@@ -42,6 +43,13 @@ function creationLockPathFor(dir: string, tenantId: string, jobId: string): stri
   const tenantKey = Buffer.from(tenantId, "utf8").toString("base64url");
   const jobKey = Buffer.from(jobId, "utf8").toString("base64url");
   return join(dir, ".creation-locks", `${tenantKey}.${jobKey}.lock`);
+}
+
+// Mirrors FileDurableOutcomeJobStore's own (private) tenantLockPathFor
+// encoding, so a test can pre-inject an abandoned tenant journal lock.
+function tenantJournalLockPathFor(dir: string, tenantId: string): string {
+  const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
+  return join(dir, ".tenant-locks", `${safeKey}.lock`);
 }
 
 function admittedWiredJobs() {
@@ -439,3 +447,35 @@ test("Rev68 F2 cross-customer lock-winner witness: a losing writer whose jobId c
   }
 });
 
+
+test("Rev70 crash-recoverable tenant journal lock: an abandoned lock left by a dead process is safely reclaimed (liveness-gated, not a blind deletion), so a subsequent operation completes well within the lock timeout instead of hanging until it expires", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableOutcomeJobStore(dir);
+    const { fixture, jobs } = admittedWiredJobs();
+    const job = jobs[0]!;
+
+    // Obtain a pid guaranteed to be dead: spawn a trivial child process
+    // and wait synchronously for it to exit before reading its pid.
+    const dead = spawnSync(process.execPath, ["-e", ""]);
+    const deadPid = dead.pid;
+    assert.ok(typeof deadPid === "number" && deadPid > 0);
+
+    const lockPath = tenantJournalLockPathFor(dir, fixture.tenantScope.tenantId);
+    mkdirSync(join(dir, ".tenant-locks"), { recursive: true });
+    writeFileSync(lockPath, JSON.stringify({ pid: deadPid }), "utf8");
+
+    const start = Date.now();
+    const result = store.putIfAbsent(job);
+    const elapsedMs = Date.now() - start;
+
+    assert.equal(result.created, true);
+    // The lock's own configured timeout is 5000ms - a successful reclaim
+    // completes almost immediately; only a regression that fell through
+    // to the timeout path instead of reclaiming would take anywhere
+    // close to that long.
+    assert.ok(elapsedMs < 2000, `expected fast reclaim of the abandoned lock, took ${elapsedMs}ms`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

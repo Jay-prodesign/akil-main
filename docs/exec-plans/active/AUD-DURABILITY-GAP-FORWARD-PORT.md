@@ -54,6 +54,26 @@ Brain independently reviewed PR #97's exact head `e8eabf72eab0b608c1a4d727774c02
 
 **1732/1732 tests pass** (1731 prior + 1 new), strict typecheck clean, clean `dist/` rebuild, zero new runtime dependency.
 
+## Rev70 correction — crash-recoverable tenant lock + creator-vs-reconciler witness
+
+Brain independently reviewed PR #97's exact head `8f803946ac1570288f57db8aad395644b4c15fdd` and found two remaining gaps:
+
+1. **Tenant-lock crash-recoverability**: the new `.tenant-locks` transient mutex could be permanently abandoned if its holder process died after acquiring it (between the successful `linkSync` and the `finally` block's `unlinkSync`). Every future acquirer would only ever time out, never reclaim it.
+2. **Missing creator-vs-reconciler physical witness**: Rev69's own instruction already asked for this specific scenario, and only the multi-reconciler variant (several readers racing a *pre-planted static* orphaned lock) had been delivered — not a witness where the *true, live* creator's own in-flight append races concurrently against reconciler reads.
+
+**Fix 1 — crash-recoverable lock**: the lock file's content now records its holder's pid (`JSON.stringify({ pid: process.pid })`). On `EEXIST`, before backing off, `withTenantJournalLock` checks whether the recorded holder is still alive via a new `isProcessAlive` helper (`process.kill(pid, 0)` — signal `0` sends nothing, it only probes existence; `ESRCH` means dead, anything else including `EPERM` is treated as alive, so the only possible error direction is a missed reclaim, never an unsafe one). This is not a blind/unconditional deletion: reclaiming a dead holder's lock file never bypasses `linkSync`'s own atomicity — removing the stale entry only lets a *fresh* `linkSync` race occur immediately after, and that fresh race is still the sole arbiter of "who holds it now." If two processes both conclude the holder is dead and both reclaim, at most one of their subsequent `linkSync` calls can succeed; the loser observes `EEXIST` again against the new (genuinely live) holder. A lock file whose content can't be parsed for a live pid is never force-deleted — it falls through to the ordinary backoff/timeout path instead.
+
+**Fix 2 — creator-vs-reconciler witness**: new `tests/durable-outcome-job-store-creator-vs-reconciler-race.test.ts`, extending `outcome-job-race-worker.ts` with `get`/`list` modes. Starting from a genuinely clean store (no pre-existing lock), 3 real `putIfAbsent` callers (exactly one wins the creation lock and becomes the true creator) race alongside 12 pure `get`/`list` reconciler reads, all synchronized via the same ready/go-file pattern, across 6 independent trials per test run. The assertion reads the **raw physical jsonl file directly** and requires exactly one line for the jobId in every trial.
+
+**Adversarial test for Fix 1**: `durable-outcome-job-store.test.ts`'s new "Rev70 crash-recoverable tenant journal lock" test spawns a trivial child process via `spawnSync` and waits for it to exit (obtaining a pid guaranteed dead), pre-writes a lock file recording that dead pid, then asserts `putIfAbsent` completes in well under the lock's 5000ms timeout (proving genuine reclaim, not a lucky race against the timeout itself).
+
+**Sanity-check disclosure**:
+- Fix 1: reverted the liveness check to always report "alive" and reran the new test — it correctly failed after the full 5035ms timeout with `OutcomeJobTenantLockTimeoutError`. Restored and reconfirmed the fix completes near-instantly.
+- Fix 2: this test went through two iterations. The first version (8 workers, single trial) only caught a disabled-fix regression 1/5 times — too weak to serve as convincing proof, since hitting the live creator's exact append window is a narrower race than healing a static pre-planted artifact. Strengthened to 15 workers (3 creators + 12 reconcilers) across 6 trials per run; re-tested against the disabled fix and it now fails on 3/4 runs (compounding per-trial probability across 6 trials). Restored the fix and reconfirmed 3/3 additional full runs pass reliably.
+- The "corrupted/unparseable lock content is never force-deleted" sub-property of Fix 1 was verified by direct code inspection only (the `holderPid !== undefined` guard), not by a dedicated test — proving the negative would require either waiting out the full 5-second timeout in the test suite or adding test-only configurability to the lock timeout, neither of which seemed worth the cost for a property the code structure already makes straightforward to verify by reading it.
+
+**1734/1734 tests pass** (1732 prior + 2 new), strict typecheck clean, clean `dist/` rebuild, zero new runtime dependency.
+
 ## Scope and topology
 
 Branch cut from PR #96's exact head (the current forward lineage tip after the Rev66 audit closed). No `MAIN` mutation, no existing PR topology change, no product/roadmap scope change. Customer-isolation is a HIGH/PROTECTED surface per Rev68 F2's own framing, so this correction is `IMPLEMENTED / SELF-VALIDATED` only — Claude's authority ends here; PASS/VERIFIED/SAFE_MERGE can only be declared by Brain or the Founder. `HOLD_MERGE` / `NOT SAFE_MERGE`. Founder gate: NONE.
