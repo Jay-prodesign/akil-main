@@ -77,12 +77,14 @@ function reconciledInsight(status: "CURRENT" | "STALE" | "CONFLICTING") {
     const snapshot = buildCrossDomainIntelligenceSnapshot({
       tenantScope,
       projectRef: "project-1",
+      customerId: customer.customerId,
       asOf,
       freshnessThresholdMs: 60_000,
       insights: [
         {
           tenantScope,
           projectRef: "project-1",
+          customerId: customer.customerId,
           domain: "SALES",
           subjectRef: "subject-1",
           kind: "OBSERVED",
@@ -98,12 +100,14 @@ function reconciledInsight(status: "CURRENT" | "STALE" | "CONFLICTING") {
     const snapshot = buildCrossDomainIntelligenceSnapshot({
       tenantScope,
       projectRef: "project-1",
+      customerId: customer.customerId,
       asOf,
       freshnessThresholdMs: 60_000,
       insights: [
         {
           tenantScope,
           projectRef: "project-1",
+          customerId: customer.customerId,
           domain: "SALES",
           subjectRef: "subject-2",
           kind: "OBSERVED",
@@ -114,6 +118,7 @@ function reconciledInsight(status: "CURRENT" | "STALE" | "CONFLICTING") {
         {
           tenantScope,
           projectRef: "project-1",
+          customerId: customer.customerId,
           domain: "DELIVERY",
           subjectRef: "subject-2",
           kind: "OBSERVED",
@@ -128,12 +133,14 @@ function reconciledInsight(status: "CURRENT" | "STALE" | "CONFLICTING") {
   const snapshot = buildCrossDomainIntelligenceSnapshot({
     tenantScope,
     projectRef: "project-1",
+    customerId: customer.customerId,
     asOf,
     freshnessThresholdMs: 1,
     insights: [
       {
         tenantScope,
         projectRef: "project-1",
+        customerId: customer.customerId,
         domain: "SALES",
         subjectRef: "subject-3",
         kind: "OBSERVED",

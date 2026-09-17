@@ -8,6 +8,7 @@ import {
 } from "../src/domain/cross-domain-intelligence.js";
 
 const tenantScope = createTenantScope("akilta-tenant-1");
+const customerId = "customer-1";
 const projectRef = "project-alpha";
 const asOf = "2026-09-05T12:00:00.000Z";
 
@@ -15,6 +16,7 @@ function insight(overrides: Partial<IntelligenceInsight> = {}): IntelligenceInsi
   return {
     tenantScope,
     projectRef,
+    customerId,
     domain: "DELIVERY",
     subjectRef: "project-alpha-on-track",
     kind: "OBSERVED",
@@ -29,6 +31,7 @@ test("F1: a single fresh insight resolves CURRENT with its value as the agreed v
   const snapshot = buildCrossDomainIntelligenceSnapshot({
     tenantScope,
     projectRef,
+    customerId,
     insights: [insight()],
     freshnessThresholdMs: 30 * 60 * 1000,
     asOf,
@@ -43,6 +46,7 @@ test("F2: two fresh insights from different domains agreeing on value resolve CU
   const snapshot = buildCrossDomainIntelligenceSnapshot({
     tenantScope,
     projectRef,
+    customerId,
     insights: [
       insight({ domain: "DELIVERY", value: "ON_TRACK" }),
       insight({ domain: "OPERATIONS", value: "ON_TRACK", sourceRef: "ops-attention:project-alpha" }),
@@ -60,6 +64,7 @@ test("F3: two fresh insights disagreeing on value resolve CONFLICTING with no ag
   const snapshot = buildCrossDomainIntelligenceSnapshot({
     tenantScope,
     projectRef,
+    customerId,
     insights: [
       insight({ domain: "DELIVERY", value: "ON_TRACK" }),
       insight({ domain: "OPERATIONS", value: "AT_RISK", sourceRef: "ops-attention:project-alpha" }),
@@ -77,6 +82,7 @@ test("F4: an insight older than the freshness threshold resolves STALE with no a
   const snapshot = buildCrossDomainIntelligenceSnapshot({
     tenantScope,
     projectRef,
+    customerId,
     insights: [insight({ capturedAt: "2026-09-05T09:00:00.000Z" })],
     freshnessThresholdMs: 30 * 60 * 1000,
     asOf,
@@ -90,6 +96,7 @@ test("F5: a stale insight plus a fresh agreeing insight still resolves CURRENT (
   const snapshot = buildCrossDomainIntelligenceSnapshot({
     tenantScope,
     projectRef,
+    customerId,
     insights: [
       insight({ domain: "DELIVERY", capturedAt: "2026-09-05T09:00:00.000Z" }),
       insight({ domain: "OPERATIONS", capturedAt: "2026-09-05T11:58:00.000Z", sourceRef: "ops-attention:project-alpha" }),
@@ -107,6 +114,7 @@ test("F6: an insight from a mismatched tenantScope is rejected, not silently inc
   const snapshot = buildCrossDomainIntelligenceSnapshot({
     tenantScope,
     projectRef,
+    customerId,
     insights: [leaking],
     freshnessThresholdMs: 30 * 60 * 1000,
     asOf,
@@ -114,7 +122,7 @@ test("F6: an insight from a mismatched tenantScope is rejected, not silently inc
   assert.equal(snapshot.reconciled.length, 0);
   assert.equal(snapshot.rejectedInsights.length, 1);
   assert.equal(snapshot.rejectedInsights[0]?.insight, leaking);
-  assert.match(snapshot.rejectedInsights[0]?.reason ?? "", /tenantScope\/projectRef does not match/);
+  assert.match(snapshot.rejectedInsights[0]?.reason ?? "", /tenantScope\/customerId\/projectRef does not match/);
 });
 
 test("F7: an insight from a mismatched projectRef is rejected, not silently included", () => {
@@ -122,13 +130,36 @@ test("F7: an insight from a mismatched projectRef is rejected, not silently incl
   const snapshot = buildCrossDomainIntelligenceSnapshot({
     tenantScope,
     projectRef,
+    customerId,
     insights: [leaking],
     freshnessThresholdMs: 30 * 60 * 1000,
     asOf,
   });
   assert.equal(snapshot.reconciled.length, 0);
   assert.equal(snapshot.rejectedInsights.length, 1);
-  assert.match(snapshot.rejectedInsights[0]?.reason ?? "", /tenantScope\/projectRef does not match/);
+  assert.match(snapshot.rejectedInsights[0]?.reason ?? "", /tenantScope\/customerId\/projectRef does not match/);
+});
+
+test("CXP-001Q (adversarial): an insight from a different customer within the SAME tenant is rejected, even when projectRef strings collide", () => {
+  // Deliberately reuses the SAME tenantScope and the SAME projectRef
+  // string from a different customer, so this case is caught ONLY by a
+  // customerId check - a tenantScope/projectRef check alone would not
+  // distinguish it (projectRef is a bare opaque string with no Project
+  // entity to derive uniqueness from, and project.ts itself does not
+  // enforce projectId global uniqueness across customers).
+  const leaking = insight({ customerId: "customer-2" });
+  const snapshot = buildCrossDomainIntelligenceSnapshot({
+    tenantScope,
+    projectRef,
+    customerId,
+    insights: [leaking],
+    freshnessThresholdMs: 30 * 60 * 1000,
+    asOf,
+  });
+  assert.equal(snapshot.reconciled.length, 0);
+  assert.equal(snapshot.rejectedInsights.length, 1);
+  assert.equal(snapshot.rejectedInsights[0]?.insight, leaking);
+  assert.match(snapshot.rejectedInsights[0]?.reason ?? "", /tenantScope\/customerId\/projectRef does not match/);
 });
 
 test("F8: an insight with an unrecognized domain is rejected, not silently included", () => {
@@ -136,6 +167,7 @@ test("F8: an insight with an unrecognized domain is rejected, not silently inclu
   const snapshot = buildCrossDomainIntelligenceSnapshot({
     tenantScope,
     projectRef,
+    customerId,
     insights: [bogus],
     freshnessThresholdMs: 30 * 60 * 1000,
     asOf,
@@ -150,6 +182,7 @@ test("F9: an insight with an invalid capturedAt timestamp is rejected, not silen
   const snapshot = buildCrossDomainIntelligenceSnapshot({
     tenantScope,
     projectRef,
+    customerId,
     insights: [malformed],
     freshnessThresholdMs: 30 * 60 * 1000,
     asOf,
@@ -163,6 +196,7 @@ test("F10: distinct subjectRefs are reconciled independently of one another", ()
   const snapshot = buildCrossDomainIntelligenceSnapshot({
     tenantScope,
     projectRef,
+    customerId,
     insights: [
       insight({ subjectRef: "subject-a", value: "X" }),
       insight({ subjectRef: "subject-b", value: "Y", sourceRef: "other" }),
@@ -182,6 +216,7 @@ test("F11: OBSERVED and DERIVED kinds are preserved verbatim on every retained i
   const snapshot = buildCrossDomainIntelligenceSnapshot({
     tenantScope,
     projectRef,
+    customerId,
     insights: [observed, derived],
     freshnessThresholdMs: 30 * 60 * 1000,
     asOf,
@@ -194,6 +229,7 @@ test("F12: an empty insights list resolves an empty snapshot rather than throwin
   const snapshot = buildCrossDomainIntelligenceSnapshot({
     tenantScope,
     projectRef,
+    customerId,
     insights: [],
     freshnessThresholdMs: 30 * 60 * 1000,
     asOf,
@@ -208,6 +244,7 @@ test("F13: an invalid asOf timestamp fails closed", () => {
       buildCrossDomainIntelligenceSnapshot({
         tenantScope,
         projectRef,
+        customerId,
         insights: [insight()],
         freshnessThresholdMs: 1000,
         asOf: "not-a-date",
@@ -222,6 +259,7 @@ test("F14: a negative freshnessThresholdMs fails closed", () => {
       buildCrossDomainIntelligenceSnapshot({
         tenantScope,
         projectRef,
+        customerId,
         insights: [insight()],
         freshnessThresholdMs: -1,
         asOf,
@@ -235,6 +273,7 @@ test("F15: an empty/whitespace-only projectRef fails closed", () => {
     () =>
       buildCrossDomainIntelligenceSnapshot({
         tenantScope,
+        customerId,
         projectRef: "   ",
         insights: [],
         freshnessThresholdMs: 1000,
@@ -249,6 +288,7 @@ test("F16 (Rev49 F1): an insight with an empty sourceRef is rejected, not silent
   const snapshot = buildCrossDomainIntelligenceSnapshot({
     tenantScope,
     projectRef,
+    customerId,
     insights: [noSource],
     freshnessThresholdMs: 30 * 60 * 1000,
     asOf,
@@ -264,6 +304,7 @@ test("F17 (Rev49 F1): an insight with a whitespace-only sourceRef is rejected", 
   const snapshot = buildCrossDomainIntelligenceSnapshot({
     tenantScope,
     projectRef,
+    customerId,
     insights: [whitespaceSource],
     freshnessThresholdMs: 30 * 60 * 1000,
     asOf,
@@ -278,6 +319,7 @@ test("F18 (Rev49 F2): an insight captured in the future relative to asOf is reje
   const snapshot = buildCrossDomainIntelligenceSnapshot({
     tenantScope,
     projectRef,
+    customerId,
     insights: [futureInsight],
     freshnessThresholdMs: 1000,
     asOf,
@@ -292,6 +334,7 @@ test("F19 (Rev49 F2): a capturedAt exactly equal to asOf is accepted (boundary: 
   const snapshot = buildCrossDomainIntelligenceSnapshot({
     tenantScope,
     projectRef,
+    customerId,
     insights: [insight({ capturedAt: asOf })],
     freshnessThresholdMs: 0,
     asOf,
