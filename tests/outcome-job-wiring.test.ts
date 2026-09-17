@@ -326,7 +326,8 @@ test("T11: wired OutcomeJob identifiers remain traceable to their exact Project/
   });
 
   for (const job of jobs) {
-    assert.ok(job.jobId.startsWith(`${plan.customerId}:${plan.projectId}:${plan.planId}:v${plan.version}:`));
+    const decoded = JSON.parse(job.jobId as string) as [string, string, string, number, string];
+    assert.deepEqual(decoded.slice(0, 4), [plan.customerId, plan.projectId, plan.planId, plan.version]);
     assert.ok(job.jobId.includes(job.jobFamily));
   }
 });
