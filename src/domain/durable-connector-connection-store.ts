@@ -467,10 +467,30 @@ export class FileDurableConnectorConnectionStore implements DurableConnectorConn
     }
   }
 
+  /**
+   * Bounded hardening correction: `connectionBindingId` is caller-supplied
+   * and validated only as a non-empty, whitespace-trimmed string (see
+   * `createConnectionBinding`'s `requireNonEmptyString`) - a legal value
+   * such as `"__proto__"` or `"constructor"` is never rejected there. A
+   * plain `{}`-literal dictionary indexed by such a key resolves reads
+   * through the object's inherited `Object.prototype` chain instead of
+   * signaling "not found" (`records["__proto__"]` is `Object.prototype`
+   * itself, never `undefined`), and a bracket *write* of `"__proto__"`
+   * invokes `Object.prototype`'s special `__proto__` accessor setter,
+   * silently reassigning the dictionary object's own prototype instead of
+   * adding a normal entry - corrupting the in-memory record and any
+   * subsequent `JSON.stringify`/iteration over it. `Object.create(null)`
+   * dictionaries have no inherited properties or accessors at all, so
+   * every key - including `"__proto__"`/`"constructor"`/`"toString"` -
+   * behaves as an ordinary own data property; `JSON.stringify`/
+   * `JSON.parse`/`Object.entries` all operate on own enumerable
+   * properties regardless of prototype, so this changes no observable
+   * serialization behavior for any ordinary key.
+   */
   private readAll(tenantId: TenantScope["tenantId"]): StoredRecordsFile {
     const filePath = this.filePathFor(tenantId);
     if (!existsSync(filePath)) {
-      return {};
+      return Object.create(null) as StoredRecordsFile;
     }
     const content = readFileSync(filePath, "utf8");
     let parsed: unknown;
@@ -485,7 +505,7 @@ export class FileDurableConnectorConnectionStore implements DurableConnectorConn
         "file content must be a JSON object keyed by connectionBindingId, not an array or primitive",
       );
     }
-    const result: StoredRecordsFile = {};
+    const result: StoredRecordsFile = Object.create(null) as StoredRecordsFile;
     for (const [key, rawRecord] of Object.entries(parsed as Record<string, unknown>)) {
       result[key] = validatePersistedConnectorConnection(rawRecord, tenantId, key, filePath);
     }

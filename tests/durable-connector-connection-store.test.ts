@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createProjectOwnershipRef, type ProjectOwnershipRef } from "../src/domain/project-ownership.js";
@@ -532,6 +532,88 @@ test("M15 (positive replay): legitimate persisted state with every field populat
     const storeB = new FileDurableConnectorConnectionStore(dir);
     const reloaded = storeB.get(requirement.ownership.tenantId, instance.binding.connectionBindingId);
     assert.deepEqual(reloaded?.instance, instance);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("M16 (adversarial, prototype-shaped key): a connectionBindingId of \"__proto__\" saves, gets, and lists correctly rather than being misread as an existing record via the inherited prototype chain", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableConnectorConnectionStore(dir);
+    const descriptor = githubDescriptor();
+    const requirement = requirementFor(descriptor, ownership());
+    const instance = requestConnectorConnection({
+      requirement,
+      connectorDescriptor: descriptor,
+      connectionBindingId: "__proto__",
+      workspaceRef: "workspace-1",
+      integrationInstanceRef: "instance-1",
+      delegatedScope: [],
+      authMode: "OAUTH2",
+    });
+
+    // First save must be treated as a genuine create (version 1), never as a
+    // spurious version conflict against Object.prototype resolved through a
+    // naive `{}`-literal dictionary lookup.
+    const stored = store.save(instance);
+    assert.equal(stored.version, 1);
+
+    const fetched = store.get(requirement.ownership.tenantId, instance.binding.connectionBindingId);
+    assert.deepEqual(fetched?.instance, instance);
+
+    const listed = store.list(requirement.ownership.tenantId);
+    assert.equal(listed.length, 1);
+    assert.deepEqual(listed[0]?.instance, instance);
+
+    // The persisted file must be a genuine, uncorrupted own JSON key - not a
+    // reassigned object prototype (which would vanish from JSON.stringify
+    // output entirely and leave the file's top-level object as `{}`).
+    const raw = JSON.parse(readFileSync(tenantFilePath(dir, requirement.ownership.tenantId), "utf8"));
+    assert.ok(Object.prototype.hasOwnProperty.call(raw, "__proto__"));
+    assert.equal(raw["__proto__"].version, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("M17 (adversarial, prototype-shaped key): a connectionBindingId of \"constructor\" coexists correctly alongside an ordinary key without cross-contamination", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableConnectorConnectionStore(dir);
+    const descriptor = githubDescriptor();
+    const requirement = requirementFor(descriptor, ownership());
+
+    const ordinaryInstance = requestConnectorConnection({
+      requirement,
+      connectorDescriptor: descriptor,
+      connectionBindingId: "bind-ordinary",
+      workspaceRef: "workspace-1",
+      integrationInstanceRef: "instance-1",
+      delegatedScope: [],
+      authMode: "OAUTH2",
+    });
+    store.save(ordinaryInstance);
+
+    const constructorInstance = requestConnectorConnection({
+      requirement,
+      connectorDescriptor: descriptor,
+      connectionBindingId: "constructor",
+      workspaceRef: "workspace-2",
+      integrationInstanceRef: "instance-2",
+      delegatedScope: [],
+      authMode: "OAUTH2",
+    });
+    const stored = store.save(constructorInstance);
+    assert.equal(stored.version, 1);
+
+    const fetchedOrdinary = store.get(requirement.ownership.tenantId, ordinaryInstance.binding.connectionBindingId);
+    const fetchedConstructor = store.get(requirement.ownership.tenantId, constructorInstance.binding.connectionBindingId);
+    assert.deepEqual(fetchedOrdinary?.instance, ordinaryInstance);
+    assert.deepEqual(fetchedConstructor?.instance, constructorInstance);
+
+    const listed = store.list(requirement.ownership.tenantId);
+    assert.equal(listed.length, 2);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
