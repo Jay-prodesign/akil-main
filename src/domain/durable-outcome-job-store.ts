@@ -100,9 +100,32 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
     return join(this.baseDir, ".tenant-locks");
   }
 
-  private tenantLockPathFor(tenantId: TenantScope["tenantId"]): string {
+  private tenantLockPathForEpoch(tenantId: TenantScope["tenantId"], epoch: number): string {
     const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
-    return join(this.tenantLockDir(), `${safeKey}.lock`);
+    return join(this.tenantLockDir(), `${safeKey}.epoch-${epoch}.lock`);
+  }
+
+  /**
+   * Rev72: the highest tenant-lock epoch number currently present on disk
+   * for this tenant, or `0` if none exist yet - used only as a starting
+   * point for a fresh acquisition attempt (see `withTenantJournalLock`),
+   * never as a basis for deleting anything.
+   */
+  private currentTenantLockEpoch(tenantId: TenantScope["tenantId"]): number {
+    const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
+    const prefix = `${safeKey}.epoch-`;
+    const suffix = ".lock";
+    let highest = 0;
+    for (const entry of readdirSync(this.tenantLockDir())) {
+      if (!entry.startsWith(prefix) || !entry.endsWith(suffix)) {
+        continue; // a different tenant's lock, or leftover .tmp litter
+      }
+      const epoch = Number(entry.slice(prefix.length, entry.length - suffix.length));
+      if (Number.isInteger(epoch) && epoch > highest) {
+        highest = epoch;
+      }
+    }
+    return highest;
   }
 
   /**
@@ -132,118 +155,160 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
    * distinct from `.creation-locks`) - this lock arbitrates "who may
    * physically write to this tenant's jsonl journal right now", a
    * separate concern from the per-jobId creation lock's "who created this
-   * jobId first". `linkSync(tmpPath, lockPath)` either creates the
-   * destination directory entry or fails with `EEXIST`, atomically, with
-   * no window in which a second process could observe a half-acquired
-   * lock, so exactly one process can hold it for a given tenant at a
-   * time.
+   * jobId first".
    *
-   * Rev70 correction: Brain found the transient mutex itself could be
-   * permanently abandoned if its holder process died after acquiring it
-   * (between the successful `linkSync` and the `finally` block's
-   * `unlinkSync(lockPath)`) - every future acquirer would only ever time
-   * out, never reclaim it. The lock file's content now records its
-   * holder's pid; on `EEXIST`, before backing off, this checks whether
-   * the recorded holder is still alive via `isProcessAlive`. This is
-   * *not* an unsafe blind deletion: reclaiming a dead holder's lock file
-   * never bypasses `linkSync`'s own atomicity - it only removes a stale
-   * directory entry so a *fresh* `linkSync` race can occur immediately
-   * after, and that fresh race is exactly what still arbitrates "who
-   * actually holds it now." If two processes both conclude the holder is
-   * dead and both reclaim, at most one of their subsequent `linkSync`
-   * calls can succeed; the other observes `EEXIST` again and re-evaluates
-   * the (now genuinely live) new holder, never proceeding under the
-   * illusion of exclusive ownership. A lock file whose content cannot be
-   * parsed for a live pid is never force-deleted - only a *provably dead*
-   * recorded holder triggers reclaim; anything else falls through to the
-   * ordinary backoff/timeout path, which still fails closed rather than
-   * deadlocking forever.
+   * Rev70 attempted a crash-recoverable reclaim by having a stuck waiter
+   * read the current lock file's recorded holder pid, confirm it dead via
+   * `isProcessAlive`, then `unlinkSync` it before retrying `linkSync`.
+   * Rev72 found this unsafe: between that read and that `unlinkSync`,
+   * another process could have *already* reclaimed the same dead lock and
+   * installed its own live replacement at the identical path - the first
+   * process's `unlinkSync(lockPath)` would then delete that *replacement*
+   * owner's live lock (an ABA race: same path, different underlying
+   * lock), letting a third process acquire it too, so two processes could
+   * end up inside the critical section simultaneously. No "read, confirm,
+   * then delete-by-path" sequence can ever be made safe against this
+   * without a true compare-and-delete primitive, which Node's `fs` API
+   * does not provide.
+   *
+   * Rev72 correction: reclaim now never deletes anything. Instead of one
+   * mutable lock file per tenant, each acquisition attempt targets a
+   * strictly increasing per-tenant *epoch* number
+   * (`tenantLockPathForEpoch`). `linkSync` for a given epoch is still the
+   * sole, atomic arbiter of who holds *that exact epoch* - unchanged from
+   * before. What changes is how a waiter responds to a dead holder: it
+   * never touches the dead epoch's file at all. It simply advances to the
+   * *next* epoch number and attempts `linkSync` there instead - a path
+   * that has never existed before, so creating it is always unconditionally
+   * safe. Because epoch numbers only ever increase and a given epoch
+   * number's file is (a) created by at most one process, ever (`linkSync`
+   * atomicity), and (b) only ever deleted by that same process releasing
+   * its own lock, there is no path on which two processes can ever both
+   * believe they hold the same epoch, and no path on which reclaiming a
+   * dead epoch can disturb a live one - a live epoch is simply never a
+   * candidate for reclaim, only for advancing past.
+   *
+   * Critically, a fresh acquirer never attempts to create a new epoch
+   * number *speculatively* - doing so would let it skip straight past a
+   * currently-live epoch (a higher, never-before-tried number is always
+   * free to `linkSync` regardless of whether some lower epoch is still
+   * actively held), silently destroying mutual exclusion. Every attempt
+   * therefore first determines the CURRENT highest epoch's own status: if
+   * it is alive, this call waits/backs off exactly as it would for the
+   * original single-lock-file design; only once the current highest
+   * epoch is confirmed dead (or found already released) does this call
+   * ever attempt to create a new, higher one.
+   *
+   * A dead process's abandoned epoch file is therefore never removed by
+   * anyone; it is a small, bounded, disclosed accumulation (this store
+   * already accepts the identical characteristic for
+   * `creationLockPathFor`'s per-jobId locks, which are also never
+   * released) rather than a correctness risk.
    */
-  private withTenantJournalLock<T>(tenantId: TenantScope["tenantId"], criticalSection: () => T): T {
-    const lockPath = this.tenantLockPathFor(tenantId);
-    const tmpPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
+  private tryAcquireTenantLockEpoch(
+    tenantId: TenantScope["tenantId"],
+    epoch: number,
+  ): "acquired" | "taken" {
+    const candidatePath = this.tenantLockPathForEpoch(tenantId, epoch);
+    const tmpPath = `${candidatePath}.${process.pid}.${randomUUID()}.tmp`;
     writeFileSync(tmpPath, JSON.stringify({ pid: process.pid }), "utf8");
-    const deadline = Date.now() + FileDurableOutcomeJobStore.TENANT_LOCK_TIMEOUT_MS;
-    for (;;) {
+    try {
+      linkSync(tmpPath, candidatePath);
+      return "acquired";
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw cause;
+      }
+      return "taken";
+    } finally {
       try {
-        linkSync(tmpPath, lockPath);
-        break;
-      } catch (cause) {
-        if ((cause as NodeJS.ErrnoException).code !== "EEXIST") {
-          try {
-            unlinkSync(tmpPath);
-          } catch {
-            // best-effort cleanup only
-          }
-          throw cause;
-        }
-
-        let holderPid: number | undefined;
-        let lockAlreadyGone = false;
-        try {
-          const raw = JSON.parse(readFileSync(lockPath, "utf8")) as unknown;
-          if (
-            typeof raw === "object" &&
-            raw !== null &&
-            typeof (raw as Record<string, unknown>)["pid"] === "number"
-          ) {
-            holderPid = (raw as { pid: number })["pid"];
-          }
-        } catch (readCause) {
-          if ((readCause as NodeJS.ErrnoException).code === "ENOENT") {
-            lockAlreadyGone = true;
-          }
-          // Any other read/parse failure (corrupted content, or a
-          // genuinely unreadable file) cannot safely confirm the holder
-          // is dead - fall through to the ordinary backoff/timeout path
-          // below rather than force-deleting it.
-        }
-
-        if (lockAlreadyGone) {
-          continue; // released or reclaimed by someone else - retry linkSync immediately, no backoff
-        }
-        if (holderPid !== undefined && !this.isProcessAlive(holderPid)) {
-          try {
-            unlinkSync(lockPath);
-          } catch {
-            // lost the reclaim race to another process, or it was
-            // released normally in the meantime - either way, safe to
-            // retry linkSync fresh below.
-          }
-          continue;
-        }
-
-        if (Date.now() > deadline) {
-          try {
-            unlinkSync(tmpPath);
-          } catch {
-            // best-effort cleanup only
-          }
-          throw new OutcomeJobTenantLockTimeoutError(tenantId);
-        }
-        Atomics.wait(
-          new Int32Array(new SharedArrayBuffer(4)),
-          0,
-          0,
-          FileDurableOutcomeJobStore.TENANT_LOCK_RETRY_BACKOFF_MS,
-        );
+        unlinkSync(tmpPath);
+      } catch {
+        // best-effort cleanup only - a successful linkSync's hard-linked
+        // copy already carries its own independent content, so a failure
+        // to remove the private temp file cannot corrupt it.
       }
     }
-    try {
-      unlinkSync(tmpPath);
-    } catch {
-      // best-effort cleanup only - lockPath (the hard-linked copy) is what
-      // actually arbitrates ownership from here on.
+  }
+
+  private withTenantJournalLock<T>(tenantId: TenantScope["tenantId"], criticalSection: () => T): T {
+    const deadline = Date.now() + FileDurableOutcomeJobStore.TENANT_LOCK_TIMEOUT_MS;
+    let acquiredEpoch: number | undefined;
+    for (;;) {
+      const highest = this.currentTenantLockEpoch(tenantId);
+
+      if (highest === 0) {
+        // No lock has ever existed for this tenant (or every prior epoch
+        // was cleanly released back down to none) - straightforward
+        // first acquisition at epoch 1.
+        if (this.tryAcquireTenantLockEpoch(tenantId, 1) === "acquired") {
+          acquiredEpoch = 1;
+          break;
+        }
+        continue; // someone else just claimed epoch 1 first - rescan
+      }
+
+      const highestPath = this.tenantLockPathForEpoch(tenantId, highest);
+      let holderPid: number | undefined;
+      let lockAlreadyGone = false;
+      try {
+        const raw = JSON.parse(readFileSync(highestPath, "utf8")) as unknown;
+        if (
+          typeof raw === "object" &&
+          raw !== null &&
+          typeof (raw as Record<string, unknown>)["pid"] === "number"
+        ) {
+          holderPid = (raw as { pid: number })["pid"];
+        }
+      } catch (readCause) {
+        if ((readCause as NodeJS.ErrnoException).code === "ENOENT") {
+          lockAlreadyGone = true;
+        }
+        // Any other read/parse failure (corrupted content, or a
+        // genuinely unreadable file) cannot safely confirm the holder is
+        // dead - treated as still-contended below, never force-advanced
+        // past.
+      }
+
+      if (lockAlreadyGone) {
+        continue; // released between our scan and this read - rescan immediately, no backoff
+      }
+      if (holderPid !== undefined && !this.isProcessAlive(holderPid)) {
+        // The current highest epoch's holder is provably dead - safe to
+        // advance past it. This never touches epoch `highest`'s own
+        // file; it only ever creates a brand-new one at `highest + 1`.
+        if (this.tryAcquireTenantLockEpoch(tenantId, highest + 1) === "acquired") {
+          acquiredEpoch = highest + 1;
+          break;
+        }
+        continue; // someone else already advanced past it first - rescan
+      }
+
+      // The current highest epoch is genuinely alive (or its status
+      // could not be confirmed dead) - this is real contention, not a
+      // crash artifact. Wait and re-evaluate, exactly as a normal mutex
+      // would; never attempt a higher epoch while this one might still
+      // be a live critical section.
+      if (Date.now() > deadline) {
+        throw new OutcomeJobTenantLockTimeoutError(tenantId);
+      }
+      Atomics.wait(
+        new Int32Array(new SharedArrayBuffer(4)),
+        0,
+        0,
+        FileDurableOutcomeJobStore.TENANT_LOCK_RETRY_BACKOFF_MS,
+      );
     }
     try {
       return criticalSection();
     } finally {
       try {
-        unlinkSync(lockPath);
+        unlinkSync(this.tenantLockPathForEpoch(tenantId, acquiredEpoch));
       } catch {
         // best-effort: if this somehow fails, the next acquirer's own
-        // liveness check (this process is still alive, so it won't
-        // reclaim) bounds it via the ordinary timeout instead.
+        // liveness check (this process is still alive while running this
+        // very `finally` block) bounds it via the ordinary wait/timeout
+        // path above rather than an unsafe reclaim.
       }
     }
   }

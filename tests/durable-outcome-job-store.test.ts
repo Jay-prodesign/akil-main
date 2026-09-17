@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, appendFileSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,7 @@ import {
   InvalidDurableOutcomeJobStoreError,
   CorruptedOutcomeJobLineError,
   CorruptedOutcomeJobLockError,
+  OutcomeJobTenantLockTimeoutError,
   persistWiredOutcomeJobs,
 } from "../src/domain/durable-outcome-job-store.js";
 import { buildWebsiteBuildV1Fixture } from "../src/fixtures/website-build-v1.js";
@@ -45,11 +46,12 @@ function creationLockPathFor(dir: string, tenantId: string, jobId: string): stri
   return join(dir, ".creation-locks", `${tenantKey}.${jobKey}.lock`);
 }
 
-// Mirrors FileDurableOutcomeJobStore's own (private) tenantLockPathFor
-// encoding, so a test can pre-inject an abandoned tenant journal lock.
-function tenantJournalLockPathFor(dir: string, tenantId: string): string {
+// Mirrors FileDurableOutcomeJobStore's own (private)
+// tenantLockPathForEpoch encoding, so a test can pre-inject an abandoned
+// or live-held tenant journal lock at a specific epoch.
+function tenantJournalLockPathForEpoch(dir: string, tenantId: string, epoch: number): string {
   const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
-  return join(dir, ".tenant-locks", `${safeKey}.lock`);
+  return join(dir, ".tenant-locks", `${safeKey}.epoch-${epoch}.lock`);
 }
 
 function admittedWiredJobs() {
@@ -448,7 +450,7 @@ test("Rev68 F2 cross-customer lock-winner witness: a losing writer whose jobId c
 });
 
 
-test("Rev70 crash-recoverable tenant journal lock: an abandoned lock left by a dead process is safely reclaimed (liveness-gated, not a blind deletion), so a subsequent operation completes well within the lock timeout instead of hanging until it expires", () => {
+test("Rev72 crash-recoverable tenant journal lock: an abandoned epoch left by a dead process is advanced past (never deleted), so a subsequent operation completes well within the lock timeout instead of hanging until it expires", () => {
   const dir = freshStoreDir();
   try {
     const store = new FileDurableOutcomeJobStore(dir);
@@ -461,7 +463,7 @@ test("Rev70 crash-recoverable tenant journal lock: an abandoned lock left by a d
     const deadPid = dead.pid;
     assert.ok(typeof deadPid === "number" && deadPid > 0);
 
-    const lockPath = tenantJournalLockPathFor(dir, fixture.tenantScope.tenantId);
+    const lockPath = tenantJournalLockPathForEpoch(dir, fixture.tenantScope.tenantId, 1);
     mkdirSync(join(dir, ".tenant-locks"), { recursive: true });
     writeFileSync(lockPath, JSON.stringify({ pid: deadPid }), "utf8");
 
@@ -470,11 +472,51 @@ test("Rev70 crash-recoverable tenant journal lock: an abandoned lock left by a d
     const elapsedMs = Date.now() - start;
 
     assert.equal(result.created, true);
-    // The lock's own configured timeout is 5000ms - a successful reclaim
-    // completes almost immediately; only a regression that fell through
-    // to the timeout path instead of reclaiming would take anywhere
-    // close to that long.
-    assert.ok(elapsedMs < 2000, `expected fast reclaim of the abandoned lock, took ${elapsedMs}ms`);
+    // The dead epoch's own file must still exist, byte-identical - Rev72
+    // never deletes a reclaimed-past epoch, it only advances beyond it.
+    assert.equal(readFileSync(lockPath, "utf8"), JSON.stringify({ pid: deadPid }));
+    // The lock's own configured timeout is 5000ms - advancing past a dead
+    // epoch completes almost immediately; only a regression that fell
+    // through to the timeout path instead of advancing would take
+    // anywhere close to that long.
+    assert.ok(elapsedMs < 2000, `expected fast advance past the dead epoch, took ${elapsedMs}ms`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Rev72 ABA-safety proof: a live replacement epoch is never removed by another reclaimer - a caller facing a dead epoch followed by a genuinely alive one (this test's own pid, alive for the whole run) waits and eventually fails closed with a timeout, and the live epoch's file is left byte-identical, never deleted or clobbered", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableOutcomeJobStore(dir);
+    const { fixture, jobs } = admittedWiredJobs();
+    const job = jobs[0]!;
+
+    const dead = spawnSync(process.execPath, ["-e", ""]);
+    const deadPid = dead.pid;
+    assert.ok(typeof deadPid === "number" && deadPid > 0);
+
+    mkdirSync(join(dir, ".tenant-locks"), { recursive: true });
+    // Epoch 1: a dead holder - a caller should advance past this safely.
+    const deadEpochPath = tenantJournalLockPathForEpoch(dir, fixture.tenantScope.tenantId, 1);
+    writeFileSync(deadEpochPath, JSON.stringify({ pid: deadPid }), "utf8");
+    // Epoch 2: a "replacement owner" that is genuinely alive for the
+    // entire test - this test's own process, guaranteed alive throughout
+    // (no fragile timing dependency on a second process's exact exit
+    // moment). A caller must advance past epoch 1 (dead) and then
+    // correctly recognize epoch 2 as live, never deleting it.
+    const liveEpochPath = tenantJournalLockPathForEpoch(dir, fixture.tenantScope.tenantId, 2);
+    const liveEpochContent = JSON.stringify({ pid: process.pid });
+    writeFileSync(liveEpochPath, liveEpochContent, "utf8");
+
+    assert.throws(() => store.putIfAbsent(job), OutcomeJobTenantLockTimeoutError);
+
+    // The live replacement's lock must be completely untouched - proving
+    // the caller never attempted to remove or overwrite it while backing
+    // off, even after eventually giving up.
+    assert.equal(readFileSync(liveEpochPath, "utf8"), liveEpochContent);
+    // The dead epoch below it must also be untouched, for the same reason.
+    assert.equal(readFileSync(deadEpochPath, "utf8"), JSON.stringify({ pid: deadPid }));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
