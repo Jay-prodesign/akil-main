@@ -36,7 +36,20 @@ export function createHttpServer(deps: {
   return createServer((req, res) => {
     const method = req.method ?? "GET";
     const url = new URL(req.url ?? "/", "http://localhost");
-    const headers: Record<string, string | undefined> = {};
+    /**
+     * Bounded hardening correction (Rev66 completion-confidence audit): an
+     * incoming request header name is fully caller-controlled - a real
+     * client can send a header literally named `__proto__`. Assigning a
+     * string value to `headers["__proto__"]` on a plain `{}` invokes
+     * `Object.prototype`'s special `__proto__` accessor setter, which
+     * silently no-ops for a non-object/non-null value (per the Annex B
+     * spec) rather than storing it - the header would be silently and
+     * completely discarded before ever reaching the request handler.
+     * `Object.create(null)` has no inherited `__proto__` accessor, so
+     * every header name, including prototype-shaped ones, is stored as an
+     * ordinary own property.
+     */
+    const headers: Record<string, string | undefined> = Object.create(null) as Record<string, string | undefined>;
     for (const [key, value] of Object.entries(req.headers)) {
       headers[key] = Array.isArray(value) ? value[0] : value;
     }
