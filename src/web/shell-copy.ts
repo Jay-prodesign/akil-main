@@ -1,6 +1,7 @@
 import type { NextAction, CustomerSafeCapabilitySummary } from "../domain/client-project-snapshot.js";
 import type { DeliveryTimelineEntry } from "../domain/delivery-timeline.js";
 import type { AdvisorResult } from "../domain/delivery-advisor.js";
+import type { DeliveryStatusLabel } from "../domain/delivery-status.js";
 import type { Locale } from "./locale.js";
 
 /**
@@ -71,6 +72,15 @@ export interface ShellCopy {
   readonly customerLabel: (id: string) => string;
   readonly projectLabel: (id: string) => string;
   readonly overallStatusLabel: (status: string) => string;
+  /**
+   * SITE-INTEGRATION-001: the customer-readable form of
+   * `DeliveryStatusView.overallStatus` for surfaces (the client-platform-v1
+   * JSON hydration contract) that must never present the raw
+   * `DeliveryStatusLabel` enum literal directly - unlike
+   * `overallStatusLabel` above, which predates this requirement and still
+   * interpolates the raw enum value into the existing HTML shell.
+   */
+  readonly deliveryStatusLabel: Record<DeliveryStatusLabel, string>;
 }
 
 const EN: ShellCopy = {
@@ -151,6 +161,12 @@ const EN: ShellCopy = {
   customerLabel: (id) => `Customer: ${id}`,
   projectLabel: (id) => `Project: ${id}`,
   overallStatusLabel: (status) => `Overall status: <strong>${status}</strong>`,
+  deliveryStatusLabel: {
+    NOT_STARTED: "Not started",
+    IN_PROGRESS: "In progress",
+    BLOCKED: "Blocked",
+    COMPLETE: "Complete",
+  },
 };
 
 const TR: ShellCopy = {
@@ -231,6 +247,12 @@ const TR: ShellCopy = {
   customerLabel: (id) => `Müşteri: ${id}`,
   projectLabel: (id) => `Proje: ${id}`,
   overallStatusLabel: (status) => `Genel durum: <strong>${status}</strong>`,
+  deliveryStatusLabel: {
+    NOT_STARTED: "Başlamadı",
+    IN_PROGRESS: "Devam ediyor",
+    BLOCKED: "Bekletiliyor",
+    COMPLETE: "Tamamlandı",
+  },
 };
 
 const CATALOG: Readonly<Record<Locale, ShellCopy>> = { en: EN, tr: TR };
