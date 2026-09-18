@@ -5,6 +5,7 @@ import { resolveProtectedSnapshotView, type ClientProjectSnapshotSource } from "
 import { resolveProtectedTeamAttentionView, type TeamAttentionSource } from "./team-attention-view-state.js";
 import { renderShellPage, type ShellPageContent, type RenderedShellPage } from "./shell-render.js";
 import { resolveRequestLocale } from "./locale.js";
+import { resolveClientPlatformHydration, type ClientPlatformState } from "./client-platform-hydration.js";
 
 const SESSION_TOKEN_HEADER = "x-akilta-session-token";
 
@@ -51,6 +52,47 @@ function parsePortalPath(path: string): ProjectOwnershipRef | undefined {
 }
 
 /**
+ * SITE-INTEGRATION-001 Slice B: the JSON hydration path variant the live
+ * commerce-site client-platform-v1 shell composes against. A distinct top-level
+ * segment (`client-platform`, not `portal`) so this can never be confused
+ * with - or silently fall through into - the existing HTML portal route.
+ */
+function parseClientPlatformPath(path: string): ProjectOwnershipRef | undefined {
+  const segments = path.split("/").filter((segment) => segment.length > 0);
+  if (segments.length !== 4 || segments[0] !== "client-platform") {
+    return undefined;
+  }
+  const [, tenantId, customerId, projectId] = segments;
+  try {
+    return createProjectOwnershipRef({ tenantId, customerId, projectId });
+  } catch {
+    return undefined;
+  }
+}
+
+function toJsonResponse(status: number, body: unknown): OutgoingResponseLike {
+  return {
+    status,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  };
+}
+
+/**
+ * Mirrors the HTTP status this shell already uses for the equivalent HTML
+ * `ShellPageContent` kind (see `shell-render.ts`), so the JSON hydration
+ * route's status codes stay meaningful rather than always 200.
+ */
+const HYDRATION_STATUS_BY_STATE: Record<ClientPlatformState, number> = {
+  "signed-out": 401,
+  unauthorized: 403,
+  empty: 200,
+  error: 500,
+  ready: 200,
+  unsupported: 501,
+};
+
+/**
  * V2-APP-001 A10: `resolveProtectedSnapshotView` (and therefore
  * `snapshotSource.getSnapshot`) is only ever called AFTER `requireSession`
  * has already succeeded - an unauthenticated request never reaches the
@@ -69,6 +111,21 @@ export function createRequestHandler(deps: {
 }): RequestHandler {
   return (request: IncomingRequestLike): OutgoingResponseLike => {
     const locale = resolveRequestLocale(request.headers);
+
+    const clientPlatformOwnership = parseClientPlatformPath(request.path);
+    if (clientPlatformOwnership !== undefined) {
+      if (request.method !== "GET") {
+        return toJsonResponse(HYDRATION_STATUS_BY_STATE.unsupported, { state: "unsupported" });
+      }
+      const payload = resolveClientPlatformHydration({
+        sessionToken: request.headers[SESSION_TOKEN_HEADER],
+        requestedOwnership: clientPlatformOwnership,
+        sessionProvider: deps.sessionProvider,
+        snapshotSource: deps.snapshotSource,
+        locale,
+      });
+      return toJsonResponse(HYDRATION_STATUS_BY_STATE[payload.state], payload);
+    }
 
     if (request.method !== "GET") {
       return toResponse(
