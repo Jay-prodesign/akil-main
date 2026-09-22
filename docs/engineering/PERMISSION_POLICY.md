@@ -1,5 +1,7 @@
 # PERMISSION_POLICY.md
 
+This file's authority is subject to the repo engineering policy epoch defined in `AGENTS.md` §11 — a newer Drive-side permissive delegated-authority widening takes effect here only once this repository's own epoch marker is updated to match.
+
 ## Roles and authority
 
 - **Owner** — final authority for irreversible, production, security-sensitive, legal, financial, and major strategic decisions.
@@ -14,9 +16,14 @@ Authority order for engineering decisions: Owner → ChatGPT / canonical AKILTA 
 `BACKLOG → READY → IN_PROGRESS → IMPLEMENTED → VERIFYING → VERIFIED → COMPLETED`
 
 - An implementing engineer (Claude or Codex) may move a task up to `IMPLEMENTED`.
-- Only ChatGPT verification against requirements, repository changes, and evidence may move a task to `VERIFIED` or `COMPLETED`.
+- By default, only ChatGPT verification against requirements, repository changes, and evidence may move a task to `VERIFIED` or `COMPLETED`. `AGENTS.md` §12 defines a narrow exception, active only once §11's epoch gate is independently confirmed open: a LOW/MEDIUM-risk task fully inside existing canonical scope may reach delegated `VERIFIED`/task-local `COMPLETED` via a verifier distinct from the implementing execution context (Codex, a separate Claude review session, or another admitted independent reviewer) — never via the implementer's own self-review, and never for HIGH/PROTECTED work or anything carrying an explicit `HOLD_MERGE`/owner gate.
 - If verification fails: `VERIFYING → CHANGES_REQUIRED → IN_PROGRESS`.
 - "Done" asserted in prose is never sufficient evidence for any lifecycle transition.
+- `SAFE_MERGE` (merging to `main` without a separate Brain/Founder relay) is likewise governed entirely by `AGENTS.md` §12's conditions and exclusions; it is not a default engineer entitlement.
+
+## Continuous execution is not additional authority
+
+`AGENTS.md` §3's continuous-cursor discipline changes execution cadence, not authority. A bare `continue`/`devam` grants nothing on its own, and its absence never stops an authorized agent mid-mission. A pending independent review blocks only the exact affected edge, never the whole engineering cursor. Short-task chaining — moving straight to the next admitted dependency-safe action once one closes — is required whenever that next edge is already resolvable, not merely permitted. Turn/session stop is governed entirely by `AGENTS.md` §3's stop proof (stop classes A–G). None of this weakens or bypasses: the `HIGH`/`PROTECTED` classification above, the independent-verification requirement for delegated `VERIFIED`, `SAFE_MERGE`'s eligibility/exclusion conditions, any explicit `HOLD_MERGE`, or a genuine Founder-protected decision — those gates apply exactly as before regardless of execution cadence.
 
 ## DEC-121 — Secret authority
 
