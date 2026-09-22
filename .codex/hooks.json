@@ -1,0 +1,98 @@
+{
+  "description": "AKILTA repo-local lifecycle hooks. Single hook source for bootstrap, write guards, write-result verification, compaction, stop guard, and bounded session closeout.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/akilta_lifecycle.py\"",
+            "statusMessage": "Resolving AKILTA runtime context",
+            "additionalContextLimit": 1800,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|apply_patch|Edit|Write|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/akilta_lifecycle.py\"",
+            "statusMessage": "AKILTA write scope guard",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|apply_patch|Edit|Write|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/akilta_lifecycle.py\"",
+            "statusMessage": "AKILTA write result verifier",
+            "additionalContextLimit": 1800,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/akilta_lifecycle.py\"",
+            "statusMessage": "Preserving AKILTA capsule identity",
+            "additionalContextLimit": 1800,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/akilta_lifecycle.py\"",
+            "statusMessage": "Reconciling AKILTA capsule identity",
+            "additionalContextLimit": 1800,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/akilta_lifecycle.py\"",
+            "statusMessage": "AKILTA continuation guard",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "other",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/akilta_lifecycle.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}
