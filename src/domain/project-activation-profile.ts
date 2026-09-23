@@ -2,23 +2,24 @@ import { createHash } from "node:crypto";
 import type { TenantScope } from "./tenant-scope.js";
 import type { Customer } from "./customer.js";
 import type { Project } from "./project.js";
-import { createProjectOwnershipRef, type ProjectOwnershipRef } from "./project-ownership.js";
+import type { ProjectOwnershipRef } from "./project-ownership.js";
 import type { OfferBlueprintVersion } from "./offer-blueprint.js";
 import type { SoldScope } from "./sold-scope.js";
 import type { CustomerEvidenceItem } from "./customer-evidence.js";
+import type { DeliveryRecipe } from "./delivery-recipe.js";
 import { compilePlan, type ProjectPlanVersion } from "./project-plan.js";
 import {
   admitPlan,
   admitJobs,
   type PlanAdmissionResult,
+  type JobAdmissionResult,
 } from "./plan-admission.js";
-import { deriveOutcomeJobSpecs } from "./outcome-job-spec.js";
+import { deriveOutcomeJobSpecs, type OutcomeJobSpec } from "./outcome-job-spec.js";
 import { wireAdmittedOutcomeJobs } from "./outcome-job-wiring.js";
 import type { OutcomeJob } from "./outcome-job.js";
 import type { EvidenceReadinessAssertion } from "./admission-readiness.js";
 import type { ApprovalReference } from "./approval-reference.js";
-import type { ConnectionRequirement } from "./connection-authority.js";
-import type { CapabilityAdmission } from "./capability-admission.js";
+import type { ConnectionRequirement, ConnectionBinding } from "./connection-authority.js";
 import {
   resolveWorkerRoute,
   type WorkerRoutingRequest,
@@ -32,6 +33,13 @@ export class InvalidAcceptedCommercialReferenceError extends Error {
   }
 }
 
+export class InvalidMaterialPlatformDecisionError extends Error {
+  constructor(reason: string) {
+    super(`Invalid MaterialPlatformDecision: ${reason}`);
+    this.name = "InvalidMaterialPlatformDecisionError";
+  }
+}
+
 export class InvalidProjectActivationProfileError extends Error {
   constructor(reason: string) {
     super(`Invalid ProjectActivationProfile input: ${reason}`);
@@ -39,33 +47,43 @@ export class InvalidProjectActivationProfileError extends Error {
   }
 }
 
-type AcceptedCommercialReferenceId = string & {
-  readonly __brand: "AcceptedCommercialReferenceId";
-};
-
-/**
- * ADM-PROJ-001: the commercial-acceptance gate for activation, structurally
- * mirroring `approval-reference.ts`'s `ApprovalReference` (a version/
- * payload-bound approval for a `ProjectPlanVersion`) but bound instead to a
- * `SoldScope` - the commercial scope/acceptance record that exists *before*
- * a plan is even compiled (see `sold-scope.ts`). `payloadHash` reuses the
- * exact same deterministic-digest technique as `approval-reference.ts`'s
- * `hashPlanPayload` so a materially changed sold scope (a new included/
- * excluded requirement, a different outcome contract) invalidates a prior
- * acceptance rather than letting it silently carry forward, exactly as a
- * changed plan invalidates a prior `ApprovalReference`.
- */
-export interface AcceptedCommercialReference {
-  readonly acceptedCommercialReferenceId: AcceptedCommercialReferenceId;
-  readonly tenantId: TenantScope["tenantId"];
-  readonly projectId: Project["projectId"];
-  readonly soldScopeId: SoldScope["soldScopeId"];
-  readonly payloadHash: string;
-  readonly acceptedAt: string;
-  readonly acceptorRef: string;
+function requireNonEmptyString(value: unknown, field: string): string {
+  if (typeof value !== "string") {
+    throw new InvalidProjectActivationProfileError(`${field} must be a string`);
+  }
+  if (value.length === 0) {
+    throw new InvalidProjectActivationProfileError(`${field} must not be empty`);
+  }
+  if (value.trim().length === 0) {
+    throw new InvalidProjectActivationProfileError(`${field} must not be whitespace-only`);
+  }
+  if (value.trim() !== value) {
+    throw new InvalidProjectActivationProfileError(
+      `${field} must not contain leading or trailing whitespace`,
+    );
+  }
+  return value;
 }
 
-function requireNonEmptyString(value: unknown, field: string): string {
+function requireNonEmptyPlatformDecisionString(value: unknown, field: string): string {
+  if (typeof value !== "string") {
+    throw new InvalidMaterialPlatformDecisionError(`${field} must be a string`);
+  }
+  if (value.length === 0) {
+    throw new InvalidMaterialPlatformDecisionError(`${field} must not be empty`);
+  }
+  if (value.trim().length === 0) {
+    throw new InvalidMaterialPlatformDecisionError(`${field} must not be whitespace-only`);
+  }
+  if (value.trim() !== value) {
+    throw new InvalidMaterialPlatformDecisionError(
+      `${field} must not contain leading or trailing whitespace`,
+    );
+  }
+  return value;
+}
+
+function requireNonEmptyCommercialReferenceString(value: unknown, field: string): string {
   if (typeof value !== "string") {
     throw new InvalidAcceptedCommercialReferenceError(`${field} must be a string`);
   }
@@ -83,265 +101,412 @@ function requireNonEmptyString(value: unknown, field: string): string {
   return value;
 }
 
-function hashSoldScopePayload(soldScope: SoldScope): string {
-  const canonical = JSON.stringify({
-    tenantId: soldScope.tenantId,
-    projectId: soldScope.projectId,
-    soldScopeId: soldScope.soldScopeId,
-    outcomeContractRef: soldScope.outcomeContractRef,
-    includedRequirementIds: soldScope.includedRequirementIds,
-    excludedRequirementIds: soldScope.excludedRequirementIds,
-  });
-  return createHash("sha256").update(canonical, "utf8").digest("hex");
+/**
+ * Brain Rev100/Rev101: opaque upstream commercial *provenance* only - it
+ * grants no acceptance, payment, legal, or checkout authority, and this
+ * module has no function that derives or promotes acceptance from it. It is
+ * checked for exact equality against the supplied `OfferBlueprintVersion`/
+ * `SoldScope` by `compileProjectActivationProfile` itself (Rev101 step 2) -
+ * this type carries no validation/authority logic of its own beyond
+ * non-empty field shape.
+ */
+export interface AcceptedCommercialReference {
+  readonly acceptanceRef: string;
+  readonly sourceBlueprintId: OfferBlueprintVersion["blueprintId"];
+  readonly sourceBlueprintVersion: OfferBlueprintVersion["version"];
+  readonly soldScopeId: SoldScope["soldScopeId"];
+  readonly outcomeContractRef: string;
 }
 
 export function createAcceptedCommercialReference(input: {
-  soldScope: SoldScope;
-  acceptedCommercialReferenceId: unknown;
-  acceptedAt: unknown;
-  acceptorRef: unknown;
+  acceptanceRef: unknown;
+  sourceBlueprintId: unknown;
+  sourceBlueprintVersion: unknown;
+  soldScopeId: unknown;
+  outcomeContractRef: unknown;
 }): AcceptedCommercialReference {
-  const acceptedCommercialReferenceId = requireNonEmptyString(
-    input.acceptedCommercialReferenceId,
-    "acceptedCommercialReferenceId",
-  );
-  const acceptedAt = requireNonEmptyString(input.acceptedAt, "acceptedAt");
-  const acceptorRef = requireNonEmptyString(input.acceptorRef, "acceptorRef");
   return {
-    acceptedCommercialReferenceId: acceptedCommercialReferenceId as AcceptedCommercialReferenceId,
-    tenantId: input.soldScope.tenantId,
-    projectId: input.soldScope.projectId,
-    soldScopeId: input.soldScope.soldScopeId,
-    payloadHash: hashSoldScopePayload(input.soldScope),
-    acceptedAt,
-    acceptorRef,
+    acceptanceRef: requireNonEmptyCommercialReferenceString(input.acceptanceRef, "acceptanceRef"),
+    sourceBlueprintId: requireNonEmptyCommercialReferenceString(
+      input.sourceBlueprintId,
+      "sourceBlueprintId",
+    ) as OfferBlueprintVersion["blueprintId"],
+    sourceBlueprintVersion: requireNonEmptyCommercialReferenceString(
+      input.sourceBlueprintVersion,
+      "sourceBlueprintVersion",
+    ),
+    soldScopeId: requireNonEmptyCommercialReferenceString(
+      input.soldScopeId,
+      "soldScopeId",
+    ) as SoldScope["soldScopeId"],
+    outcomeContractRef: requireNonEmptyCommercialReferenceString(
+      input.outcomeContractRef,
+      "outcomeContractRef",
+    ),
   };
 }
 
 /**
- * A material change to the sold scope (new/removed included or excluded
- * requirement, or a different outcome contract) invalidates a prior
- * acceptance, even for the exact same `soldScopeId` - the same "no material
- * change survives silently" discipline `isApprovalValidForPlan` applies to
- * `ProjectPlanVersion`.
- */
-export function isCommercialReferenceValidForSoldScope(
-  reference: AcceptedCommercialReference,
-  soldScope: SoldScope,
-): boolean {
-  return (
-    reference.tenantId === soldScope.tenantId &&
-    reference.projectId === soldScope.projectId &&
-    reference.soldScopeId === soldScope.soldScopeId &&
-    reference.payloadHash === hashSoldScopePayload(soldScope)
-  );
-}
-
-/**
- * Which side of the AKILTA/customer boundary must act next when a
- * `ProjectActivationProfile` is not `READY`. `HUMAN_REVIEW` is distinct from
- * `AKILTA` (an internal platform/dependency defect) - it names a human
- * reviewer decision specifically (e.g. a plan-approval gate), mirroring
- * `plan-admission.ts`'s own "exact awaited entity, never a generic waiting
- * placeholder" discipline. `NONE` is reachable only when `state === "READY"`.
+ * Which side of the AKILTA/customer boundary must act next. `NONE` is
+ * reachable only when `state === "READY"`.
  */
 export type ActivationActor = "NONE" | "CUSTOMER" | "AKILTA" | "HUMAN_REVIEW";
 
-export type ActivationState = "READY" | "BLOCKED" | "WAITING";
+export type ActivationState = "READY" | "ACTION_REQUIRED";
 
-export type MaterialPlatformDecisionKind =
-  | "COMMERCIAL_REFERENCE_INVALID"
-  | "PLAN_BLOCKED"
-  | "PLAN_APPROVAL_REQUIRED"
-  | "PLAN_SCOPE_DECISION_REQUIRED"
-  | "CONNECTION_NOT_VERIFIED"
-  | "WORKER_ROUTE_REJECTED";
+export type MaterialPlatformDecisionStatus = "RESOLVED" | "ACTION_REQUIRED";
 
 /**
- * The exact, single reason activation is not `READY` - never a generic
- * "blocked"/"waiting" placeholder, matching the same discipline
- * `PlanValidationFinding`/`AdmissionAwaiting`/`ReadinessGap` already
- * establish elsewhere in this domain layer. `relatedRef` names the specific
- * downstream reference (a `RequirementId`, a `connectionRequirementId`, a
- * `routeRef`) the decision is about, when one exists.
+ * Brain Rev101: a caller-supplied activation-time platform decision input
+ * (e.g. which of several equally-valid delivery/operational options
+ * applies to this activation) - never an output blocker-kind record. A
+ * `RESOLVED` decision always carries a `selectedOptionRef` and
+ * `actor: "NONE"`; an `ACTION_REQUIRED` decision always carries a real
+ * actor and never a fabricated `selectedOptionRef` - both invariants are
+ * enforced at construction, not left to caller discipline.
  */
 export interface MaterialPlatformDecision {
-  readonly kind: MaterialPlatformDecisionKind;
+  readonly decisionRef: string;
+  readonly status: MaterialPlatformDecisionStatus;
   readonly reason: string;
-  readonly relatedRef?: string;
+  readonly actor: ActivationActor;
+  readonly selectedOptionRef?: string;
+}
+
+export function createMaterialPlatformDecision(input: {
+  decisionRef: unknown;
+  status: unknown;
+  reason: unknown;
+  actor: unknown;
+  selectedOptionRef?: unknown;
+}): MaterialPlatformDecision {
+  const decisionRef = requireNonEmptyPlatformDecisionString(input.decisionRef, "decisionRef");
+  const reason = requireNonEmptyPlatformDecisionString(input.reason, "reason");
+  if (input.status !== "RESOLVED" && input.status !== "ACTION_REQUIRED") {
+    throw new InvalidMaterialPlatformDecisionError(
+      'status must be "RESOLVED" or "ACTION_REQUIRED"',
+    );
+  }
+  const status = input.status;
+  if (
+    input.actor !== "NONE" &&
+    input.actor !== "CUSTOMER" &&
+    input.actor !== "AKILTA" &&
+    input.actor !== "HUMAN_REVIEW"
+  ) {
+    throw new InvalidMaterialPlatformDecisionError(
+      "actor must be one of NONE, CUSTOMER, AKILTA, HUMAN_REVIEW",
+    );
+  }
+  const actor = input.actor as ActivationActor;
+  if (status === "RESOLVED") {
+    if (actor !== "NONE") {
+      throw new InvalidMaterialPlatformDecisionError("a RESOLVED decision must have actor NONE");
+    }
+    if (input.selectedOptionRef === undefined) {
+      throw new InvalidMaterialPlatformDecisionError(
+        "a RESOLVED decision requires a non-empty selectedOptionRef",
+      );
+    }
+    const selectedOptionRef = requireNonEmptyPlatformDecisionString(input.selectedOptionRef, "selectedOptionRef");
+    return { decisionRef, status, reason, actor, selectedOptionRef };
+  }
+  if (actor === "NONE") {
+    throw new InvalidMaterialPlatformDecisionError(
+      "an ACTION_REQUIRED decision must not have actor NONE",
+    );
+  }
+  if (input.selectedOptionRef !== undefined) {
+    throw new InvalidMaterialPlatformDecisionError(
+      "an ACTION_REQUIRED decision must not carry a selectedOptionRef",
+    );
+  }
+  return { decisionRef, status, reason, actor };
 }
 
 /**
  * One activation-time worker/model routing request. `WorkerRoutingRequest`
- * itself (`worker-routing-policy.ts`) carries no identifier of its own, so
- * `routeRef` is the caller-supplied handle this compiler uses to reject
- * duplicate route requests within a single activation call and to name
- * exactly which route a `WORKER_ROUTE_REJECTED` decision refers to.
+ * carries no identifier of its own, so `routeRef` is the caller-supplied
+ * handle used to reject duplicate route requests within one activation
+ * call and to name exactly which route a rejection refers to. The compiler
+ * itself always calls `resolveWorkerRoute` - it never accepts a
+ * caller-supplied routing decision as authority.
  */
 export interface ActivationWorkerRouteInput {
   readonly routeRef: string;
   readonly request: WorkerRoutingRequest;
 }
 
+export interface NextRequiredAction {
+  readonly code: string;
+  readonly reason: string;
+}
+
 /**
- * ADM-PROJ-001 "Project Activation / Effective Execution Profile": the
- * versioned, composed readiness verdict for turning an accepted commercial
- * scope into admitted, wired `OutcomeJob`s - built entirely from this
- * repository's existing primitives (`SoldScope`, `compilePlan`/`admitPlan`,
- * `ConnectionAuthority`/`CapabilityAdmission`, `resolveWorkerRoute`,
- * `wireAdmittedOutcomeJobs`). This module adds no new persistence, identity,
- * billing, or runtime surface - it is a pure compiler over inputs the
- * caller already holds, exactly as `compilePlan`/`admitPlan` are.
+ * Rev101 step 6: the compiler's own connection-readiness proof, never a
+ * caller-supplied capability-admission claim. Only what a caller needs to
+ * consume the connection is exposed - the requirement/binding id, an
+ * optional opaque `SecretRef` id, and the verification evidence reference.
+ */
+export interface VerifiedConnectionObservation {
+  readonly connectionRequirementId: ConnectionRequirement["connectionRequirementId"];
+  readonly connectionBindingId: ConnectionBinding["connectionBindingId"];
+  readonly secretRef?: string;
+  readonly verificationEvidenceRef: string;
+}
+
+export interface ConsumedWorkerRoute {
+  readonly routeRef: string;
+  readonly decision: WorkerRoutingDecision;
+}
+
+/**
+ * ADM-PROJ-001 "Project Activation / Effective Execution Profile" (Brain
+ * Rev101): the versioned, composed readiness verdict for turning an
+ * accepted commercial scope into admitted, wired `OutcomeJob`s - built
+ * entirely from this repository's existing primitives. `state` is
+ * `READY`/`ACTION_REQUIRED` only; an `ADMITTED` plan never by itself
+ * implies `READY` (connection/platform-decision/routing gates still apply).
  */
 export interface ProjectActivationProfile {
+  readonly version: 1;
   readonly tenantId: TenantScope["tenantId"];
   readonly customerId: Customer["customerId"];
   readonly projectId: Project["projectId"];
   readonly ownership: ProjectOwnershipRef;
+  readonly acceptedCommercialReference: AcceptedCommercialReference;
+  readonly soldScopeId: SoldScope["soldScopeId"];
+  readonly blueprintId: OfferBlueprintVersion["blueprintId"];
+  readonly blueprintVersion: OfferBlueprintVersion["version"];
+  readonly recipeId: DeliveryRecipe["recipeId"];
+  readonly recipeVersion: DeliveryRecipe["version"];
   readonly planId: ProjectPlanVersion["planId"];
   readonly planVersion: ProjectPlanVersion["version"];
+  readonly effectiveConfigRefs: ReadonlyArray<string>;
+  readonly effectivePolicyRefs: ReadonlyArray<string>;
+  readonly platformDecision?: MaterialPlatformDecision;
+  readonly verifiedConnections: ReadonlyArray<VerifiedConnectionObservation>;
+  readonly consumedRoutes: ReadonlyArray<ConsumedWorkerRoute>;
   readonly state: ActivationState;
-  readonly actor: ActivationActor;
-  readonly decision?: MaterialPlatformDecision;
-  readonly routingDecisions: ReadonlyArray<WorkerRoutingDecision>;
-  readonly wiredJobs: ReadonlyArray<OutcomeJob>;
+  readonly nextRequiredActor: ActivationActor;
+  readonly nextRequiredAction?: NextRequiredAction;
+  readonly unresolvedGates: ReadonlyArray<string>;
   readonly sourceFingerprint: string;
   readonly compiledAt: string;
 }
 
+/**
+ * F2/Rev101: the existing `ProjectPlan`/`OutcomeJob` handoff artifacts are
+ * returned alongside the profile rather than duplicated into it.
+ * `jobs` is empty unless `profile.state === "READY"`.
+ */
+export interface ProjectActivationCompilation {
+  readonly profile: ProjectActivationProfile;
+  readonly plan: ProjectPlanVersion;
+  readonly planAdmission: PlanAdmissionResult;
+  readonly specs: ReadonlyArray<OutcomeJobSpec>;
+  readonly jobAdmissions: ReadonlyArray<JobAdmissionResult>;
+  readonly jobs: ReadonlyArray<OutcomeJob>;
+}
+
 function computeSourceFingerprint(input: {
   ownership: ProjectOwnershipRef;
+  acceptedCommercialReference: AcceptedCommercialReference;
+  soldScope: SoldScope;
+  blueprint: OfferBlueprintVersion;
+  recipe: DeliveryRecipe;
   plan: ProjectPlanVersion;
-  commercialReference: AcceptedCommercialReference;
+  effectiveConfigRefs: ReadonlyArray<string>;
+  effectivePolicyRefs: ReadonlyArray<string>;
+  platformDecision: MaterialPlatformDecision | undefined;
+  verifiedConnections: ReadonlyArray<VerifiedConnectionObservation>;
+  consumedRoutes: ReadonlyArray<{
+    routeRef: string;
+    request: WorkerRoutingRequest;
+    decision: WorkerRoutingDecision;
+  }>;
   state: ActivationState;
-  actor: ActivationActor;
-  decision: MaterialPlatformDecision | undefined;
-  routingDecisions: ReadonlyArray<WorkerRoutingDecision>;
-  wiredJobIds: ReadonlyArray<string>;
+  nextRequiredActor: ActivationActor;
+  nextRequiredAction: NextRequiredAction | undefined;
 }): string {
   const canonical = JSON.stringify({
     ownership: input.ownership,
-    planId: input.plan.planId,
-    planVersion: input.plan.version,
-    sourceBlueprintId: input.plan.sourceBlueprintId,
-    sourceBlueprintVersion: input.plan.sourceBlueprintVersion,
-    sourceSoldScopeId: input.plan.sourceSoldScopeId,
-    commercialReferenceId: input.commercialReference.acceptedCommercialReferenceId,
-    commercialPayloadHash: input.commercialReference.payloadHash,
+    acceptedCommercialReference: input.acceptedCommercialReference,
+    soldScope: {
+      soldScopeId: input.soldScope.soldScopeId,
+      outcomeContractRef: input.soldScope.outcomeContractRef,
+      includedRequirementIds: input.soldScope.includedRequirementIds,
+      excludedRequirementIds: input.soldScope.excludedRequirementIds,
+    },
+    blueprint: {
+      blueprintId: input.blueprint.blueprintId,
+      version: input.blueprint.version,
+      requirements: input.blueprint.requirements,
+    },
+    recipe: input.recipe,
+    plan: {
+      planId: input.plan.planId,
+      version: input.plan.version,
+      nodes: input.plan.nodes,
+    },
+    effectiveConfigRefs: input.effectiveConfigRefs,
+    effectivePolicyRefs: input.effectivePolicyRefs,
+    platformDecision: input.platformDecision ?? null,
+    verifiedConnections: input.verifiedConnections,
+    consumedRoutes: input.consumedRoutes,
     state: input.state,
-    actor: input.actor,
-    decision: input.decision ?? null,
-    routingDecisions: input.routingDecisions,
-    wiredJobIds: input.wiredJobIds,
+    nextRequiredActor: input.nextRequiredActor,
+    nextRequiredAction: input.nextRequiredAction ?? null,
   });
   return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 
-function buildProfile(input: {
+function finish(input: {
   tenantScope: TenantScope;
   customer: Customer;
   project: Project;
   ownership: ProjectOwnershipRef;
+  acceptedCommercialReference: AcceptedCommercialReference;
+  soldScope: SoldScope;
+  blueprint: OfferBlueprintVersion;
+  recipe: DeliveryRecipe;
   plan: ProjectPlanVersion;
-  commercialReference: AcceptedCommercialReference;
-  state: ActivationState;
-  actor: ActivationActor;
-  decision?: MaterialPlatformDecision;
-  routingDecisions: ReadonlyArray<WorkerRoutingDecision>;
-  wiredJobs: ReadonlyArray<OutcomeJob>;
+  planAdmission: PlanAdmissionResult;
+  specs: ReadonlyArray<OutcomeJobSpec>;
+  jobAdmissions: ReadonlyArray<JobAdmissionResult>;
+  effectiveConfigRefs: ReadonlyArray<string>;
+  effectivePolicyRefs: ReadonlyArray<string>;
   now: string;
-}): ProjectActivationProfile {
+  state: ActivationState;
+  nextRequiredActor: ActivationActor;
+  nextRequiredAction: NextRequiredAction | undefined;
+  unresolvedGates: ReadonlyArray<string>;
+  platformDecision: MaterialPlatformDecision | undefined;
+  verifiedConnections: ReadonlyArray<VerifiedConnectionObservation>;
+  consumedRoutesForProfile: ReadonlyArray<ConsumedWorkerRoute>;
+  consumedRoutesForFingerprint: ReadonlyArray<{
+    routeRef: string;
+    request: WorkerRoutingRequest;
+    decision: WorkerRoutingDecision;
+  }>;
+  jobs: ReadonlyArray<OutcomeJob>;
+}): ProjectActivationCompilation {
   const sourceFingerprint = computeSourceFingerprint({
     ownership: input.ownership,
+    acceptedCommercialReference: input.acceptedCommercialReference,
+    soldScope: input.soldScope,
+    blueprint: input.blueprint,
+    recipe: input.recipe,
     plan: input.plan,
-    commercialReference: input.commercialReference,
+    effectiveConfigRefs: input.effectiveConfigRefs,
+    effectivePolicyRefs: input.effectivePolicyRefs,
+    platformDecision: input.platformDecision,
+    verifiedConnections: input.verifiedConnections,
+    consumedRoutes: input.consumedRoutesForFingerprint,
     state: input.state,
-    actor: input.actor,
-    decision: input.decision,
-    routingDecisions: input.routingDecisions,
-    wiredJobIds: input.wiredJobs.map((job) => job.jobId),
+    nextRequiredActor: input.nextRequiredActor,
+    nextRequiredAction: input.nextRequiredAction,
   });
-  return {
+
+  const profile: ProjectActivationProfile = {
+    version: 1,
     tenantId: input.tenantScope.tenantId,
     customerId: input.customer.customerId,
     projectId: input.project.projectId,
     ownership: input.ownership,
+    acceptedCommercialReference: input.acceptedCommercialReference,
+    soldScopeId: input.soldScope.soldScopeId,
+    blueprintId: input.blueprint.blueprintId,
+    blueprintVersion: input.blueprint.version,
+    recipeId: input.recipe.recipeId,
+    recipeVersion: input.recipe.version,
     planId: input.plan.planId,
     planVersion: input.plan.version,
+    effectiveConfigRefs: input.effectiveConfigRefs,
+    effectivePolicyRefs: input.effectivePolicyRefs,
+    ...(input.platformDecision !== undefined ? { platformDecision: input.platformDecision } : {}),
+    verifiedConnections: input.verifiedConnections,
+    consumedRoutes: input.consumedRoutesForProfile,
     state: input.state,
-    actor: input.actor,
-    ...(input.decision !== undefined ? { decision: input.decision } : {}),
-    routingDecisions: input.routingDecisions,
-    wiredJobs: input.wiredJobs,
+    nextRequiredActor: input.nextRequiredActor,
+    ...(input.nextRequiredAction !== undefined ? { nextRequiredAction: input.nextRequiredAction } : {}),
+    unresolvedGates: input.unresolvedGates,
     sourceFingerprint,
     compiledAt: input.now,
+  };
+
+  return {
+    profile,
+    plan: input.plan,
+    planAdmission: input.planAdmission,
+    specs: input.specs,
+    jobAdmissions: input.jobAdmissions,
+    jobs: input.jobs,
   };
 }
 
 /**
- * Compiles a `ProjectActivationProfile`. Pure and deterministic: no wall-
- * clock read (the caller supplies `now`), no randomness, no provider/model
- * call, no persistence - identical inputs always produce an identical
- * profile (`sourceFingerprint` included), the same replay guarantee
- * `admitPlan`/`compilePlan` already provide.
+ * Compiles a `ProjectActivationProfile`. Pure and deterministic: no
+ * wall-clock read (the caller supplies `now`), no randomness, no
+ * provider/model call, no persistence.
  *
- * Validation order (fails closed at the first unmet gate; a caller-
- * malformed input throws rather than producing a business decision):
+ * Validation order (Brain Rev101), blocker priority when multiple
+ * conditions exist: structural mismatch throws first; then plan scope/
+ * readiness/approval; then required connection; then material platform
+ * decision; then activation-time routing.
  *
- * 1. Structural coherence: `customer`/`project`/`soldScope` all belong to
- *    the given `tenantScope`/`project`, and `acceptedCommercialReference`
- *    belongs to the given `tenantScope`/`project`. Throws on mismatch (a
- *    caller-construction error, not an activation-readiness gap).
- * 2. Compile the plan (`compilePlan`) - deterministic derivation, not a
- *    gate; always succeeds on structurally valid input.
- * 3. Commercial-acceptance gate: `acceptedCommercialReference` must be
- *    valid for the exact current `soldScope`
- *    (`isCommercialReferenceValidForSoldScope`). Missing/stale ->
- *    `BLOCKED`, actor `CUSTOMER`.
- * 4. Admit the plan (`admitPlan`).
- * 5. Interpret the `PlanAdmissionResult`: `BLOCKED` -> `BLOCKED`/`AKILTA`
- *    (a structural dependency/readiness defect is a platform
- *    responsibility, not directly actionable by the customer or a
- *    reviewer); `WAITING` with `awaiting.entity === "plan-approval"` ->
- *    `WAITING`/`HUMAN_REVIEW`; `WAITING` with `awaiting.entity` a
- *    `RequirementId` (an unresolved sold-scope decision) ->
- *    `WAITING`/`CUSTOMER`; `ADMITTED` -> continue.
- * 6. Derive and admit `OutcomeJobSpec`s (`deriveOutcomeJobSpecs`/
- *    `admitJobs`) - already `ADMITTED` on every spec at this point, since
- *    `admitJobs` mirrors a plan's own `ADMITTED` status, but the call is
- *    still made explicitly rather than assumed.
- * 7. Connection/capability readiness gate: every supplied
- *    `connectionRequirements` entry whose `requiredCapabilityRef` names a
- *    `REQUIRED`-disposition plan node must have a matching
- *    `capabilityAdmissions` entry with `status === "VERIFIED_AVAILABLE"`.
- *    A missing/unverified one -> `BLOCKED`, actor `CUSTOMER` when
- *    `requirement.accountOwner === "CUSTOMER_OWNED"`, else `AKILTA`.
- * 8. Worker routing: for each supplied `ActivationWorkerRouteInput`, calls
- *    `resolveWorkerRoute`. A duplicate `routeRef` within one call throws
- *    (malformed input, the same discipline `createDeliveryRecipe` applies
- *    to duplicate stepId/gateId). Any `REJECTED` routing decision ->
- *    `BLOCKED`, actor `AKILTA`.
+ * 1. Structural coherence: `customer`/`project`/`ownership`/`soldScope` all
+ *    belong to the given `tenantScope`/`project`. Throws
+ *    `InvalidProjectActivationProfileError` on mismatch.
+ * 2. `acceptedCommercialReference` must exactly equal the supplied
+ *    `blueprint` (`blueprintId`/`version`) and `soldScope` (`soldScopeId`/
+ *    `outcomeContractRef`) - no inference. Mismatch throws.
+ * 3. `recipe.jobFamily` must equal `blueprint.blueprintId`. Mismatch
+ *    throws.
+ * 4. Call `compilePlan`, then `admitPlan`, then `deriveOutcomeJobSpecs`,
+ *    then `admitJobs`, unconditionally and in that order.
+ * 5. If `planAdmission` is not `ADMITTED`: `WAITING` on an unresolved
+ *    sold-scope decision -> `CUSTOMER`; `WAITING` on `"plan-approval"` or
+ *    `BLOCKED` (a structural/readiness defect) -> `HUMAN_REVIEW`. The
+ *    exact admission reason is preserved; no jobs are wired.
+ * 6. Every supplied `ConnectionRequirement` whose `requiredCapabilityRef`
+ *    names a `REQUIRED`-disposition plan node must resolve, among the
+ *    supplied `ConnectionBinding`s, to exactly one binding matching the
+ *    exact requirement id + ownership, with `delegatedScope` re-checked
+ *    against `minimumProviderScope`, and `connectionState === "VERIFIED"`.
+ *    Zero matches -> `CUSTOMER` (accountOwner `CUSTOMER_OWNED`) or
+ *    `AKILTA` (`AKILTA_MANAGED`); more than one -> `AKILTA` (ambiguous).
+ *    Only the requirement/binding id, an optional opaque `SecretRef` id,
+ *    and the verification evidence ref are ever exposed.
+ * 7. A supplied `platformDecision` with `status: "ACTION_REQUIRED"` blocks
+ *    with its own declared actor; `RESOLVED` (or absent) continues.
+ * 8. For each supplied `ActivationWorkerRouteInput`, calls
+ *    `resolveWorkerRoute`. A duplicate `routeRef` within one call throws.
+ *    Any `REJECTED` routing decision -> `AKILTA`.
  * 9. Only once steps 1-8 are fully clean does this function call
  *    `wireAdmittedOutcomeJobs` and return `state: "READY"`,
- *    `actor: "NONE"`, no `decision`.
+ *    `nextRequiredActor: "NONE"`.
  */
 export function compileProjectActivationProfile(input: {
   tenantScope: TenantScope;
   customer: Customer;
   project: Project;
+  ownership: ProjectOwnershipRef;
   acceptedCommercialReference: AcceptedCommercialReference;
   blueprint: OfferBlueprintVersion;
   soldScope: SoldScope;
+  recipe: DeliveryRecipe;
   evidence?: ReadonlyArray<CustomerEvidenceItem>;
   planId: unknown;
   planVersionNumber?: unknown;
   readinessAssertions?: ReadonlyArray<EvidenceReadinessAssertion>;
   approval?: ApprovalReference;
   connectionRequirements?: ReadonlyArray<ConnectionRequirement>;
-  capabilityAdmissions?: ReadonlyArray<CapabilityAdmission>;
+  connectionBindings?: ReadonlyArray<ConnectionBinding>;
+  platformDecision?: MaterialPlatformDecision;
   workerRoutes?: ReadonlyArray<ActivationWorkerRouteInput>;
   now: unknown;
-}): ProjectActivationProfile {
+}): ProjectActivationCompilation {
   // Step 1: structural coherence.
   if (input.customer.tenantId !== input.tenantScope.tenantId) {
     throw new InvalidProjectActivationProfileError(
@@ -359,6 +524,15 @@ export function compileProjectActivationProfile(input: {
     );
   }
   if (
+    input.ownership.tenantId !== input.tenantScope.tenantId ||
+    input.ownership.customerId !== input.customer.customerId ||
+    input.ownership.projectId !== input.project.projectId
+  ) {
+    throw new InvalidProjectActivationProfileError(
+      "ownership does not match the given tenantScope/customer/project",
+    );
+  }
+  if (
     input.soldScope.tenantId !== input.tenantScope.tenantId ||
     input.soldScope.projectId !== input.project.projectId
   ) {
@@ -366,22 +540,30 @@ export function compileProjectActivationProfile(input: {
       "soldScope does not belong to the given tenantScope/project",
     );
   }
+  const now = requireNonEmptyString(input.now, "now");
+
+  // Step 2: commercial reference must exactly equal blueprint + soldScope.
   if (
-    input.acceptedCommercialReference.tenantId !== input.tenantScope.tenantId ||
-    input.acceptedCommercialReference.projectId !== input.project.projectId
+    input.acceptedCommercialReference.sourceBlueprintId !== input.blueprint.blueprintId ||
+    input.acceptedCommercialReference.sourceBlueprintVersion !== input.blueprint.version ||
+    input.acceptedCommercialReference.soldScopeId !== input.soldScope.soldScopeId ||
+    input.acceptedCommercialReference.outcomeContractRef !== input.soldScope.outcomeContractRef
   ) {
     throw new InvalidProjectActivationProfileError(
-      "acceptedCommercialReference does not belong to the given tenantScope/project",
+      "acceptedCommercialReference does not exactly match the given blueprint (blueprintId/version) and soldScope (soldScopeId/outcomeContractRef)",
     );
   }
-  const now = requireNonEmptyString(input.now, "now");
-  const ownership = createProjectOwnershipRef({
-    tenantId: input.tenantScope.tenantId,
-    customerId: input.customer.customerId,
-    projectId: input.project.projectId,
-  });
 
-  // Step 2: compile the plan (deterministic derivation, not a gate).
+  // Step 3: recipe must be bound to this exact blueprint's job family.
+  if (input.recipe.jobFamily !== input.blueprint.blueprintId) {
+    throw new InvalidProjectActivationProfileError(
+      "recipe.jobFamily does not match blueprint.blueprintId",
+    );
+  }
+  const effectiveConfigRefs = input.recipe.requiredContextRefs;
+  const effectivePolicyRefs = input.recipe.policyRefs;
+
+  // Step 4: compile and admit the plan, unconditionally.
   const plan = compilePlan({
     tenantScope: input.tenantScope,
     project: input.project,
@@ -392,31 +574,6 @@ export function compileProjectActivationProfile(input: {
     ...(input.evidence !== undefined ? { evidence: input.evidence } : {}),
     now,
   });
-
-  // Step 3: commercial-acceptance gate.
-  if (!isCommercialReferenceValidForSoldScope(input.acceptedCommercialReference, input.soldScope)) {
-    return buildProfile({
-      tenantScope: input.tenantScope,
-      customer: input.customer,
-      project: input.project,
-      ownership,
-      plan,
-      commercialReference: input.acceptedCommercialReference,
-      state: "BLOCKED",
-      actor: "CUSTOMER",
-      decision: {
-        kind: "COMMERCIAL_REFERENCE_INVALID",
-        reason:
-          "acceptedCommercialReference is missing or does not match the exact current sold scope",
-        relatedRef: input.soldScope.soldScopeId,
-      },
-      routingDecisions: [],
-      wiredJobs: [],
-      now,
-    });
-  }
-
-  // Step 4: admit the plan.
   const planAdmission: PlanAdmissionResult = admitPlan({
     plan,
     blueprint: input.blueprint,
@@ -425,115 +582,197 @@ export function compileProjectActivationProfile(input: {
       : {}),
     ...(input.approval !== undefined ? { approval: input.approval } : {}),
   });
-
-  // Step 5: interpret the PlanAdmissionResult.
-  if (planAdmission.status === "BLOCKED") {
-    return buildProfile({
-      tenantScope: input.tenantScope,
-      customer: input.customer,
-      project: input.project,
-      ownership,
-      plan,
-      commercialReference: input.acceptedCommercialReference,
-      state: "BLOCKED",
-      actor: "AKILTA",
-      decision: {
-        kind: "PLAN_BLOCKED",
-        reason: planAdmission.blockedReasons.join("; "),
-      },
-      routingDecisions: [],
-      wiredJobs: [],
-      now,
-    });
-  }
-  if (planAdmission.status === "WAITING") {
-    const awaiting = planAdmission.awaiting;
-    if (awaiting === undefined) {
-      throw new InvalidProjectActivationProfileError(
-        "internal error: WAITING plan admission with no awaiting entity",
-      );
-    }
-    const isApprovalWait = awaiting.entity === "plan-approval";
-    return buildProfile({
-      tenantScope: input.tenantScope,
-      customer: input.customer,
-      project: input.project,
-      ownership,
-      plan,
-      commercialReference: input.acceptedCommercialReference,
-      state: "WAITING",
-      actor: isApprovalWait ? "HUMAN_REVIEW" : "CUSTOMER",
-      decision: {
-        kind: isApprovalWait ? "PLAN_APPROVAL_REQUIRED" : "PLAN_SCOPE_DECISION_REQUIRED",
-        reason: awaiting.reason,
-        relatedRef: awaiting.entity,
-      },
-      routingDecisions: [],
-      wiredJobs: [],
-      now,
-    });
-  }
-
-  // Step 6: derive and admit OutcomeJobSpecs.
   const specs = deriveOutcomeJobSpecs(plan);
   const jobAdmissions = admitJobs(planAdmission, specs);
 
-  // Step 7: connection/capability readiness gate.
+  const common = {
+    tenantScope: input.tenantScope,
+    customer: input.customer,
+    project: input.project,
+    ownership: input.ownership,
+    acceptedCommercialReference: input.acceptedCommercialReference,
+    soldScope: input.soldScope,
+    blueprint: input.blueprint,
+    recipe: input.recipe,
+    plan,
+    planAdmission,
+    specs,
+    jobAdmissions,
+    effectiveConfigRefs,
+    effectivePolicyRefs,
+    now,
+  };
+
+  // Step 5: interpret the PlanAdmissionResult.
+  if (planAdmission.status !== "ADMITTED") {
+    let actor: ActivationActor;
+    let code: string;
+    let reason: string;
+    let gate: string;
+    if (planAdmission.status === "BLOCKED") {
+      actor = "HUMAN_REVIEW";
+      code = "PLAN_ADMISSION_BLOCKED";
+      reason = planAdmission.blockedReasons.join("; ");
+      gate = "PLAN_ADMISSION";
+    } else {
+      const awaiting = planAdmission.awaiting;
+      if (awaiting === undefined) {
+        throw new InvalidProjectActivationProfileError(
+          "internal error: WAITING plan admission with no awaiting entity",
+        );
+      }
+      if (awaiting.entity === "plan-approval") {
+        actor = "HUMAN_REVIEW";
+        code = "PLAN_APPROVAL_REQUIRED";
+        gate = "PLAN_APPROVAL";
+      } else {
+        actor = "CUSTOMER";
+        code = "PLAN_SCOPE_DECISION_REQUIRED";
+        gate = `PLAN_SCOPE:${awaiting.entity}`;
+      }
+      reason = awaiting.reason;
+    }
+    return finish({
+      ...common,
+      state: "ACTION_REQUIRED",
+      nextRequiredActor: actor,
+      nextRequiredAction: { code, reason },
+      unresolvedGates: [gate],
+      platformDecision: undefined,
+      verifiedConnections: [],
+      consumedRoutesForProfile: [],
+      consumedRoutesForFingerprint: [],
+      jobs: [],
+    });
+  }
+
+  // Step 6: connection readiness gate.
   const requiredRequirementIds = new Set(
     plan.nodes.filter((node) => node.disposition === "REQUIRED").map((node) => node.requirementId),
   );
   const connectionRequirements = input.connectionRequirements ?? [];
-  const capabilityAdmissions = input.capabilityAdmissions ?? [];
+  const connectionBindings = input.connectionBindings ?? [];
+  const verifiedConnections: VerifiedConnectionObservation[] = [];
   for (const requirement of connectionRequirements) {
     if (
-      requirement.ownership.tenantId !== ownership.tenantId ||
-      requirement.ownership.customerId !== ownership.customerId ||
-      requirement.ownership.projectId !== ownership.projectId ||
-      requirement.ownership.serviceRef !== ownership.serviceRef
+      requirement.ownership.tenantId !== input.ownership.tenantId ||
+      requirement.ownership.customerId !== input.ownership.customerId ||
+      requirement.ownership.projectId !== input.ownership.projectId ||
+      requirement.ownership.serviceRef !== input.ownership.serviceRef
     ) {
       throw new InvalidProjectActivationProfileError(
-        `connectionRequirements entry "${requirement.connectionRequirementId}" does not belong to the given tenantScope/customer/project`,
+        `connectionRequirements entry "${requirement.connectionRequirementId}" does not belong to the given ownership`,
       );
     }
     if (!requiredRequirementIds.has(requirement.requiredCapabilityRef)) {
-      // Not in scope for the current sold plan (e.g. a CONDITIONAL
-      // requirement that was excluded) - readiness is not required.
+      // Not in scope for the current sold plan.
       continue;
     }
-    const admission = capabilityAdmissions.find(
-      (candidate) =>
-        candidate.requiredCapabilityRef === requirement.requiredCapabilityRef &&
-        candidate.ownership.tenantId === ownership.tenantId &&
-        candidate.ownership.customerId === ownership.customerId &&
-        candidate.ownership.projectId === ownership.projectId &&
-        candidate.ownership.serviceRef === ownership.serviceRef,
-    );
-    if (admission === undefined || admission.status !== "VERIFIED_AVAILABLE") {
-      return buildProfile({
-        tenantScope: input.tenantScope,
-        customer: input.customer,
-        project: input.project,
-        ownership,
-        plan,
-        commercialReference: input.acceptedCommercialReference,
-        state: "BLOCKED",
-        actor: requirement.accountOwner === "CUSTOMER_OWNED" ? "CUSTOMER" : "AKILTA",
-        decision: {
-          kind: "CONNECTION_NOT_VERIFIED",
-          reason: `connection requirement "${requirement.connectionRequirementId}" (capability "${requirement.requiredCapabilityRef}") has no VERIFIED_AVAILABLE capability admission`,
-          relatedRef: requirement.connectionRequirementId,
+    const compatible = connectionBindings.filter((binding) => {
+      if (binding.connectionRequirementId !== requirement.connectionRequirementId) {
+        return false;
+      }
+      if (
+        binding.ownership.tenantId !== requirement.ownership.tenantId ||
+        binding.ownership.customerId !== requirement.ownership.customerId ||
+        binding.ownership.projectId !== requirement.ownership.projectId ||
+        binding.ownership.serviceRef !== requirement.ownership.serviceRef
+      ) {
+        // A binding for this requirement id bound to a different
+        // customer/organization/project/service is never a valid
+        // candidate, however VERIFIED it may be.
+        return false;
+      }
+      if (requirement.minimumProviderScope.length > 0) {
+        const allowed = new Set(requirement.minimumProviderScope);
+        if (binding.delegatedScope.some((scope) => !allowed.has(scope))) {
+          return false;
+        }
+      }
+      return true;
+    });
+    const verified = compatible.filter((binding) => binding.connectionState === "VERIFIED");
+    const actor: ActivationActor = requirement.accountOwner === "CUSTOMER_OWNED" ? "CUSTOMER" : "AKILTA";
+    if (verified.length === 0) {
+      return finish({
+        ...common,
+        state: "ACTION_REQUIRED",
+        nextRequiredActor: actor,
+        nextRequiredAction: {
+          code: "CONNECTION_NOT_VERIFIED",
+          reason: `no compatible VERIFIED ConnectionBinding found for connection requirement "${requirement.connectionRequirementId}" (capability "${requirement.requiredCapabilityRef}")`,
         },
-        routingDecisions: [],
-        wiredJobs: [],
-        now,
+        unresolvedGates: [`CONNECTION:${requirement.connectionRequirementId}`],
+        platformDecision: undefined,
+        verifiedConnections: [],
+        consumedRoutesForProfile: [],
+        consumedRoutesForFingerprint: [],
+        jobs: [],
       });
     }
+    if (verified.length > 1) {
+      return finish({
+        ...common,
+        state: "ACTION_REQUIRED",
+        nextRequiredActor: "AKILTA",
+        nextRequiredAction: {
+          code: "CONNECTION_AMBIGUOUS",
+          reason: `multiple compatible VERIFIED ConnectionBindings found for connection requirement "${requirement.connectionRequirementId}"; exactly one is required`,
+        },
+        unresolvedGates: [`CONNECTION:${requirement.connectionRequirementId}`],
+        platformDecision: undefined,
+        verifiedConnections: [],
+        consumedRoutesForProfile: [],
+        consumedRoutesForFingerprint: [],
+        jobs: [],
+      });
+    }
+    const binding = verified[0]!;
+    if (binding.verificationEvidenceRef === undefined) {
+      throw new InvalidProjectActivationProfileError(
+        `internal error: VERIFIED ConnectionBinding "${binding.connectionBindingId}" has no verificationEvidenceRef`,
+      );
+    }
+    verifiedConnections.push({
+      connectionRequirementId: requirement.connectionRequirementId,
+      connectionBindingId: binding.connectionBindingId,
+      ...(binding.secretRef !== undefined ? { secretRef: binding.secretRef } : {}),
+      verificationEvidenceRef: binding.verificationEvidenceRef,
+    });
+  }
+
+  // Step 7: material platform decision.
+  let resolvedPlatformDecision: MaterialPlatformDecision | undefined;
+  if (input.platformDecision !== undefined) {
+    if (input.platformDecision.status === "ACTION_REQUIRED") {
+      return finish({
+        ...common,
+        state: "ACTION_REQUIRED",
+        nextRequiredActor: input.platformDecision.actor,
+        nextRequiredAction: {
+          code: "PLATFORM_DECISION_REQUIRED",
+          reason: input.platformDecision.reason,
+        },
+        unresolvedGates: [`PLATFORM_DECISION:${input.platformDecision.decisionRef}`],
+        platformDecision: undefined,
+        verifiedConnections,
+        consumedRoutesForProfile: [],
+        consumedRoutesForFingerprint: [],
+        jobs: [],
+      });
+    }
+    resolvedPlatformDecision = input.platformDecision;
   }
 
   // Step 8: worker routing.
   const workerRoutes = input.workerRoutes ?? [];
   const seenRouteRefs = new Set<string>();
-  const routingDecisions: WorkerRoutingDecision[] = [];
+  const consumedRoutesForProfile: ConsumedWorkerRoute[] = [];
+  const consumedRoutesForFingerprint: Array<{
+    routeRef: string;
+    request: WorkerRoutingRequest;
+    decision: WorkerRoutingDecision;
+  }> = [];
   for (const routeInput of workerRoutes) {
     const routeRef = requireNonEmptyString(routeInput.routeRef, "workerRoutes[].routeRef");
     if (seenRouteRefs.has(routeRef)) {
@@ -543,32 +782,30 @@ export function compileProjectActivationProfile(input: {
     }
     seenRouteRefs.add(routeRef);
     const decision = resolveWorkerRoute(routeInput.request);
-    routingDecisions.push(decision);
+    consumedRoutesForProfile.push({ routeRef, decision });
+    consumedRoutesForFingerprint.push({ routeRef, request: routeInput.request, decision });
     if (decision.status === "REJECTED") {
-      return buildProfile({
-        tenantScope: input.tenantScope,
-        customer: input.customer,
-        project: input.project,
-        ownership,
-        plan,
-        commercialReference: input.acceptedCommercialReference,
-        state: "BLOCKED",
-        actor: "AKILTA",
-        decision: {
-          kind: "WORKER_ROUTE_REJECTED",
+      return finish({
+        ...common,
+        state: "ACTION_REQUIRED",
+        nextRequiredActor: "AKILTA",
+        nextRequiredAction: {
+          code: "WORKER_ROUTE_REJECTED",
           reason: `worker route "${routeRef}" was rejected: ${decision.reason}`,
-          relatedRef: routeRef,
         },
-        routingDecisions,
-        wiredJobs: [],
-        now,
+        unresolvedGates: [`WORKER_ROUTE:${routeRef}`],
+        platformDecision: resolvedPlatformDecision,
+        verifiedConnections,
+        consumedRoutesForProfile,
+        consumedRoutesForFingerprint,
+        jobs: [],
       });
     }
   }
 
   // Step 9: wire admitted OutcomeJobs. Only reachable once every gate above
-  // is clean.
-  const wiredJobs = wireAdmittedOutcomeJobs({
+  // is clean. An ADMITTED plan alone never implies READY.
+  const jobs = wireAdmittedOutcomeJobs({
     tenantScope: input.tenantScope,
     customer: input.customer,
     project: input.project,
@@ -577,17 +814,16 @@ export function compileProjectActivationProfile(input: {
     specs,
   });
 
-  return buildProfile({
-    tenantScope: input.tenantScope,
-    customer: input.customer,
-    project: input.project,
-    ownership,
-    plan,
-    commercialReference: input.acceptedCommercialReference,
+  return finish({
+    ...common,
     state: "READY",
-    actor: "NONE",
-    routingDecisions,
-    wiredJobs,
-    now,
+    nextRequiredActor: "NONE",
+    nextRequiredAction: undefined,
+    unresolvedGates: [],
+    platformDecision: resolvedPlatformDecision,
+    verifiedConnections,
+    consumedRoutesForProfile,
+    consumedRoutesForFingerprint,
+    jobs,
   });
 }
