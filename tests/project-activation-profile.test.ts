@@ -235,7 +235,19 @@ function verifiedConnection(idSuffix: string): {
   return { connectionRequirement, connectionBinding };
 }
 
-function baseInput(planId: string, blueprint: OfferBlueprintVersion, recipe: DeliveryRecipe, soldScope: SoldScope) {
+const DEFAULT_EFFECTIVE_CONFIG_REFS = ["context:brand-guidelines"];
+const DEFAULT_EFFECTIVE_POLICY_REFS = ["policy:no-production-publish-without-approval"];
+
+function baseInput(
+  planId: string,
+  blueprint: OfferBlueprintVersion,
+  recipe: DeliveryRecipe,
+  soldScope: SoldScope,
+  overrides: {
+    effectiveConfigRefs?: ReadonlyArray<string>;
+    effectivePolicyRefs?: ReadonlyArray<string>;
+  } = {},
+) {
   return {
     tenantScope,
     customer,
@@ -245,6 +257,8 @@ function baseInput(planId: string, blueprint: OfferBlueprintVersion, recipe: Del
     blueprint,
     soldScope,
     recipe,
+    effectiveConfigRefs: overrides.effectiveConfigRefs ?? DEFAULT_EFFECTIVE_CONFIG_REFS,
+    effectivePolicyRefs: overrides.effectivePolicyRefs ?? DEFAULT_EFFECTIVE_POLICY_REFS,
     planId,
     now: "2026-09-23T00:00:00.000Z",
   };
@@ -501,6 +515,38 @@ test("A11: an unverified (CONNECTED_UNVERIFIED) binding cannot satisfy the conne
   assert.equal(connectionBinding.connectionState, "VERIFIED");
 });
 
+test("A11: a DEGRADED binding cannot satisfy the connection gate", () => {
+  const soldScope = includedSoldScope("scope-a11-degraded");
+  const { readinessAssertions, approval } = admittedInputs("plan-a11-degraded", blueprintA, soldScope);
+  const { connectionRequirement, connectionBinding } = verifiedConnection("a11-degraded");
+  const degraded = transitionConnectionBinding(connectionBinding, "DEGRADED");
+  const result = compileProjectActivationProfile({
+    ...baseInput("plan-a11-degraded", blueprintA, recipeA, soldScope),
+    readinessAssertions,
+    approval,
+    connectionRequirements: [connectionRequirement],
+    connectionBindings: [degraded],
+  });
+  assert.equal(result.profile.state, "ACTION_REQUIRED");
+  assert.equal(result.profile.nextRequiredAction?.code, "CONNECTION_NOT_VERIFIED");
+});
+
+test("A11: a REVOKED binding cannot satisfy the connection gate", () => {
+  const soldScope = includedSoldScope("scope-a11-revoked");
+  const { readinessAssertions, approval } = admittedInputs("plan-a11-revoked", blueprintA, soldScope);
+  const { connectionRequirement, connectionBinding } = verifiedConnection("a11-revoked");
+  const revoked = transitionConnectionBinding(connectionBinding, "REVOKED");
+  const result = compileProjectActivationProfile({
+    ...baseInput("plan-a11-revoked", blueprintA, recipeA, soldScope),
+    readinessAssertions,
+    approval,
+    connectionRequirements: [connectionRequirement],
+    connectionBindings: [revoked],
+  });
+  assert.equal(result.profile.state, "ACTION_REQUIRED");
+  assert.equal(result.profile.nextRequiredAction?.code, "CONNECTION_NOT_VERIFIED");
+});
+
 test("A12: a VERIFIED binding belonging to a different project cannot satisfy a same-id requirement", () => {
   const soldScope = includedSoldScope("scope-a12");
   const { readinessAssertions, approval } = admittedInputs("plan-a12", blueprintA, soldScope);
@@ -602,18 +648,51 @@ test("A14: an ACTION_REQUIRED platform decision blocks with its own declared act
   assert.equal(result.profile.state, "ACTION_REQUIRED");
   assert.equal(result.profile.nextRequiredActor, "HUMAN_REVIEW");
   assert.equal(result.profile.nextRequiredAction?.code, "PLATFORM_DECISION_REQUIRED");
+  // Rev107 F2: an ACTION_REQUIRED decision still blocks, but its exact
+  // provenance must survive onto the profile - never dropped.
+  assert.equal(result.profile.platformDecision?.decisionRef, "decision-a14");
+  assert.equal(result.profile.platformDecision?.status, "ACTION_REQUIRED");
+});
+
+test("F2 regression: two ACTION_REQUIRED platform decisions with identical reason/actor but different decisionRef preserve distinct provenance and produce different fingerprints", () => {
+  const shared = readyInputs("plan-f2-regression");
+  const decisionA = createMaterialPlatformDecision({
+    decisionRef: "decision-f2-a",
+    status: "ACTION_REQUIRED",
+    reason: "needs a human call",
+    actor: "HUMAN_REVIEW",
+  });
+  const decisionB = createMaterialPlatformDecision({
+    decisionRef: "decision-f2-b",
+    status: "ACTION_REQUIRED",
+    reason: "needs a human call",
+    actor: "HUMAN_REVIEW",
+  });
+  const resultA = compileProjectActivationProfile({ ...shared, platformDecision: decisionA });
+  const resultB = compileProjectActivationProfile({ ...shared, platformDecision: decisionB });
+  assert.equal(resultA.profile.state, "ACTION_REQUIRED");
+  assert.equal(resultB.profile.state, "ACTION_REQUIRED");
+  assert.equal(resultA.profile.platformDecision?.decisionRef, "decision-f2-a");
+  assert.equal(resultB.profile.platformDecision?.decisionRef, "decision-f2-b");
+  assert.notEqual(resultA.profile.sourceFingerprint, resultB.profile.sourceFingerprint);
 });
 
 // ---------------------------------------------------------------------------
 // A15/A16/A17: worker routing
 // ---------------------------------------------------------------------------
 
-function readyInputs(planId: string) {
+function readyInputs(
+  planId: string,
+  overrides: {
+    effectiveConfigRefs?: ReadonlyArray<string>;
+    effectivePolicyRefs?: ReadonlyArray<string>;
+  } = {},
+) {
   const soldScope = includedSoldScope(`scope-${planId}`);
   const { readinessAssertions, approval } = admittedInputs(planId, blueprintA, soldScope);
   const { connectionRequirement, connectionBinding } = verifiedConnection(planId);
   return {
-    ...baseInput(planId, blueprintA, recipeA, soldScope),
+    ...baseInput(planId, blueprintA, recipeA, soldScope, overrides),
     readinessAssertions,
     approval,
     connectionRequirements: [connectionRequirement],
@@ -646,6 +725,62 @@ test("A15/A17: an ineligible preferred worker is skipped and an eligible fallbac
   assert.equal(result.profile.state, "READY");
   assert.equal(result.profile.consumedRoutes[0]?.decision.status, "ROUTED");
   assert.equal(result.profile.consumedRoutes[0]?.decision.executorWorkerId, "worker-eligible");
+});
+
+test("A15/A17: an UNAVAILABLE preferred worker is skipped in favor of an eligible fallback", () => {
+  const preferred = admittedWorker({ workerId: "worker-unavailable", availability: "UNAVAILABLE" });
+  const fallback = admittedWorker({ workerId: "worker-eligible-unavailable-fallback" });
+  const route: ActivationWorkerRouteInput = {
+    routeRef: "route-a17-unavailable",
+    request: routableRequest({ executorCandidates: [preferred, fallback] }),
+  };
+  const result = compileProjectActivationProfile({
+    ...readyInputs("plan-a17-unavailable"),
+    workerRoutes: [route],
+  });
+  assert.equal(result.profile.state, "READY");
+  assert.equal(result.profile.consumedRoutes[0]?.decision.executorWorkerId, "worker-eligible-unavailable-fallback");
+});
+
+test("A15/A17: an under-authorized preferred worker is skipped in favor of an ELEVATED-authority fallback", () => {
+  const preferred = admittedWorker({ workerId: "worker-standard-authority" });
+  const fallback = admittedWorker({ workerId: "worker-elevated-authority", authorityLevel: "ELEVATED" });
+  const route: ActivationWorkerRouteInput = {
+    routeRef: "route-a17-authority",
+    request: routableRequest({
+      requiredAuthorityLevel: "ELEVATED",
+      executorCandidates: [preferred, fallback],
+    }),
+  };
+  const result = compileProjectActivationProfile({
+    ...readyInputs("plan-a17-authority"),
+    workerRoutes: [route],
+  });
+  assert.equal(result.profile.state, "READY");
+  assert.equal(result.profile.consumedRoutes[0]?.decision.executorWorkerId, "worker-elevated-authority");
+});
+
+test("A15/A17: a preferred worker missing a required tool/policy constraint is skipped in favor of a fully-declared fallback", () => {
+  const preferred = admittedWorker({ workerId: "worker-missing-constraint" });
+  const fallback = admittedWorker({
+    workerId: "worker-fully-declared",
+    declaredToolRefs: ["tool:required-one"],
+    declaredPolicyConstraintRefs: ["policy:required-one"],
+  });
+  const route: ActivationWorkerRouteInput = {
+    routeRef: "route-a17-constraint",
+    request: routableRequest({
+      requiredToolRefs: ["tool:required-one"],
+      requiredPolicyConstraintRefs: ["policy:required-one"],
+      executorCandidates: [preferred, fallback],
+    }),
+  };
+  const result = compileProjectActivationProfile({
+    ...readyInputs("plan-a17-constraint"),
+    workerRoutes: [route],
+  });
+  assert.equal(result.profile.state, "READY");
+  assert.equal(result.profile.consumedRoutes[0]?.decision.executorWorkerId, "worker-fully-declared");
 });
 
 test("a duplicate routeRef throws rather than silently double-routing", () => {
@@ -693,37 +828,27 @@ test("A2: identical inputs produce a deep-equal profile and an equal sourceFinge
 // A18: material mutations change the fingerprint
 // ---------------------------------------------------------------------------
 
-test("A18: a config/policy/platform/connection/routing mutation each change the sourceFingerprint", () => {
-  const baseline = compileProjectActivationProfile(readyInputs("plan-a18-base"));
+test("A18: independently varying effectiveConfigRefs, effectivePolicyRefs, platform decision, verified-connection evidence, or routing input each change the sourceFingerprint from an otherwise-identical base", () => {
+  // One shared base input (same planId/blueprint/soldScope/recipe/connection
+  // identity throughout) - each sub-case changes exactly one field from it,
+  // per Rev107 F3's "controlled one-variable-at-a-time mutation" requirement.
+  const shared = readyInputs("plan-a18-shared");
+  const baseline = compileProjectActivationProfile(shared);
 
-  const differentRecipe = createDeliveryRecipe({
-    recipeId: recipeA.recipeId,
-    version: recipeA.version,
-    jobFamily: recipeA.jobFamily,
-    requiredContextRefs: ["context:different-config"],
-    policyRefs: recipeA.policyRefs,
-    gates: [],
-    evidenceRequirements: [],
-    steps: [
-      {
-        stepId: "step-1",
-        dependsOn: [],
-        allowedWorkerRefs: [],
-        prohibitedActions: [],
-        requiredGateRefs: [],
-        requiredEvidenceRefs: [],
-        recovery: "NO_EXTERNAL_EFFECT",
-      },
-    ],
-  });
   const configVaried = compileProjectActivationProfile({
-    ...readyInputs("plan-a18-config"),
-    recipe: differentRecipe,
+    ...shared,
+    effectiveConfigRefs: ["context:a-materially-different-config"],
   });
   assert.notEqual(configVaried.profile.sourceFingerprint, baseline.profile.sourceFingerprint);
 
-  const withPlatformDecision = compileProjectActivationProfile({
-    ...readyInputs("plan-a18-platform"),
+  const policyVaried = compileProjectActivationProfile({
+    ...shared,
+    effectivePolicyRefs: ["policy:a-materially-different-policy"],
+  });
+  assert.notEqual(policyVaried.profile.sourceFingerprint, baseline.profile.sourceFingerprint);
+
+  const platformVaried = compileProjectActivationProfile({
+    ...shared,
     platformDecision: createMaterialPlatformDecision({
       decisionRef: "decision-a18",
       status: "RESOLVED",
@@ -732,31 +857,49 @@ test("A18: a config/policy/platform/connection/routing mutation each change the 
       selectedOptionRef: "standard-track",
     }),
   });
-  const withoutPlatformDecision = compileProjectActivationProfile(readyInputs("plan-a18-platform"));
-  assert.notEqual(withPlatformDecision.profile.sourceFingerprint, withoutPlatformDecision.profile.sourceFingerprint);
+  assert.notEqual(platformVaried.profile.sourceFingerprint, baseline.profile.sourceFingerprint);
 
-  const routeInputs = readyInputs("plan-a18-route");
-  const withRoute = compileProjectActivationProfile({
-    ...routeInputs,
+  const routeVaried = compileProjectActivationProfile({
+    ...shared,
     workerRoutes: [{ routeRef: "route-a18", request: routableRequest() }],
   });
-  const withoutRoute = compileProjectActivationProfile(routeInputs);
-  assert.notEqual(withRoute.profile.sourceFingerprint, withoutRoute.profile.sourceFingerprint);
+  assert.notEqual(routeVaried.profile.sourceFingerprint, baseline.profile.sourceFingerprint);
 
-  const blockedByMissingConnection = compileProjectActivationProfile(
-    (() => {
-      const soldScope = includedSoldScope("scope-a18-conn");
-      const { readinessAssertions, approval } = admittedInputs("plan-a18-conn", blueprintA, soldScope);
-      const { connectionRequirement } = verifiedConnection("a18-conn");
-      return {
-        ...baseInput("plan-a18-conn", blueprintA, recipeA, soldScope),
-        readinessAssertions,
-        approval,
-        connectionRequirements: [connectionRequirement],
-      };
-    })(),
+  // Connection observation: identical requirement/ownership/ids, only the
+  // verification evidence ref differs.
+  const { connectionRequirement, connectionBinding } = verifiedConnection("a18-evidence");
+  const alternateEvidenceBinding = verifyConnectionBinding(
+    transitionConnectionBinding(
+      createConnectionBinding({
+        connectionBindingId: connectionBinding.connectionBindingId,
+        requirement: connectionRequirement,
+        ownership,
+        providerRef: "provider-1",
+        workspaceRef: "workspace-1",
+        integrationInstanceRef: "instance-1",
+        delegatedScope: ["catalog:read"],
+      }),
+      "CONNECTED_UNVERIFIED",
+    ),
+    "evidence://a-materially-different-evidence-value",
   );
-  assert.notEqual(blockedByMissingConnection.profile.sourceFingerprint, baseline.profile.sourceFingerprint);
+  const evidenceSoldScope = includedSoldScope("scope-a18-evidence");
+  const evidenceAdmitted = admittedInputs("plan-a18-evidence", blueprintA, evidenceSoldScope);
+  const evidenceShared = {
+    ...baseInput("plan-a18-evidence", blueprintA, recipeA, evidenceSoldScope),
+    readinessAssertions: evidenceAdmitted.readinessAssertions,
+    approval: evidenceAdmitted.approval,
+    connectionRequirements: [connectionRequirement],
+  };
+  const evidenceBaseline = compileProjectActivationProfile({
+    ...evidenceShared,
+    connectionBindings: [connectionBinding],
+  });
+  const evidenceVaried = compileProjectActivationProfile({
+    ...evidenceShared,
+    connectionBindings: [alternateEvidenceBinding],
+  });
+  assert.notEqual(evidenceVaried.profile.sourceFingerprint, evidenceBaseline.profile.sourceFingerprint);
 });
 
 // ---------------------------------------------------------------------------

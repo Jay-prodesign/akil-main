@@ -65,6 +65,13 @@ function requireNonEmptyString(value: unknown, field: string): string {
   return value;
 }
 
+function requireOpaqueStringArray(value: unknown, field: string): ReadonlyArray<string> {
+  if (!Array.isArray(value)) {
+    throw new InvalidProjectActivationProfileError(`${field} must be an array`);
+  }
+  return value.map((entry, index) => requireNonEmptyString(entry, `${field}[${index}]`));
+}
+
 function requireNonEmptyPlatformDecisionString(value: unknown, field: string): string {
   if (typeof value !== "string") {
     throw new InvalidMaterialPlatformDecisionError(`${field} must be a string`);
@@ -267,6 +274,15 @@ export interface ConsumedWorkerRoute {
  * entirely from this repository's existing primitives. `state` is
  * `READY`/`ACTION_REQUIRED` only; an `ADMITTED` plan never by itself
  * implies `READY` (connection/platform-decision/routing gates still apply).
+ *
+ * `effectiveConfigRefs`/`effectivePolicyRefs` are independent caller-
+ * supplied activation-time provenance (Rev107 F1) - never derived from
+ * `recipe.requiredContextRefs`/`recipe.policyRefs`, so a material
+ * effective-config/policy change is representable without mutating the
+ * recipe itself. `platformDecision` is preserved on the profile whenever a
+ * caller supplies one, whether `RESOLVED` or `ACTION_REQUIRED` (Rev107 F2)
+ * - an unresolved decision still blocks activation, but its exact
+ * provenance (including `decisionRef`) is never dropped from the output.
  */
 export interface ProjectActivationProfile {
   readonly version: 1;
@@ -496,6 +512,8 @@ export function compileProjectActivationProfile(input: {
   blueprint: OfferBlueprintVersion;
   soldScope: SoldScope;
   recipe: DeliveryRecipe;
+  effectiveConfigRefs: unknown;
+  effectivePolicyRefs: unknown;
   evidence?: ReadonlyArray<CustomerEvidenceItem>;
   planId: unknown;
   planVersionNumber?: unknown;
@@ -560,8 +578,13 @@ export function compileProjectActivationProfile(input: {
       "recipe.jobFamily does not match blueprint.blueprintId",
     );
   }
-  const effectiveConfigRefs = input.recipe.requiredContextRefs;
-  const effectivePolicyRefs = input.recipe.policyRefs;
+
+  // effectiveConfigRefs/effectivePolicyRefs are independent, caller-supplied
+  // activation-time provenance (Rev107 F1) - never derived from
+  // recipe.requiredContextRefs/policyRefs, so a material effective-config/
+  // policy change is representable without mutating the recipe itself.
+  const effectiveConfigRefs = requireOpaqueStringArray(input.effectiveConfigRefs, "effectiveConfigRefs");
+  const effectivePolicyRefs = requireOpaqueStringArray(input.effectivePolicyRefs, "effectivePolicyRefs");
 
   // Step 4: compile and admit the plan, unconditionally.
   const plan = compilePlan({
@@ -754,7 +777,11 @@ export function compileProjectActivationProfile(input: {
           reason: input.platformDecision.reason,
         },
         unresolvedGates: [`PLATFORM_DECISION:${input.platformDecision.decisionRef}`],
-        platformDecision: undefined,
+        // Rev107 F2: an ACTION_REQUIRED platform decision still blocks
+        // activation, but its exact provenance (including decisionRef) must
+        // survive onto the profile and fingerprint - it is never dropped
+        // merely because it did not resolve.
+        platformDecision: input.platformDecision,
         verifiedConnections,
         consumedRoutesForProfile: [],
         consumedRoutesForFingerprint: [],
