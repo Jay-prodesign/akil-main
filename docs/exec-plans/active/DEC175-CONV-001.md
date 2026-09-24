@@ -9,7 +9,9 @@
 - **Branch:** `claude/dec175-reference-cold-start-convergence`, created from the exact base SHA above (not from `main`).
 - **Dependency lineage:** ADM-PROJ-001 (PR #101, Rev110 PASS/VERIFIED) → CXP-ACT-001 (PR #102, Rev111 PASS/VERIFIED, Rev112 administrative head-advance accepted) → DEC175-CONV-001 (this task).
 - **PR:** #103 (`https://github.com/Jay-prodesign/akil-main/pull/103`), OPEN/DRAFT/HOLD_MERGE, base `claude/cxp-act-001-activation-required-action-projection`.
-- **HEAD_SHA — behavioral/test content:** `86ee91a2809052984a140159bf93539570aa527a` (the implementation commit reviewed by Rev114; unchanged by this evidence-only correction — the test file is byte-for-byte untouched). The full new HEAD_SHA after this correction commit is stated in the PR body/description once pushed, per this doc's own "Rev114 evidence correction" section below.
+- **BEHAVIORAL_HEAD (test/source content, unchanged since Rev114):** `86ee91a2809052984a140159bf93539570aa527a` — the implementation commit Rev114 reviewed. The convergence test file remains byte-for-byte identical to this commit through every subsequent evidence-only correction.
+- **PRE_CORRECTION_REVIEW_HEAD (reviewed by Rev115):** `3118ea0f958cefbbdf89730eeacc1056a303fad4` — the Rev114 F1/F2 evidence correction (boundary/dependency scan added; doc updated), independently re-verified via `git rev-parse HEAD` against `origin/claude/dec175-reference-cold-start-convergence` immediately before this further correction. Rev115 confirmed F1 satisfied here; F2 was not fully resolved (this SHA itself was never named directly in the doc, and the doc still pointed to the PR body for it).
+- **POST_PUSH_HEAD_RETURNED_TO_BRAIN:** stated in this task's own status-update message once this doc-only truth-sync commit is pushed — a commit cannot embed its own future SHA, so this field is deliberately left for the out-of-band handoff rather than claimed here (Rev115's own instruction).
 
 ## Goal
 
@@ -105,15 +107,17 @@ All five scans pass with zero findings, independently confirming the same source
 
 ## Status
 
-Brain Rev114 (`BRAIN REV114 — DEC175-CONV-001 EXACT-HEAD REVIEW — CHANGES_REQUIRED`) reviewed exact head `86ee91a2809052984a140159bf93539570aa527a`: the composed integration implementation itself materially satisfies Rev113 C1-C7 on the diff (no source-code correction admitted), but returned CHANGES_REQUIRED, evidence/handoff only, on two findings:
+Brain Rev114 (`BRAIN REV114 — DEC175-CONV-001 EXACT-HEAD REVIEW — CHANGES_REQUIRED`) reviewed `BEHAVIORAL_HEAD` `86ee91a2809052984a140159bf93539570aa527a`: the composed integration implementation itself materially satisfies Rev113 C1-C7 on the diff (no source-code correction admitted), but returned CHANGES_REQUIRED, evidence/handoff only, on two findings (F1: missing boundary/dependency scan; F2: stale doc/HEAD_SHA/next-action). F1 was resolved by the dedicated scan section above; F2 was addressed but not fully — Brain's independent review of that correction follows.
 
-- **F1 (resolved by this correction):** C8's required boundary/dependency scan was missing — `git diff`/`git status` alone were substituted for it. Resolved by the dedicated scan section above.
-- **F2 (resolved by this correction):** this doc was stale — no full HEAD_SHA recorded, said the PR was "once opened" when PR #103 already existed, and NEXT EXACT ACTION still described commit/push/open steps already completed. Resolved by the Provenance section's PR/HEAD_SHA fields and the NEXT EXACT ACTION below.
+Brain Rev115 (`BRAIN REV115 — DEC175-CONV-001 EXACT-HEAD REVIEW — CHANGES_REQUIRED`) reviewed `PRE_CORRECTION_REVIEW_HEAD` `3118ea0f958cefbbdf89730eeacc1056a303fad4`:
 
-Per Rev114's own instruction, this correction is evidence/doc-only — the convergence test file remains byte-for-byte unchanged, and no `src/**` file was touched.
+- **Rev114 F1: SATISFIED.** The five-part boundary/dependency scan is confirmed distinct from diff/status write-boundary evidence, zero findings. No new source/behavioral defect admitted.
+- **Rev114 F2: NOT FULLY RESOLVED (resolved by this correction).** The doc recorded only `BEHAVIORAL_HEAD` and deferred the full new HEAD_SHA to the PR body instead of naming `3118ea0f958cefbbdf89730eeacc1056a303fad4` directly, and NEXT EXACT ACTION still said "push ... and return the exact new head" even though that push had already happened. Resolved by this doc-only truth-sync: the Provenance section now names `PRE_CORRECTION_REVIEW_HEAD` explicitly and separates it from the not-yet-known `POST_PUSH_HEAD_RETURNED_TO_BRAIN` (per Rev115's own instruction that a commit cannot embed its own future SHA), and NEXT EXACT ACTION below reflects the truthful current state.
 
-**IMPLEMENTED / SELF-VALIDATED.** Awaiting Brain's independent review of this new exact head. Claude's authority ends here — this status is not `COMPLETED`, no merge is authorized, and PR #103 stays OPEN/DRAFT/HOLD_MERGE pending Brain's verdict.
+This correction is doc-only — no test/source change, no rerun required, no new branch/task. `git status`/`git diff --stat` at this exact head show only this file modified.
+
+**IMPLEMENTED / SELF-VALIDATED.** Awaiting Brain's independent review of this new exact head (`POST_PUSH_HEAD_RETURNED_TO_BRAIN`). Claude's authority ends here — this status is not `COMPLETED`, no merge is authorized, and PR #103 stays OPEN/DRAFT/HOLD_MERGE pending Brain's verdict.
 
 ## Next exact action
 
-Push this one bounded evidence-only correction (this doc only) to `claude/dec175-reference-cold-start-convergence` / PR #103, and return the exact new head for immediate independent Brain review. No further engineering action, no new branch, and no `src/**` change until Brain reviews this exact head.
+Push this one bounded doc-only truth-sync (this file only) to `claude/dec175-reference-cold-start-convergence` / PR #103, and return the resulting new full exact head (`POST_PUSH_HEAD_RETURNED_TO_BRAIN`) for immediate independent Brain review. No test/source change, no rerun, no new branch/task, no merge, no deploy, and no Founder authorization is required unless this correction itself exposes new evidence.
