@@ -94,8 +94,37 @@ K. No production activation — no real IdP/KMS/provider secret/email/payment/sp
 - No import of PR #101 tip `15815e9` or `9ae3063` as authority — F1-F3 must be reproduced V5-CONV-natively.
 - No new Service Catalog, workflow engine, registry, IAM, or billing path — reuse `ServiceCatalogAdmission`/`bindAdmittedRecipeToPlan` exactly.
 
+## Implementation record
+
+1. **Phase 0** (`037cfc7`): this document, no semantic source mutation.
+2. **Phase 1 materialization** (`bb93fbb`): the exact ADM-PROJ-001 accepted tree at `79137f94a5149be36d02dc4bc60c25ff1902864c` (`docs/exec-plans/active/ADM-PROJ-001.md`, `src/domain/project-activation-profile.ts`, `tests/project-activation-profile.test.ts`) reproduced byte-identical onto the `#89` base — independently diffed against the exact accepted commit before commit. First conflict-discovery checkpoint: strict typecheck clean, clean build, 32/32 targeted tests, **1691/1691 full regression, zero `#89`-integration conflicts** — the materialized tree needed no adaptation against `#89`'s customer-scoped types before the Rev113/116/117 corrections below.
+3. **Rev113 F1-F3 correction** (`6d0880d`): reproduced natively (not imported from excluded `15815e9`/`9ae3063`) — early-blocker `platformDecision` provenance survival, same-loop `verifiedConnections` accumulation survival, and `AcceptedCommercialReference`/`MaterialPlatformDecision` factory-boundary revalidation placed immediately after Step 1 (preserving Rev101 structural-mismatch-first priority). 6 new adversarial tests; guard-disable sanity confirmed (disabling the F3 boundary revalidation makes exactly its own 2 tests fail). 1697/1697 full regression.
+4. **Rev117 recipe-version authority** (`6911b4a`): `ServiceCatalogAdmission.recipeVersion` (recorded from the concrete recipe at admission time) + `bindAdmittedRecipeToPlan` exact-version enforcement. Updated the one test whose premise Rev117 explicitly supersedes (AI8), added 2 new adversarial tests. All existing hand-built `ServiceCatalogAdmission` test literals use object-spread from the factory's own output, so `recipeVersion` propagated with zero other source-site changes. 1699/1699 full regression.
+5. **Rev116 admitted service/recipe binding** (`cb4bbb0`): `compileProjectActivationProfile` now requires an exact `ServiceCatalogAdmission` and calls `bindAdmittedRecipeToPlan` against its own compiled plan/spec set immediately after Step 4, before Step 5 — an internal canonical provenance/invariant check that throws (`InvalidDeliveryRecipePlanBindingError`) rather than producing an actor-bearing `ACTION_REQUIRED` blocker. The resulting `DeliveryRecipePlanBinding` is returned on `ProjectActivationCompilation` and is now material to `sourceFingerprint`. 7 new tests; guard-disable sanity confirmed (swallowing the binding call's errors makes exactly its 5 dedicated adversarial tests fail). 1706/1706 full regression.
+6. **Rev114/115 WEBSITE_BUILD_v1 convergence proof** (`851c598`, `tests/v5-conv-001-reference-customer-convergence.test.ts`): the full reference-customer chain — manual/proposal commercial reference (never `CommercialOrder`/checkout), `compileProjectActivationProfile` (now admitted-service/recipe-bound), admitted/wired jobs, the already-proven `authorized-outcome-job-operations.ts` execution/verification lifecycle on one selected job (including a governed `BLOCKED`→recovery cycle that never skips verification), and a rebuilt truthful `ClientProjectSnapshot`/shell (one verified job never fabricates whole-project completion). Per Rev115's fresh source check, this lineage's `ClientProjectSnapshot` does not consume `ProjectActivationProfile` at all (that is CXP-ACT-001's separate composition on a different, non-`#89` branch) — `nextAction` keeps its existing narrow communication-required semantics, and no such wiring was attempted or assumed. 15 tests (G1/G1b/G2 + N1-N12 covering Rev114's mandatory negative-witness list). **1721/1721 full regression.**
+
+## Rev109 A-K acceptance mapping
+
+| Item | Evidence |
+|---|---|
+| A. Cold reconstruction | G1 — no caller-supplied label is trusted without resolution through the real compiler/binding chain |
+| B. Provenance | G1 (identities, effective config/policy provenance equal to caller inputs, platform-decision/connection/route provenance present) |
+| C. Fail-closed | N1, N2, N5, N6, N8, N9, N10 |
+| D. Authority | G2 (capability/service admission alone cannot authorize EXECUTING — `MissingExecutionRoutingRequirementError`) |
+| E. Connections | N2, N3, N4 |
+| F. Routing | N6, N7 |
+| G. Evidence/verification | G2 (VerificationResult + evidence required; ExecutionResult/self-report alone insufficient) |
+| H. Recovery | G2 (BLOCKED→recovered→EXECUTING never itself produces VERIFIED) |
+| I. Tenant/customer/project isolation | N4, N8 |
+| J. Truthful next action | G2 (`deliveryStatus.overallStatus === "IN_PROGRESS"`, `verifiedCompletedJobIds` exact, other jobs stay real `DRAFT`) |
+| K. No production activation | true throughout — no real IdP/KMS/provider secret/email/payment/spend/live federation/public/customer effect anywhere in this task |
+
+C7 (zero regressions) / C8 (typecheck+build+targeted+full regression+boundary scan) equivalents: see the full validation log in each commit message above; final state is 1721/1721.
+
 ## Status
 
-**PHASE 0: COMPLETE** (this document, no semantic source mutation in this commit).
+**IMPLEMENTED / SELF-VALIDATED.** Claude's authority ends here — this is not `COMPLETED`; no merge is authorized. Awaiting Brain's independent exact-head review. PR will be opened DRAFT/HOLD_MERGE against `claude/cxp-001w-customer-repository-key-collision-safe-encoding` (PR #89 base), per Rev112/Rev121's explicit instruction.
 
-**PHASE 1: IN PROGRESS.** Next: materialize the exact ADM-PROJ-001 accepted tree at `79137f94a5149be36d02dc4bc60c25ff1902864c` for the 3 bounded files above, prove byte/tree equivalence, then run strict typecheck/build/targeted tests as the first conflict-discovery checkpoint against `#89`'s customer-scoped types.
+## Next exact action
+
+Push the final head, open the Draft PR (base = PR #89's branch, not `main`), and return the exact head for independent Brain review per Rev112 step 11 / Rev121's "Brain then performs independent exact-head review". No merge/MAIN mutation authorized by this task.
