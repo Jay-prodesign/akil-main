@@ -37,8 +37,58 @@ import {
   WEBSITE_BUILD_V1_SNAPSHOT_JOBS,
   WEBSITE_BUILD_V1_CLIENT_PROJECT_SNAPSHOT,
 } from "../src/fixtures/website-build-v1-snapshot.js";
+import { WEBSITE_BUILD_V1_RECIPE } from "../src/fixtures/website-build-v1-recipe.js";
+import {
+  createAcceptedCommercialReference,
+  type ProjectActivationProfile,
+} from "../src/domain/project-activation-profile.js";
 
 const fixture = buildWebsiteBuildV1Fixture();
+
+const CXP_ACT_001_COMMERCIAL_REFERENCE = createAcceptedCommercialReference({
+  acceptanceRef: "acceptance-cxp-act-001",
+  sourceBlueprintId: fixture.blueprint.blueprintId,
+  sourceBlueprintVersion: fixture.blueprint.version,
+  soldScopeId: fixture.soldScope.soldScopeId,
+  outcomeContractRef: fixture.soldScope.outcomeContractRef,
+});
+
+/**
+ * A minimal, valid `ProjectActivationProfile` for CXP-ACT-001 tests. This
+ * module never calls `compileProjectActivationProfile` - per the
+ * implementation contract, `buildClientProjectSnapshot` reads only
+ * `ownership`/`state`/`nextRequiredActor`/`nextRequiredAction`, so tests
+ * build the shape directly rather than pulling in ADM-PROJ-001's compiler.
+ */
+function buildActivationProfile(
+  overrides: Partial<ProjectActivationProfile> = {},
+): ProjectActivationProfile {
+  return {
+    version: 1,
+    tenantId: WEBSITE_BUILD_V1_OWNERSHIP.tenantId,
+    customerId: WEBSITE_BUILD_V1_OWNERSHIP.customerId,
+    projectId: WEBSITE_BUILD_V1_OWNERSHIP.projectId,
+    ownership: WEBSITE_BUILD_V1_OWNERSHIP,
+    acceptedCommercialReference: CXP_ACT_001_COMMERCIAL_REFERENCE,
+    soldScopeId: fixture.soldScope.soldScopeId,
+    blueprintId: fixture.blueprint.blueprintId,
+    blueprintVersion: fixture.blueprint.version,
+    recipeId: WEBSITE_BUILD_V1_RECIPE.recipeId,
+    recipeVersion: WEBSITE_BUILD_V1_RECIPE.version,
+    planId: WEBSITE_BUILD_V1_SNAPSHOT_PLAN.planId,
+    planVersion: WEBSITE_BUILD_V1_SNAPSHOT_PLAN.version,
+    effectiveConfigRefs: [],
+    effectivePolicyRefs: [],
+    verifiedConnections: [],
+    consumedRoutes: [],
+    state: "READY",
+    nextRequiredActor: "NONE",
+    unresolvedGates: [],
+    sourceFingerprint: "fingerprint-cxp-act-001",
+    compiledAt: "2026-09-24T00:00:00.000Z",
+    ...overrides,
+  };
+}
 
 function minimalInput() {
   return {
@@ -415,4 +465,257 @@ test("P12: this module has no import statement pulling in a value (non-type) dep
   assert.equal("admitPlan" in snapshotModule, false);
   assert.equal("admitJobs" in snapshotModule, false);
   assert.equal("verifyOutcomeJob" in snapshotModule, false);
+});
+
+// ---------------------------------------------------------------------------
+// CXP-ACT-001: activation-derived nextAction
+// ---------------------------------------------------------------------------
+
+test("CXP-ACT-001 A1: ACTION_REQUIRED/CUSTOMER activation yields CLIENT_ACTION_REQUIRED", () => {
+  const snapshot = buildClientProjectSnapshot({
+    ...minimalInput(),
+    communicationHistory: WEBSITE_BUILD_V1_COMMUNICATION_HISTORY,
+    activationProfile: buildActivationProfile({
+      state: "ACTION_REQUIRED",
+      nextRequiredActor: "CUSTOMER",
+      nextRequiredAction: { code: "PLAN_SCOPE_DECISION_REQUIRED", reason: "scope decision needed" },
+    }),
+  });
+  assert.equal(snapshot.nextAction.owner, "CLIENT_ACTION_REQUIRED");
+});
+
+test("CXP-ACT-001 A2: ACTION_REQUIRED/AKILTA activation yields AKILTA_ACTION_REQUIRED", () => {
+  const snapshot = buildClientProjectSnapshot({
+    ...minimalInput(),
+    activationProfile: buildActivationProfile({
+      state: "ACTION_REQUIRED",
+      nextRequiredActor: "AKILTA",
+      nextRequiredAction: { code: "CONNECTION_NOT_VERIFIED", reason: "connection missing" },
+    }),
+  });
+  assert.equal(snapshot.nextAction.owner, "AKILTA_ACTION_REQUIRED");
+});
+
+test("CXP-ACT-001 A3: ACTION_REQUIRED/HUMAN_REVIEW activation yields AKILTA_ACTION_REQUIRED", () => {
+  const snapshot = buildClientProjectSnapshot({
+    ...minimalInput(),
+    activationProfile: buildActivationProfile({
+      state: "ACTION_REQUIRED",
+      nextRequiredActor: "HUMAN_REVIEW",
+      nextRequiredAction: { code: "PLAN_APPROVAL_REQUIRED", reason: "approval needed" },
+    }),
+  });
+  assert.equal(snapshot.nextAction.owner, "AKILTA_ACTION_REQUIRED");
+});
+
+test("CXP-ACT-001 A4: READY activation preserves existing communication-derived action, and NO_ACTION_NEEDED fallback when there is none", () => {
+  const withCommunication = buildClientProjectSnapshot({
+    ...minimalInput(),
+    communicationHistory: WEBSITE_BUILD_V1_COMMUNICATION_HISTORY,
+    activationProfile: buildActivationProfile({ state: "READY" }),
+  });
+  assert.equal(withCommunication.nextAction.owner, "CLIENT_ACTION_REQUIRED");
+  assert.equal(withCommunication.nextAction.relatedCommunicationId, "comm-approval-request");
+
+  const withoutCommunication = buildClientProjectSnapshot({
+    ...minimalInput(),
+    activationProfile: buildActivationProfile({ state: "READY" }),
+  });
+  assert.equal(withoutCommunication.nextAction.owner, "NO_ACTION_NEEDED");
+});
+
+test("CXP-ACT-001 A5: activation ACTION_REQUIRED takes precedence over a conflicting communication-derived action", () => {
+  const snapshot = buildClientProjectSnapshot({
+    ...minimalInput(),
+    // this communication history alone would yield CLIENT_ACTION_REQUIRED
+    // with a relatedCommunicationId - activation readiness must win instead.
+    communicationHistory: WEBSITE_BUILD_V1_COMMUNICATION_HISTORY,
+    activationProfile: buildActivationProfile({
+      state: "ACTION_REQUIRED",
+      nextRequiredActor: "AKILTA",
+      nextRequiredAction: { code: "WORKER_ROUTE_REJECTED", reason: "routing rejected" },
+    }),
+  });
+  assert.equal(snapshot.nextAction.owner, "AKILTA_ACTION_REQUIRED");
+});
+
+test("CXP-ACT-001 A6: an activationProfile with mismatched customerId/projectId/serviceRef rejects", () => {
+  const differentCustomer = createProjectOwnershipRef({
+    tenantId: WEBSITE_BUILD_V1_OWNERSHIP.tenantId,
+    customerId: "some-other-customer",
+    projectId: WEBSITE_BUILD_V1_OWNERSHIP.projectId,
+  });
+  assert.throws(
+    () =>
+      buildClientProjectSnapshot({
+        ...minimalInput(),
+        activationProfile: buildActivationProfile({ ownership: differentCustomer }),
+      }),
+    InvalidClientProjectSnapshotError,
+  );
+
+  const differentProject = createProjectOwnershipRef({
+    tenantId: WEBSITE_BUILD_V1_OWNERSHIP.tenantId,
+    customerId: WEBSITE_BUILD_V1_OWNERSHIP.customerId,
+    projectId: "some-other-project",
+  });
+  assert.throws(
+    () =>
+      buildClientProjectSnapshot({
+        ...minimalInput(),
+        activationProfile: buildActivationProfile({ ownership: differentProject }),
+      }),
+    InvalidClientProjectSnapshotError,
+  );
+
+  const withServiceRef = createProjectOwnershipRef({
+    tenantId: WEBSITE_BUILD_V1_OWNERSHIP.tenantId,
+    customerId: WEBSITE_BUILD_V1_OWNERSHIP.customerId,
+    projectId: WEBSITE_BUILD_V1_OWNERSHIP.projectId,
+    serviceRef: "service-a",
+  });
+  assert.throws(
+    () =>
+      buildClientProjectSnapshot({
+        ...minimalInput(),
+        ownership: withServiceRef,
+        project: fixture.project,
+        activationProfile: buildActivationProfile({ ownership: WEBSITE_BUILD_V1_OWNERSHIP }),
+      }),
+    InvalidClientProjectSnapshotError,
+  );
+});
+
+test("CXP-ACT-001 A7: a tampered READY activation carrying a non-NONE actor or a nextRequiredAction rejects rather than manufacturing a client action", () => {
+  assert.throws(
+    () =>
+      buildClientProjectSnapshot({
+        ...minimalInput(),
+        activationProfile: buildActivationProfile({
+          state: "READY",
+          nextRequiredActor: "CUSTOMER",
+        }),
+      }),
+    InvalidClientProjectSnapshotError,
+  );
+  assert.throws(
+    () =>
+      buildClientProjectSnapshot({
+        ...minimalInput(),
+        activationProfile: buildActivationProfile({
+          state: "READY",
+          nextRequiredAction: { code: "SOMETHING", reason: "should not be present on READY" },
+        }),
+      }),
+    InvalidClientProjectSnapshotError,
+  );
+});
+
+test("CXP-ACT-001 A7: a tampered ACTION_REQUIRED activation carrying actor NONE, no nextRequiredAction, or an unrecognized actor/state rejects", () => {
+  assert.throws(
+    () =>
+      buildClientProjectSnapshot({
+        ...minimalInput(),
+        activationProfile: buildActivationProfile({
+          state: "ACTION_REQUIRED",
+          nextRequiredActor: "NONE",
+          nextRequiredAction: { code: "X", reason: "Y" },
+        }),
+      }),
+    InvalidClientProjectSnapshotError,
+  );
+  assert.throws(
+    () =>
+      buildClientProjectSnapshot({
+        ...minimalInput(),
+        activationProfile: buildActivationProfile({
+          state: "ACTION_REQUIRED",
+          nextRequiredActor: "CUSTOMER",
+          // nextRequiredAction deliberately omitted - the base default
+          // already carries none, and exactOptionalPropertyTypes forbids
+          // setting it to `undefined` explicitly.
+        }),
+      }),
+    InvalidClientProjectSnapshotError,
+  );
+  assert.throws(
+    () =>
+      buildClientProjectSnapshot({
+        ...minimalInput(),
+        activationProfile: buildActivationProfile({
+          state: "ACTION_REQUIRED",
+          nextRequiredActor: "BOGUS_ACTOR" as unknown as ProjectActivationProfile["nextRequiredActor"],
+          nextRequiredAction: { code: "X", reason: "Y" },
+        }),
+      }),
+    InvalidClientProjectSnapshotError,
+  );
+  assert.throws(
+    () =>
+      buildClientProjectSnapshot({
+        ...minimalInput(),
+        activationProfile: buildActivationProfile({
+          state: "BOGUS_STATE" as unknown as ProjectActivationProfile["state"],
+        }),
+      }),
+    InvalidClientProjectSnapshotError,
+  );
+});
+
+test("CXP-ACT-001 A8: an activation-derived nextAction never carries a relatedCommunicationId", () => {
+  const snapshot = buildClientProjectSnapshot({
+    ...minimalInput(),
+    activationProfile: buildActivationProfile({
+      state: "ACTION_REQUIRED",
+      nextRequiredActor: "CUSTOMER",
+      nextRequiredAction: { code: "PLAN_SCOPE_DECISION_REQUIRED", reason: "scope decision needed" },
+    }),
+  });
+  assert.equal("relatedCommunicationId" in snapshot.nextAction, false);
+});
+
+test("CXP-ACT-001 A9: the serialized snapshot contains none of ProjectActivationProfile's internal provenance fields", () => {
+  const snapshot = buildClientProjectSnapshot({
+    ...minimalInput(),
+    activationProfile: buildActivationProfile({
+      state: "ACTION_REQUIRED",
+      nextRequiredActor: "CUSTOMER",
+      nextRequiredAction: { code: "PLAN_SCOPE_DECISION_REQUIRED", reason: "scope decision needed" },
+    }),
+  });
+  const json = JSON.stringify(snapshot);
+  const forbidden = [
+    "nextRequiredAction",
+    "unresolvedGates",
+    "platformDecision",
+    "verifiedConnections",
+    "consumedRoutes",
+    "secretRef",
+    "sourceFingerprint",
+    "acceptedCommercialReference",
+    "effectiveConfigRefs",
+    "effectivePolicyRefs",
+  ];
+  for (const term of forbidden) {
+    assert.equal(json.includes(`"${term}"`), false, `unexpected activation-internal field "${term}" found in snapshot JSON`);
+  }
+});
+
+test("CXP-ACT-001 A10: identical inputs with an activationProfile are deterministic, and existing WEBSITE_BUILD_v1/client-snapshot behavior is unchanged when no activationProfile is supplied", () => {
+  const input = {
+    ...minimalInput(),
+    communicationHistory: WEBSITE_BUILD_V1_COMMUNICATION_HISTORY,
+    activationProfile: buildActivationProfile({
+      state: "ACTION_REQUIRED",
+      nextRequiredActor: "CUSTOMER",
+      nextRequiredAction: { code: "PLAN_SCOPE_DECISION_REQUIRED", reason: "scope decision needed" },
+    }),
+  };
+  const a = buildClientProjectSnapshot(input);
+  const b = buildClientProjectSnapshot(input);
+  assert.deepEqual(a, b);
+
+  const withoutActivation = buildClientProjectSnapshot(minimalInput());
+  assert.equal(withoutActivation.nextAction.owner, "NO_ACTION_NEEDED");
+  assert.equal("relatedCommunicationId" in withoutActivation.nextAction, false);
 });

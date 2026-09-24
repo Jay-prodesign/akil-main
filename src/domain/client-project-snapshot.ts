@@ -8,6 +8,7 @@ import { type DeliveryStatusView, computeDeliveryStatus } from "./delivery-statu
 import { type DeliveryTimeline, buildDeliveryTimeline } from "./delivery-timeline.js";
 import type { ProjectCommunicationHistory, ProjectCommunicationRecord } from "./project-communication.js";
 import type { CapabilityAdmission } from "./capability-admission.js";
+import type { ProjectActivationProfile } from "./project-activation-profile.js";
 
 export class InvalidClientProjectSnapshotError extends Error {
   constructor(reason: string) {
@@ -133,6 +134,24 @@ const VERIFIED_COMPLETE_STATES: ReadonlySet<OutcomeJob["state"]> = new Set(["VER
  * in an exception state) can never manufacture a client action on its
  * own, because only an actual `ACTION_REQUIRED`/`CUSTOMER` communication
  * record can produce that value.
+ *
+ * CXP-ACT-001: when an `activationProfile` (ADM-PROJ-001's
+ * `ProjectActivationProfile`) is supplied, its readiness is the
+ * authoritative pre-execution `nextAction` source and takes precedence
+ * over any communication-derived value - `ACTION_REQUIRED` overrides
+ * `nextAction` entirely (`CUSTOMER` -> `CLIENT_ACTION_REQUIRED`; `AKILTA`/
+ * `HUMAN_REVIEW` -> `AKILTA_ACTION_REQUIRED`, both being AKILTA-internal
+ * from the customer's point of view); `READY` leaves the communication-
+ * derived `nextAction` untouched. This function never reuses ADM-PROJ-001's
+ * own compiler or authority semantics - it only reads the two already-
+ * computed fields (`state`, `nextRequiredActor`) needed to select an
+ * owner, and independently re-validates that those two fields are
+ * internally consistent (fail-closed) so a hand-built or tampered plain
+ * `ProjectActivationProfile`-shaped object can never manufacture a client
+ * action. No other field of `ProjectActivationProfile` (`nextRequiredAction`
+ * reason/code, `unresolvedGates`, `platformDecision`, `verifiedConnections`,
+ * `consumedRoutes`, `sourceFingerprint`, or any routing/provider/workspace
+ * identifier) is ever read, copied, or exposed here.
  */
 export function buildClientProjectSnapshot(input: {
   ownership: ProjectOwnershipRef;
@@ -143,6 +162,7 @@ export function buildClientProjectSnapshot(input: {
   latestApproval?: ApprovalReference;
   communicationHistory?: ProjectCommunicationHistory;
   capabilityAdmissions?: ReadonlyArray<CapabilityAdmission>;
+  activationProfile?: ProjectActivationProfile;
 }): ClientProjectSnapshot {
   if (
     input.ownership.tenantId !== input.project.tenantId ||
@@ -200,6 +220,53 @@ export function buildClientProjectSnapshot(input: {
         owner: mostRecentActionRequired.requiredActor === "CUSTOMER" ? "CLIENT_ACTION_REQUIRED" : "AKILTA_ACTION_REQUIRED",
         relatedCommunicationId: mostRecentActionRequired.communicationId,
       };
+    }
+  }
+
+  if (input.activationProfile !== undefined) {
+    if (!ownershipEquals(input.activationProfile.ownership, input.ownership)) {
+      throw new InvalidClientProjectSnapshotError(
+        "activationProfile does not belong to the given ownership tuple",
+      );
+    }
+    if (input.activationProfile.state === "READY") {
+      if (
+        input.activationProfile.nextRequiredActor !== "NONE" ||
+        input.activationProfile.nextRequiredAction !== undefined
+      ) {
+        throw new InvalidClientProjectSnapshotError(
+          "activationProfile is READY but carries a non-NONE nextRequiredActor or a nextRequiredAction",
+        );
+      }
+      // READY: leave the communication-derived nextAction untouched.
+    } else if (input.activationProfile.state === "ACTION_REQUIRED") {
+      if (
+        input.activationProfile.nextRequiredActor === "NONE" ||
+        input.activationProfile.nextRequiredAction === undefined
+      ) {
+        throw new InvalidClientProjectSnapshotError(
+          "activationProfile is ACTION_REQUIRED but carries nextRequiredActor NONE or no nextRequiredAction",
+        );
+      }
+      const actor = input.activationProfile.nextRequiredActor;
+      let owner: NextActionOwner;
+      if (actor === "CUSTOMER") {
+        owner = "CLIENT_ACTION_REQUIRED";
+      } else if (actor === "AKILTA" || actor === "HUMAN_REVIEW") {
+        owner = "AKILTA_ACTION_REQUIRED";
+      } else {
+        throw new InvalidClientProjectSnapshotError(
+          `activationProfile.nextRequiredActor "${String(actor)}" is not a recognized actor for ACTION_REQUIRED`,
+        );
+      }
+      // Activation readiness is the authoritative pre-execution
+      // next-action source - it overrides any communication-derived
+      // nextAction entirely, and never carries a relatedCommunicationId.
+      nextAction = { owner };
+    } else {
+      throw new InvalidClientProjectSnapshotError(
+        `activationProfile has an unrecognized state "${String(input.activationProfile.state)}"`,
+      );
     }
   }
 
