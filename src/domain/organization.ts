@@ -116,10 +116,30 @@ export function createOrganization(input: {
 }
 
 /**
- * O4/O6/O7: only `BOOTSTRAPPING -> ACTIVE`. Returns a new value (immutable);
- * the prior `createdAt`/`displayName`/`tenantId`/`organizationId` provenance
- * is preserved verbatim via spread, never recomputed. `activatedAt` must be
- * a valid instant not chronologically before `createdAt` - equal is
+ * Rev126 F1: `Organization` is an exported structural interface, so a
+ * caller can hand-build an object with an impossible lifecycle-field
+ * combination (e.g. `state: "ACTIVE"` with a stale/absent `activatedAt`, or
+ * a stray `suspendedAt` already present) instead of reaching that shape
+ * only through `createOrganization`/`activateOrganization`/
+ * `suspendOrganization`. Both transition functions below revalidate the
+ * FULL pre-existing record's lifecycle shape/timestamps - not merely the
+ * newly-supplied transition timestamp - before consuming it, so a forged
+ * record can never be advanced into a valid-looking later state. Exactly
+ * one shape is valid per state: `BOOTSTRAPPING` => valid `createdAt`, no
+ * `activatedAt`/`suspendedAt`; `ACTIVE` => valid `createdAt` + valid
+ * `activatedAt` with `activatedAt >= createdAt`, no `suspendedAt`;
+ * `SUSPENDED` => all three valid and `createdAt <= activatedAt <=
+ * suspendedAt` (enforced incrementally as each state is reached).
+ */
+
+/**
+ * O4/O6/O7/Rev126 F1: only `BOOTSTRAPPING -> ACTIVE`. Returns a new value
+ * (immutable); the prior `createdAt`/`displayName`/`tenantId`/
+ * `organizationId` provenance is preserved verbatim via spread, never
+ * recomputed. Rejects a hand-built `BOOTSTRAPPING` record that already
+ * carries a stale `activatedAt` or `suspendedAt` - a genuinely
+ * `BOOTSTRAPPING` value can never have either field set. `activatedAt` must
+ * be a valid instant not chronologically before `createdAt` - equal is
  * accepted (immediate activation), matching the repository's existing
  * `revokeServiceCatalogAdmission`/`partner-capability-admission.ts` "equal
  * is not before" precedent.
@@ -131,6 +151,16 @@ export function activateOrganization(input: {
   if (input.organization.state !== "BOOTSTRAPPING") {
     throw new InvalidOrganizationTransitionError(
       `organization must be BOOTSTRAPPING to activate (got "${input.organization.state}")`,
+    );
+  }
+  if (input.organization.activatedAt !== undefined) {
+    throw new InvalidOrganizationTransitionError(
+      "a BOOTSTRAPPING organization must not already carry activatedAt",
+    );
+  }
+  if (input.organization.suspendedAt !== undefined) {
+    throw new InvalidOrganizationTransitionError(
+      "a BOOTSTRAPPING organization must not already carry suspendedAt",
     );
   }
   const createdAt = requireValidTimestamp(input.organization.createdAt, "organization.createdAt");
@@ -146,12 +176,16 @@ export function activateOrganization(input: {
 }
 
 /**
- * O5/O6/O7: only `ACTIVE -> SUSPENDED`. Since `state === "ACTIVE"` is only
- * ever reachable through `activateOrganization` above, `organization.
- * activatedAt` is always present and valid at this point - re-validated
- * here regardless, never trusted as an untyped/hand-built shortcut.
- * `suspendedAt` must not be chronologically before `activatedAt`; equal is
- * accepted (immediate suspension).
+ * O5/O6/O7/Rev126 F1: only `ACTIVE -> SUSPENDED`. Rejects a hand-built
+ * `ACTIVE` record that already carries a stale `suspendedAt` - a genuinely
+ * `ACTIVE` value can never have it set. Revalidates the FULL pre-existing
+ * record (`createdAt` and `activatedAt`, not merely `activatedAt` alone)
+ * and re-proves `createdAt <= activatedAt`, closing the gap where a forged
+ * `ACTIVE` object with `createdAt` after `activatedAt` could otherwise
+ * reach `SUSPENDED` merely because the new `suspendedAt` compares correctly
+ * against the (already-inconsistent) `activatedAt`. `suspendedAt` must not
+ * be chronologically before `activatedAt`; equal is accepted (immediate
+ * suspension).
  */
 export function suspendOrganization(input: {
   organization: Organization;
@@ -162,7 +196,16 @@ export function suspendOrganization(input: {
       `organization must be ACTIVE to suspend (got "${input.organization.state}")`,
     );
   }
+  if (input.organization.suspendedAt !== undefined) {
+    throw new InvalidOrganizationTransitionError(
+      "an ACTIVE organization must not already carry suspendedAt",
+    );
+  }
+  const createdAt = requireValidTimestamp(input.organization.createdAt, "organization.createdAt");
   const activatedAt = requireValidTimestamp(input.organization.activatedAt, "organization.activatedAt");
+  if (activatedAt.ms < createdAt.ms) {
+    throw new InvalidOrganizationTransitionError("organization.activatedAt must not be before organization.createdAt");
+  }
   const suspendedAt = requireValidTimestamp(input.suspendedAt, "suspendedAt");
   if (suspendedAt.ms < activatedAt.ms) {
     throw new InvalidOrganizationTransitionError("suspendedAt must not be before activatedAt");

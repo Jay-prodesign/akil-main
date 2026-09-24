@@ -224,6 +224,128 @@ test("O7 (adversarial): double suspension fails closed", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Rev126 F1 (adversarial, factory-bypass lifecycle-record revalidation):
+// Organization is an exported structural interface, so a caller can
+// hand-build a value with an impossible lifecycle-field combination
+// instead of reaching that shape only through createOrganization/
+// activateOrganization/suspendOrganization. Every forged record below must
+// be rejected by the FULL pre-existing-record revalidation, not merely by
+// the newly-supplied transition timestamp.
+// ---------------------------------------------------------------------------
+
+test("Rev126 F1 (adversarial): a hand-built BOOTSTRAPPING record already carrying a stale activatedAt cannot be activated", () => {
+  const forged = {
+    organizationId: "org-forged-1",
+    tenantId: tenantScope.tenantId,
+    displayName: "Forged Organization",
+    state: "BOOTSTRAPPING",
+    createdAt: NOW,
+    activatedAt: "2026-09-24T00:30:00.000Z",
+  } as unknown as Organization;
+  assert.throws(
+    () => activateOrganization({ organization: forged, activatedAt: "2026-09-24T01:00:00.000Z" }),
+    InvalidOrganizationTransitionError,
+  );
+});
+
+test("Rev126 F1 (adversarial): a hand-built BOOTSTRAPPING record already carrying a stale suspendedAt cannot be activated - the field can no longer silently survive object-spread into the resulting ACTIVE value", () => {
+  const forged = {
+    organizationId: "org-forged-2",
+    tenantId: tenantScope.tenantId,
+    displayName: "Forged Organization",
+    state: "BOOTSTRAPPING",
+    createdAt: NOW,
+    suspendedAt: "2026-09-24T00:30:00.000Z",
+  } as unknown as Organization;
+  assert.throws(
+    () => activateOrganization({ organization: forged, activatedAt: "2026-09-24T01:00:00.000Z" }),
+    InvalidOrganizationTransitionError,
+  );
+});
+
+test("Rev126 F1 (adversarial): an ACTIVE record with a missing activatedAt cannot be suspended", () => {
+  const forged = {
+    organizationId: "org-forged-3",
+    tenantId: tenantScope.tenantId,
+    displayName: "Forged Organization",
+    state: "ACTIVE",
+    createdAt: NOW,
+  } as unknown as Organization;
+  assert.throws(
+    () => suspendOrganization({ organization: forged, suspendedAt: "2026-09-24T01:00:00.000Z" }),
+    InvalidOrganizationError,
+  );
+});
+
+test("Rev126 F1 (adversarial): an ACTIVE record with a malformed activatedAt cannot be suspended", () => {
+  const forged = {
+    organizationId: "org-forged-4",
+    tenantId: tenantScope.tenantId,
+    displayName: "Forged Organization",
+    state: "ACTIVE",
+    createdAt: NOW,
+    activatedAt: "not-a-real-timestamp",
+  } as unknown as Organization;
+  assert.throws(
+    () => suspendOrganization({ organization: forged, suspendedAt: "2026-09-24T01:00:00.000Z" }),
+    InvalidOrganizationError,
+  );
+});
+
+test("Rev126 F1 (adversarial): an ACTIVE record whose activatedAt predates its own createdAt cannot be suspended, even though the new suspendedAt would otherwise compare correctly against activatedAt alone", () => {
+  const forged = {
+    organizationId: "org-forged-5",
+    tenantId: tenantScope.tenantId,
+    displayName: "Forged Organization",
+    state: "ACTIVE",
+    createdAt: "2026-09-24T02:00:00.000Z",
+    activatedAt: "2026-09-24T01:00:00.000Z",
+  } as unknown as Organization;
+  // suspendedAt (03:00) is >= activatedAt (01:00) - only the createdAt<=
+  // activatedAt revalidation this correction adds catches this forgery.
+  assert.throws(
+    () => suspendOrganization({ organization: forged, suspendedAt: "2026-09-24T03:00:00.000Z" }),
+    InvalidOrganizationTransitionError,
+  );
+});
+
+test("Rev126 F1 (adversarial): an ACTIVE record already carrying a stale suspendedAt cannot be suspended again", () => {
+  const forged = {
+    organizationId: "org-forged-6",
+    tenantId: tenantScope.tenantId,
+    displayName: "Forged Organization",
+    state: "ACTIVE",
+    createdAt: NOW,
+    activatedAt: "2026-09-24T01:00:00.000Z",
+    suspendedAt: "2026-09-24T01:30:00.000Z",
+  } as unknown as Organization;
+  assert.throws(
+    () => suspendOrganization({ organization: forged, suspendedAt: "2026-09-24T02:00:00.000Z" }),
+    InvalidOrganizationTransitionError,
+  );
+});
+
+test("Rev126 F1 (adversarial): a hand-built SUSPENDED record with internally-inconsistent fields still cannot be advanced by either public transition - the state guard alone rejects it", () => {
+  const forged = {
+    organizationId: "org-forged-7",
+    tenantId: tenantScope.tenantId,
+    displayName: "Forged Organization",
+    state: "SUSPENDED",
+    createdAt: "2026-09-24T03:00:00.000Z",
+    activatedAt: "2026-09-24T01:00:00.000Z",
+    suspendedAt: "2026-09-24T00:00:00.000Z",
+  } as unknown as Organization;
+  assert.throws(
+    () => activateOrganization({ organization: forged, activatedAt: "2026-09-24T04:00:00.000Z" }),
+    InvalidOrganizationTransitionError,
+  );
+  assert.throws(
+    () => suspendOrganization({ organization: forged, suspendedAt: "2026-09-24T04:00:00.000Z" }),
+    InvalidOrganizationTransitionError,
+  );
+});
+
+// ---------------------------------------------------------------------------
 // O8: determinism
 // ---------------------------------------------------------------------------
 
