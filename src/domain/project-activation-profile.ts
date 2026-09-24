@@ -560,6 +560,17 @@ export function compileProjectActivationProfile(input: {
   }
   const now = requireNonEmptyString(input.now, "now");
 
+  // V5-CONV-001 Rev113 F3: re-run the AcceptedCommercialReference/
+  // MaterialPlatformDecision factory invariants at the compiler boundary so
+  // a hand-built (factory-bypassing) plain-interface value cannot reach any
+  // later step. Placed immediately after Step 1's structural coherence
+  // check and before Step 2's commercial equality check, preserving Rev101
+  // blocker-priority: structural mismatch must still throw first.
+  createAcceptedCommercialReference(input.acceptedCommercialReference);
+  if (input.platformDecision !== undefined) {
+    createMaterialPlatformDecision(input.platformDecision);
+  }
+
   // Step 2: commercial reference must exactly equal blueprint + soldScope.
   if (
     input.acceptedCommercialReference.sourceBlueprintId !== input.blueprint.blueprintId ||
@@ -661,7 +672,11 @@ export function compileProjectActivationProfile(input: {
       nextRequiredActor: actor,
       nextRequiredAction: { code, reason },
       unresolvedGates: [gate],
-      platformDecision: undefined,
+      // V5-CONV-001 Rev113 F1: a supplied platformDecision must survive
+      // onto the profile/fingerprint even when an earlier blocker (plan
+      // admission) is the one that actually blocks activation - it is
+      // never dropped merely because it was not the active blocker.
+      platformDecision: input.platformDecision,
       verifiedConnections: [],
       consumedRoutesForProfile: [],
       consumedRoutesForFingerprint: [],
@@ -726,8 +741,14 @@ export function compileProjectActivationProfile(input: {
           reason: `no compatible VERIFIED ConnectionBinding found for connection requirement "${requirement.connectionRequirementId}" (capability "${requirement.requiredCapabilityRef}")`,
         },
         unresolvedGates: [`CONNECTION:${requirement.connectionRequirementId}`],
-        platformDecision: undefined,
-        verifiedConnections: [],
+        // V5-CONV-001 Rev113 F1/F2: a supplied platformDecision must survive
+        // onto the profile/fingerprint even when a connection blocker is
+        // the one that actually blocks; and any connection requirements
+        // already verified earlier in this same loop must remain in
+        // terminal provenance rather than being discarded because a later
+        // requirement in the loop failed.
+        platformDecision: input.platformDecision,
+        verifiedConnections,
         consumedRoutesForProfile: [],
         consumedRoutesForFingerprint: [],
         jobs: [],
@@ -743,8 +764,8 @@ export function compileProjectActivationProfile(input: {
           reason: `multiple compatible VERIFIED ConnectionBindings found for connection requirement "${requirement.connectionRequirementId}"; exactly one is required`,
         },
         unresolvedGates: [`CONNECTION:${requirement.connectionRequirementId}`],
-        platformDecision: undefined,
-        verifiedConnections: [],
+        platformDecision: input.platformDecision,
+        verifiedConnections,
         consumedRoutesForProfile: [],
         consumedRoutesForFingerprint: [],
         jobs: [],

@@ -204,14 +204,17 @@ function admittedInputs(planId: string, blueprint: OfferBlueprintVersion, soldSc
   };
 }
 
-function verifiedConnection(idSuffix: string): {
+function verifiedConnectionFor(
+  idSuffix: string,
+  requiredCapabilityRef: string,
+): {
   connectionRequirement: ConnectionRequirement;
   connectionBinding: ConnectionBinding;
 } {
   const connectionRequirement = createConnectionRequirement({
     connectionRequirementId: `conn-req-${idSuffix}`,
     ownership,
-    requiredCapabilityRef: "req-conn",
+    requiredCapabilityRef,
     purpose: "test",
     accountOwner: "CUSTOMER_OWNED",
     minimumProviderScope: ["catalog:read"],
@@ -233,6 +236,13 @@ function verifiedConnection(idSuffix: string): {
     `evidence://connection-health-check-${idSuffix}`,
   );
   return { connectionRequirement, connectionBinding };
+}
+
+function verifiedConnection(idSuffix: string): {
+  connectionRequirement: ConnectionRequirement;
+  connectionBinding: ConnectionBinding;
+} {
+  return verifiedConnectionFor(idSuffix, "req-conn");
 }
 
 const DEFAULT_EFFECTIVE_CONFIG_REFS = ["context:brand-guidelines"];
@@ -675,6 +685,169 @@ test("F2 regression: two ACTION_REQUIRED platform decisions with identical reaso
   assert.equal(resultA.profile.platformDecision?.decisionRef, "decision-f2-a");
   assert.equal(resultB.profile.platformDecision?.decisionRef, "decision-f2-b");
   assert.notEqual(resultA.profile.sourceFingerprint, resultB.profile.sourceFingerprint);
+});
+
+// ---------------------------------------------------------------------------
+// V5-CONV-001 Rev113: F1 (early-blocker platformDecision provenance loss),
+// F2 (connection-provenance loss inside the same loop), F3 (plain-interface
+// factory bypass at the compiler boundary).
+// ---------------------------------------------------------------------------
+
+test("Rev113 F1: a supplied platformDecision survives a plan-admission blocker and changes the fingerprint when decisionRef changes", () => {
+  const soldScope = includedSoldScope("scope-rev113-f1-plan");
+  const { readinessAssertions } = admittedInputs("plan-rev113-f1-plan", blueprintA, soldScope);
+  const decisionA = createMaterialPlatformDecision({
+    decisionRef: "decision-rev113-f1-plan-a",
+    status: "RESOLVED",
+    reason: "standard delivery track",
+    actor: "NONE",
+    selectedOptionRef: "standard-track",
+  });
+  const decisionB = createMaterialPlatformDecision({
+    decisionRef: "decision-rev113-f1-plan-b",
+    status: "RESOLVED",
+    reason: "standard delivery track",
+    actor: "NONE",
+    selectedOptionRef: "standard-track",
+  });
+  // No approval supplied, so this blocks at Step 5 (PLAN_APPROVAL_REQUIRED)
+  // long before Step 7's own platformDecision handling would ever run.
+  const resultA = compileProjectActivationProfile({
+    ...baseInput("plan-rev113-f1-plan", blueprintA, recipeA, soldScope),
+    readinessAssertions,
+    platformDecision: decisionA,
+  });
+  const resultB = compileProjectActivationProfile({
+    ...baseInput("plan-rev113-f1-plan", blueprintA, recipeA, soldScope),
+    readinessAssertions,
+    platformDecision: decisionB,
+  });
+  assert.equal(resultA.profile.state, "ACTION_REQUIRED");
+  assert.equal(resultA.profile.nextRequiredAction?.code, "PLAN_APPROVAL_REQUIRED");
+  assert.equal(resultA.profile.platformDecision?.decisionRef, "decision-rev113-f1-plan-a");
+  assert.equal(resultB.profile.platformDecision?.decisionRef, "decision-rev113-f1-plan-b");
+  assert.notEqual(resultA.profile.sourceFingerprint, resultB.profile.sourceFingerprint);
+});
+
+test("Rev113 F1: a supplied platformDecision survives a connection blocker", () => {
+  const soldScope = includedSoldScope("scope-rev113-f1-conn");
+  const { readinessAssertions, approval } = admittedInputs("plan-rev113-f1-conn", blueprintA, soldScope);
+  const decision = createMaterialPlatformDecision({
+    decisionRef: "decision-rev113-f1-conn",
+    status: "RESOLVED",
+    reason: "standard delivery track",
+    actor: "NONE",
+    selectedOptionRef: "standard-track",
+  });
+  // The req-conn requirement is supplied but with no compatible binding at
+  // all, so it blocks at Step 6 - well before Step 7's own platformDecision
+  // handling would run.
+  const { connectionRequirement } = verifiedConnection("rev113-f1-conn");
+  const result = compileProjectActivationProfile({
+    ...baseInput("plan-rev113-f1-conn", blueprintA, recipeA, soldScope),
+    readinessAssertions,
+    approval,
+    connectionRequirements: [connectionRequirement],
+    platformDecision: decision,
+  });
+  assert.equal(result.profile.state, "ACTION_REQUIRED");
+  assert.equal(result.profile.nextRequiredAction?.code, "CONNECTION_NOT_VERIFIED");
+  assert.equal(result.profile.platformDecision?.decisionRef, "decision-rev113-f1-conn");
+});
+
+test("Rev113 F2: an earlier verified connection remains in terminal profile/fingerprint when a later required connection blocks", () => {
+  const soldScope = includedSoldScope("scope-rev113-f2");
+  const { readinessAssertions, approval } = admittedInputs("plan-rev113-f2", blueprintA, soldScope);
+  // req-core is REQUIRED and gets a VERIFIED binding (resolves first, in
+  // requirement-array order); req-conn is also REQUIRED but has no binding
+  // at all, so it blocks. The already-accumulated req-core observation must
+  // survive onto the terminal ACTION_REQUIRED profile/fingerprint.
+  const { connectionRequirement: coreRequirement, connectionBinding: coreBinding } = verifiedConnectionFor(
+    "rev113-f2-core",
+    "req-core",
+  );
+  // req-conn is also REQUIRED but is supplied with no compatible binding at
+  // all, so it blocks after req-core has already resolved and accumulated.
+  const { connectionRequirement: connRequirement } = verifiedConnectionFor("rev113-f2-conn", "req-conn");
+  const result = compileProjectActivationProfile({
+    ...baseInput("plan-rev113-f2", blueprintA, recipeA, soldScope),
+    readinessAssertions,
+    approval,
+    connectionRequirements: [coreRequirement, connRequirement],
+    connectionBindings: [coreBinding],
+  });
+  assert.equal(result.profile.state, "ACTION_REQUIRED");
+  assert.equal(result.profile.nextRequiredAction?.code, "CONNECTION_NOT_VERIFIED");
+  assert.equal(result.profile.verifiedConnections.length, 1);
+  assert.equal(result.profile.verifiedConnections[0]?.connectionRequirementId, coreRequirement.connectionRequirementId);
+});
+
+test("Rev113 F3: a hand-built (factory-bypassing) invalid AcceptedCommercialReference rejects at the compiler boundary, after structural coherence", () => {
+  const soldScope = includedSoldScope("scope-rev113-f3-commercial");
+  // Bypasses createAcceptedCommercialReference entirely - an empty
+  // acceptanceRef could never come from the factory.
+  const handBuilt: AcceptedCommercialReference = {
+    acceptanceRef: "",
+    sourceBlueprintId: blueprintA.blueprintId,
+    sourceBlueprintVersion: blueprintA.version,
+    soldScopeId: soldScope.soldScopeId,
+    outcomeContractRef: soldScope.outcomeContractRef,
+  };
+  assert.throws(
+    () =>
+      compileProjectActivationProfile({
+        ...baseInput("plan-rev113-f3-commercial", blueprintA, recipeA, soldScope),
+        acceptedCommercialReference: handBuilt,
+      }),
+    InvalidAcceptedCommercialReferenceError,
+  );
+});
+
+test("Rev113 F3: a hand-built (factory-bypassing) invalid MaterialPlatformDecision rejects at the compiler boundary, after structural coherence", () => {
+  const soldScope = includedSoldScope("scope-rev113-f3-platform");
+  // Bypasses createMaterialPlatformDecision entirely - a RESOLVED decision
+  // with a non-NONE actor could never come from the factory.
+  const handBuilt = {
+    decisionRef: "decision-rev113-f3",
+    status: "RESOLVED",
+    reason: "bypassed",
+    actor: "CUSTOMER",
+    selectedOptionRef: "standard-track",
+  } as unknown as ReturnType<typeof createMaterialPlatformDecision>;
+  assert.throws(
+    () =>
+      compileProjectActivationProfile({
+        ...baseInput("plan-rev113-f3-platform", blueprintA, recipeA, soldScope),
+        platformDecision: handBuilt,
+      }),
+    InvalidMaterialPlatformDecisionError,
+  );
+});
+
+test("Rev113 combined-adversarial priority: a foreign-tenant structural mismatch fails before a co-occurring invalid hand-built commercial reference is ever checked", () => {
+  const soldScope = includedSoldScope("scope-rev113-priority");
+  const otherTenant = createTenantScope("tenant-rev113-priority-other");
+  const otherCustomer = createCustomer({
+    tenantScope: otherTenant,
+    customerId: "cust-rev113-priority-other",
+    displayName: "Other",
+  });
+  const handBuilt: AcceptedCommercialReference = {
+    acceptanceRef: "",
+    sourceBlueprintId: blueprintA.blueprintId,
+    sourceBlueprintVersion: blueprintA.version,
+    soldScopeId: soldScope.soldScopeId,
+    outcomeContractRef: soldScope.outcomeContractRef,
+  };
+  assert.throws(
+    () =>
+      compileProjectActivationProfile({
+        ...baseInput("plan-rev113-priority", blueprintA, recipeA, soldScope),
+        customer: otherCustomer,
+        acceptedCommercialReference: handBuilt,
+      }),
+    InvalidProjectActivationProfileError,
+  );
 });
 
 // ---------------------------------------------------------------------------
