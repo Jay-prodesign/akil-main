@@ -21,6 +21,13 @@ import {
   type ConnectionBinding,
 } from "../src/domain/connection-authority.js";
 import type { AdmittedWorker, WorkerRoutingRequest } from "../src/domain/worker-routing-policy.js";
+import {
+  admitServiceCatalogEntry,
+  revokeServiceCatalogAdmission,
+  type ServiceCatalogAdmission,
+} from "../src/domain/service-catalog-admission.js";
+import { InvalidDeliveryRecipePlanBindingError } from "../src/domain/delivery-recipe-plan-binding.js";
+import type { ServiceCatalogEntry } from "../src/domain/commercial-order.js";
 import { buildFullReadinessAssertions } from "./helpers/readiness-fixture.js";
 import {
   compileProjectActivationProfile,
@@ -248,6 +255,42 @@ function verifiedConnection(idSuffix: string): {
 const DEFAULT_EFFECTIVE_CONFIG_REFS = ["context:brand-guidelines"];
 const DEFAULT_EFFECTIVE_POLICY_REFS = ["policy:no-production-publish-without-approval"];
 
+function elevatedAdmittingWorker(): AdmittedWorker {
+  return {
+    workerId: "authority-adm-proj-001-service-admission",
+    declaredCapabilityRefs: [],
+    declaredToolRefs: [],
+    declaredPolicyConstraintRefs: [],
+    trustStatus: "ADMITTED",
+    availability: "AVAILABLE",
+    maxRiskLevel: "STANDARD",
+    authorityLevel: "ELEVATED",
+    costWeight: 0,
+    evaluationEvidenceRef: "evidence://adm-proj-001-service-admission-worker-eval",
+  };
+}
+
+// V5-CONV-001 Rev116: compileProjectActivationProfile now requires an exact
+// ADMITTED ServiceCatalogAdmission binding the given recipe to the given
+// blueprint - a fresh admission per (blueprint, recipe) pair, matching the
+// exact identities baseInput() already uses.
+function serviceAdmissionFor(blueprint: OfferBlueprintVersion, recipe: DeliveryRecipe): ServiceCatalogAdmission {
+  const catalogEntry: ServiceCatalogEntry = {
+    serviceRef: `service-${blueprint.blueprintId}`,
+    blueprintId: blueprint.blueprintId,
+    blueprintVersion: blueprint.version,
+    recipeId: recipe.recipeId,
+    executionRoutingPolicy: "MANUAL_EXECUTION_ALLOWED",
+  };
+  return admitServiceCatalogEntry({
+    catalogEntry,
+    recipe,
+    authorizingWorker: elevatedAdmittingWorker(),
+    evidenceRef: `evidence://adm-proj-001-service-admission-${blueprint.blueprintId}`,
+    admittedAt: "2026-09-23T00:00:00.000Z",
+  });
+}
+
 function baseInput(
   planId: string,
   blueprint: OfferBlueprintVersion,
@@ -256,6 +299,7 @@ function baseInput(
   overrides: {
     effectiveConfigRefs?: ReadonlyArray<string>;
     effectivePolicyRefs?: ReadonlyArray<string>;
+    serviceAdmission?: ServiceCatalogAdmission;
   } = {},
 ) {
   return {
@@ -267,6 +311,7 @@ function baseInput(
     blueprint,
     soldScope,
     recipe,
+    serviceAdmission: overrides.serviceAdmission ?? serviceAdmissionFor(blueprint, recipe),
     effectiveConfigRefs: overrides.effectiveConfigRefs ?? DEFAULT_EFFECTIVE_CONFIG_REFS,
     effectivePolicyRefs: overrides.effectivePolicyRefs ?? DEFAULT_EFFECTIVE_POLICY_REFS,
     planId,
@@ -995,6 +1040,105 @@ test("A2: identical inputs produce a deep-equal profile and an equal sourceFinge
   const second = compileProjectActivationProfile(inputs);
   assert.deepEqual(first, second);
   assert.equal(first.profile.sourceFingerprint.length, 64);
+});
+
+// ---------------------------------------------------------------------------
+// V5-CONV-001 Rev116: admitted service/recipe binding becomes load-bearing.
+// ---------------------------------------------------------------------------
+
+test("Rev116: a fully clean activation with an ADMITTED service/recipe binding reaches READY and returns the exact binding on the compilation", () => {
+  const inputs = readyInputs("plan-rev116-happy");
+  const result = compileProjectActivationProfile(inputs);
+  assert.equal(result.profile.state, "READY");
+  assert.equal(result.recipeBinding.boundRecipeId, recipeA.recipeId);
+  assert.equal(result.recipeBinding.consumedRecipeVersion, recipeA.version);
+  assert.equal(result.recipeBinding.serviceRef, inputs.serviceAdmission.serviceRef);
+  assert.equal(result.recipeBinding.boundJobs.length, result.specs.length);
+});
+
+test("Rev116 (adversarial): a REVOKED ServiceCatalogAdmission cannot yield READY", () => {
+  const inputs = readyInputs("plan-rev116-revoked");
+  const revoked = revokeServiceCatalogAdmission({
+    admission: inputs.serviceAdmission,
+    revokedAt: "2026-09-23T00:00:01.000Z",
+    reason: "test revocation",
+  });
+  assert.throws(
+    () => compileProjectActivationProfile({ ...inputs, serviceAdmission: revoked }),
+    InvalidDeliveryRecipePlanBindingError,
+  );
+});
+
+test("Rev116 (adversarial): a service admission for a different blueprintId cannot yield READY", () => {
+  const inputs = readyInputs("plan-rev116-blueprint-mismatch");
+  const mismatched: ServiceCatalogAdmission = {
+    ...inputs.serviceAdmission,
+    blueprintId: "some-other-blueprint" as ServiceCatalogAdmission["blueprintId"],
+  };
+  assert.throws(
+    () => compileProjectActivationProfile({ ...inputs, serviceAdmission: mismatched }),
+    InvalidDeliveryRecipePlanBindingError,
+  );
+});
+
+test("Rev116 (adversarial): a service admission for a different blueprintVersion cannot yield READY", () => {
+  const inputs = readyInputs("plan-rev116-blueprint-version-mismatch");
+  const mismatched: ServiceCatalogAdmission = {
+    ...inputs.serviceAdmission,
+    blueprintVersion: "9.9.9",
+  };
+  assert.throws(
+    () => compileProjectActivationProfile({ ...inputs, serviceAdmission: mismatched }),
+    InvalidDeliveryRecipePlanBindingError,
+  );
+});
+
+test("Rev116 (adversarial): a service admission for a different recipeId cannot yield READY", () => {
+  const inputs = readyInputs("plan-rev116-recipeid-mismatch");
+  const mismatched: ServiceCatalogAdmission = {
+    ...inputs.serviceAdmission,
+    recipeId: "some-other-recipe" as ServiceCatalogAdmission["recipeId"],
+  };
+  assert.throws(
+    () => compileProjectActivationProfile({ ...inputs, serviceAdmission: mismatched }),
+    InvalidDeliveryRecipePlanBindingError,
+  );
+});
+
+test("Rev117 (adversarial, via compileProjectActivationProfile): a service admission for a different recipeVersion cannot yield READY", () => {
+  const inputs = readyInputs("plan-rev117-recipeversion-mismatch");
+  const mismatched: ServiceCatalogAdmission = {
+    ...inputs.serviceAdmission,
+    recipeVersion: (inputs.serviceAdmission.recipeVersion as number) + 1,
+  };
+  assert.throws(
+    () => compileProjectActivationProfile({ ...inputs, serviceAdmission: mismatched }),
+    InvalidDeliveryRecipePlanBindingError,
+  );
+});
+
+test("Rev116: changing the admitted service/recipe binding's provenance changes the sourceFingerprint from an otherwise-identical base", () => {
+  const inputs = readyInputs("plan-rev116-fingerprint");
+  const admissionA = serviceAdmissionFor(blueprintA, recipeA);
+  const admissionB = admitServiceCatalogEntry({
+    catalogEntry: {
+      serviceRef: admissionA.serviceRef,
+      blueprintId: admissionA.blueprintId,
+      blueprintVersion: admissionA.blueprintVersion,
+      recipeId: admissionA.recipeId,
+      executionRoutingPolicy: admissionA.executionRoutingPolicy,
+    },
+    recipe: recipeA,
+    authorizingWorker: elevatedAdmittingWorker(),
+    // Different evidenceRef only - otherwise the same admitted service/recipe.
+    evidenceRef: "evidence://adm-proj-001-service-admission-rev116-alternate",
+    admittedAt: "2026-09-23T00:00:00.000Z",
+  });
+  const resultA = compileProjectActivationProfile({ ...inputs, serviceAdmission: admissionA });
+  const resultB = compileProjectActivationProfile({ ...inputs, serviceAdmission: admissionB });
+  assert.equal(resultA.profile.state, "READY");
+  assert.equal(resultB.profile.state, "READY");
+  assert.notEqual(resultA.profile.sourceFingerprint, resultB.profile.sourceFingerprint);
 });
 
 // ---------------------------------------------------------------------------

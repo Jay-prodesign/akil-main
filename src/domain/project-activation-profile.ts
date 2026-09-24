@@ -25,6 +25,8 @@ import {
   type WorkerRoutingRequest,
   type WorkerRoutingDecision,
 } from "./worker-routing-policy.js";
+import type { ServiceCatalogAdmission } from "./service-catalog-admission.js";
+import { bindAdmittedRecipeToPlan, type DeliveryRecipePlanBinding } from "./delivery-recipe-plan-binding.js";
 
 export class InvalidAcceptedCommercialReferenceError extends Error {
   constructor(reason: string) {
@@ -323,6 +325,17 @@ export interface ProjectActivationCompilation {
   readonly specs: ReadonlyArray<OutcomeJobSpec>;
   readonly jobAdmissions: ReadonlyArray<JobAdmissionResult>;
   readonly jobs: ReadonlyArray<OutcomeJob>;
+  /**
+   * V5-CONV-001 Rev116: the exact `DeliveryRecipePlanBinding` produced by
+   * binding the caller's supplied `serviceAdmission` to this compilation's
+   * own compiled plan/spec set - proof that the recipe is not merely a
+   * matching `jobFamily` string but an actually-admitted, currently-ADMITTED
+   * service/recipe (and, per Rev117, an exact admitted recipe *version*)
+   * bound to this plan. Returned alongside the other handoff artifacts
+   * rather than duplicated into the profile itself, so downstream
+   * execution/advisor evidence can consume the same binding.
+   */
+  readonly recipeBinding: DeliveryRecipePlanBinding;
 }
 
 function computeSourceFingerprint(input: {
@@ -331,6 +344,7 @@ function computeSourceFingerprint(input: {
   soldScope: SoldScope;
   blueprint: OfferBlueprintVersion;
   recipe: DeliveryRecipe;
+  recipeBinding: DeliveryRecipePlanBinding;
   plan: ProjectPlanVersion;
   effectiveConfigRefs: ReadonlyArray<string>;
   effectivePolicyRefs: ReadonlyArray<string>;
@@ -360,6 +374,12 @@ function computeSourceFingerprint(input: {
       requirements: input.blueprint.requirements,
     },
     recipe: input.recipe,
+    // Rev116: admitted-service/recipe binding provenance is material to the
+    // fingerprint - a change in the trusted service/recipe admission (a
+    // revocation, a different admittingAuthorityId/evidenceRef, or per
+    // Rev117 a different admitted recipeVersion) must invalidate the
+    // activation fingerprint/recompilation disposition.
+    recipeBinding: input.recipeBinding,
     plan: {
       planId: input.plan.planId,
       version: input.plan.version,
@@ -386,6 +406,7 @@ function finish(input: {
   soldScope: SoldScope;
   blueprint: OfferBlueprintVersion;
   recipe: DeliveryRecipe;
+  recipeBinding: DeliveryRecipePlanBinding;
   plan: ProjectPlanVersion;
   planAdmission: PlanAdmissionResult;
   specs: ReadonlyArray<OutcomeJobSpec>;
@@ -413,6 +434,7 @@ function finish(input: {
     soldScope: input.soldScope,
     blueprint: input.blueprint,
     recipe: input.recipe,
+    recipeBinding: input.recipeBinding,
     plan: input.plan,
     effectiveConfigRefs: input.effectiveConfigRefs,
     effectivePolicyRefs: input.effectivePolicyRefs,
@@ -458,6 +480,7 @@ function finish(input: {
     specs: input.specs,
     jobAdmissions: input.jobAdmissions,
     jobs: input.jobs,
+    recipeBinding: input.recipeBinding,
   };
 }
 
@@ -512,6 +535,7 @@ export function compileProjectActivationProfile(input: {
   blueprint: OfferBlueprintVersion;
   soldScope: SoldScope;
   recipe: DeliveryRecipe;
+  serviceAdmission: ServiceCatalogAdmission;
   effectiveConfigRefs: unknown;
   effectivePolicyRefs: unknown;
   evidence?: ReadonlyArray<CustomerEvidenceItem>;
@@ -619,6 +643,23 @@ export function compileProjectActivationProfile(input: {
   const specs = deriveOutcomeJobSpecs(plan);
   const jobAdmissions = admitJobs(planAdmission, specs);
 
+  // V5-CONV-001 Rev116: the admitted service/recipe binding is an internal
+  // canonical provenance/invariant check required to construct a trusted
+  // activation, not a model-selected business blocker - it throws
+  // (InvalidDeliveryRecipePlanBindingError) rather than producing an
+  // ACTION_REQUIRED profile with its own actor. A REVOKED/mismatched
+  // admission, a blueprint/recipeId/recipeVersion mismatch, or a
+  // forged/incomplete spec set fails closed here, before any plan-admission/
+  // connection/platform-decision/routing gate is even considered. Reuses
+  // the existing bindAdmittedRecipeToPlan contract verbatim - this module
+  // never re-implements or duplicates its checks.
+  const recipeBinding = bindAdmittedRecipeToPlan({
+    admission: input.serviceAdmission,
+    recipe: input.recipe,
+    plan,
+    specs,
+  });
+
   const common = {
     tenantScope: input.tenantScope,
     customer: input.customer,
@@ -628,6 +669,7 @@ export function compileProjectActivationProfile(input: {
     soldScope: input.soldScope,
     blueprint: input.blueprint,
     recipe: input.recipe,
+    recipeBinding,
     plan,
     planAdmission,
     specs,
