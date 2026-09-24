@@ -525,6 +525,19 @@ export function compileProjectActivationProfile(input: {
   workerRoutes?: ReadonlyArray<ActivationWorkerRouteInput>;
   now: unknown;
 }): ProjectActivationCompilation {
+  // Rev108 F2: AcceptedCommercialReference/MaterialPlatformDecision are
+  // plain exported interfaces, not opaque/branded types - a caller can
+  // construct one by hand without going through
+  // createAcceptedCommercialReference/createMaterialPlatformDecision,
+  // bypassing their own invariants entirely. Re-running the same factories
+  // here (discarding their return value; only the validation side effect
+  // matters) makes those invariants non-bypassable at this compiler
+  // boundary, not just at construction time.
+  createAcceptedCommercialReference(input.acceptedCommercialReference);
+  if (input.platformDecision !== undefined) {
+    createMaterialPlatformDecision(input.platformDecision);
+  }
+
   // Step 1: structural coherence.
   if (input.customer.tenantId !== input.tenantScope.tenantId) {
     throw new InvalidProjectActivationProfileError(
@@ -661,7 +674,11 @@ export function compileProjectActivationProfile(input: {
       nextRequiredActor: actor,
       nextRequiredAction: { code, reason },
       unresolvedGates: [gate],
-      platformDecision: undefined,
+      // Rev108 F1: a supplied platformDecision is provenance the caller
+      // gave, not something this step evaluates - it must survive onto the
+      // profile/fingerprint even when an earlier blocker (plan admission)
+      // wins, exactly as it does for every other terminal outcome.
+      platformDecision: input.platformDecision,
       verifiedConnections: [],
       consumedRoutesForProfile: [],
       consumedRoutesForFingerprint: [],
@@ -726,8 +743,12 @@ export function compileProjectActivationProfile(input: {
           reason: `no compatible VERIFIED ConnectionBinding found for connection requirement "${requirement.connectionRequirementId}" (capability "${requirement.requiredCapabilityRef}")`,
         },
         unresolvedGates: [`CONNECTION:${requirement.connectionRequirementId}`],
-        platformDecision: undefined,
-        verifiedConnections: [],
+        platformDecision: input.platformDecision,
+        // Rev108 F1: earlier requirements in this same loop that already
+        // resolved to exactly one VERIFIED binding are preserved - a later
+        // requirement's failure must never erase already-validated
+        // provenance.
+        verifiedConnections,
         consumedRoutesForProfile: [],
         consumedRoutesForFingerprint: [],
         jobs: [],
@@ -743,8 +764,8 @@ export function compileProjectActivationProfile(input: {
           reason: `multiple compatible VERIFIED ConnectionBindings found for connection requirement "${requirement.connectionRequirementId}"; exactly one is required`,
         },
         unresolvedGates: [`CONNECTION:${requirement.connectionRequirementId}`],
-        platformDecision: undefined,
-        verifiedConnections: [],
+        platformDecision: input.platformDecision,
+        verifiedConnections,
         consumedRoutesForProfile: [],
         consumedRoutesForFingerprint: [],
         jobs: [],

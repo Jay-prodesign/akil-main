@@ -31,6 +31,7 @@ import {
   InvalidProjectActivationProfileError,
   type AcceptedCommercialReference,
   type ActivationWorkerRouteInput,
+  type MaterialPlatformDecision,
 } from "../src/domain/project-activation-profile.js";
 
 const tenantScope = createTenantScope("tenant-adm-proj-001");
@@ -88,6 +89,20 @@ const blueprintB = createOfferBlueprintVersion({
   ],
 });
 
+// blueprintC: two independent REQUIRED connection-like capabilities, used
+// only to prove that a connection requirement resolved earlier in the
+// connection-gate loop is preserved when a later requirement in the same
+// loop blocks (Rev108 F1).
+const blueprintC = createOfferBlueprintVersion({
+  blueprintId: "bp-adm-proj-001-c",
+  version: "1.0.0",
+  requirements: [
+    { requirementId: "req-core", description: "Core", necessity: "REQUIRED", dependsOn: [] },
+    { requirementId: "req-conn-1", description: "Connection 1", necessity: "REQUIRED", dependsOn: [] },
+    { requirementId: "req-conn-2", description: "Connection 2", necessity: "REQUIRED", dependsOn: [] },
+  ],
+});
+
 function recipeFor(blueprint: OfferBlueprintVersion, id: string): DeliveryRecipe {
   return createDeliveryRecipe({
     recipeId: id,
@@ -113,6 +128,7 @@ function recipeFor(blueprint: OfferBlueprintVersion, id: string): DeliveryRecipe
 
 const recipeA = recipeFor(blueprintA, "recipe-adm-proj-001-a");
 const recipeB = recipeFor(blueprintB, "recipe-adm-proj-001-b");
+const recipeC = recipeFor(blueprintC, "recipe-adm-proj-001-c");
 
 function includedSoldScope(id: string): SoldScope {
   return createSoldScope({
@@ -305,6 +321,61 @@ test("createMaterialPlatformDecision rejects an ACTION_REQUIRED decision carryin
         reason: "needs a human call",
         actor: "HUMAN_REVIEW",
         selectedOptionRef: "not-allowed",
+      }),
+    InvalidMaterialPlatformDecisionError,
+  );
+});
+
+test("F2 regression: the compiler rejects a hand-built AcceptedCommercialReference with an empty acceptanceRef, even though its equality fields match", () => {
+  const soldScope = includedSoldScope("scope-f2-commercial-bypass");
+  const bypassed: AcceptedCommercialReference = {
+    acceptanceRef: "",
+    sourceBlueprintId: blueprintA.blueprintId,
+    sourceBlueprintVersion: blueprintA.version,
+    soldScopeId: soldScope.soldScopeId,
+    outcomeContractRef: soldScope.outcomeContractRef,
+  };
+  assert.throws(
+    () =>
+      compileProjectActivationProfile({
+        ...baseInput("plan-f2-commercial-bypass", blueprintA, recipeA, soldScope),
+        acceptedCommercialReference: bypassed,
+      }),
+    InvalidAcceptedCommercialReferenceError,
+  );
+});
+
+test("F2 regression: the compiler rejects a hand-built ACTION_REQUIRED MaterialPlatformDecision carrying actor NONE", () => {
+  const soldScope = includedSoldScope("scope-f2-platform-bypass-1");
+  const bypassed: MaterialPlatformDecision = {
+    decisionRef: "decision-bypass-1",
+    status: "ACTION_REQUIRED",
+    reason: "should not be constructible",
+    actor: "NONE",
+  };
+  assert.throws(
+    () =>
+      compileProjectActivationProfile({
+        ...baseInput("plan-f2-platform-bypass-1", blueprintA, recipeA, soldScope),
+        platformDecision: bypassed,
+      }),
+    InvalidMaterialPlatformDecisionError,
+  );
+});
+
+test("F2 regression: the compiler rejects a hand-built RESOLVED MaterialPlatformDecision with no selectedOptionRef", () => {
+  const soldScope = includedSoldScope("scope-f2-platform-bypass-2");
+  const bypassed: MaterialPlatformDecision = {
+    decisionRef: "decision-bypass-2",
+    status: "RESOLVED",
+    reason: "should not be constructible",
+    actor: "NONE",
+  };
+  assert.throws(
+    () =>
+      compileProjectActivationProfile({
+        ...baseInput("plan-f2-platform-bypass-2", blueprintA, recipeA, soldScope),
+        platformDecision: bypassed,
       }),
     InvalidMaterialPlatformDecisionError,
   );
@@ -621,6 +692,94 @@ test("A13: ambiguous multiple VERIFIED compatible bindings for the same requirem
   assert.equal(result.profile.state, "ACTION_REQUIRED");
   assert.equal(result.profile.nextRequiredActor, "AKILTA");
   assert.equal(result.profile.nextRequiredAction?.code, "CONNECTION_AMBIGUOUS");
+});
+
+test("F1 regression: a connection requirement resolved earlier in the loop survives into the terminal result when a later requirement in the same loop blocks", () => {
+  const soldScope = unknownSoldScope("scope-f1-earlier-conn");
+  const admitted = admittedInputs("plan-f1-earlier-conn", blueprintC, soldScope);
+  const conn1Requirement = createConnectionRequirement({
+    connectionRequirementId: "conn-req-f1-1",
+    ownership,
+    requiredCapabilityRef: "req-conn-1",
+    purpose: "test",
+    accountOwner: "CUSTOMER_OWNED",
+    minimumProviderScope: [],
+    connectionMethod: "OAUTH",
+    validationRequirement: "provider health check",
+  });
+  const conn2Requirement = createConnectionRequirement({
+    connectionRequirementId: "conn-req-f1-2",
+    ownership,
+    requiredCapabilityRef: "req-conn-2",
+    purpose: "test",
+    accountOwner: "CUSTOMER_OWNED",
+    minimumProviderScope: [],
+    connectionMethod: "OAUTH",
+    validationRequirement: "provider health check",
+  });
+  function buildInputs(conn1EvidenceRef: string) {
+    const conn1Binding = verifyConnectionBinding(
+      transitionConnectionBinding(
+        createConnectionBinding({
+          connectionBindingId: "conn-binding-f1-1",
+          requirement: conn1Requirement,
+          ownership,
+          providerRef: "provider-1",
+          workspaceRef: "workspace-1",
+          integrationInstanceRef: "instance-1",
+          delegatedScope: [],
+        }),
+        "CONNECTED_UNVERIFIED",
+      ),
+      conn1EvidenceRef,
+    );
+    return {
+      ...baseInput("plan-f1-earlier-conn", blueprintC, recipeC, soldScope),
+      readinessAssertions: admitted.readinessAssertions,
+      approval: admitted.approval,
+      // conn-req-1 resolves successfully (pushed to verifiedConnections);
+      // conn-req-2 has no binding at all and blocks - conn-req-1 must
+      // still appear (and its evidence must still be load-bearing) in the
+      // terminal ACTION_REQUIRED result.
+      connectionRequirements: [conn1Requirement, conn2Requirement],
+      connectionBindings: [conn1Binding],
+    };
+  }
+  const variantA = compileProjectActivationProfile(buildInputs("evidence://conn-1-variant-a"));
+  const variantB = compileProjectActivationProfile(buildInputs("evidence://conn-1-variant-b"));
+  assert.equal(variantA.profile.state, "ACTION_REQUIRED");
+  assert.equal(variantA.profile.nextRequiredAction?.code, "CONNECTION_NOT_VERIFIED");
+  assert.equal(variantA.profile.nextRequiredAction?.reason.includes("conn-req-f1-2"), true);
+  assert.equal(variantA.profile.verifiedConnections.length, 1);
+  assert.equal(variantA.profile.verifiedConnections[0]?.connectionRequirementId, "conn-req-f1-1");
+  assert.notEqual(variantA.profile.sourceFingerprint, variantB.profile.sourceFingerprint);
+});
+
+test("F1 regression: a supplied platformDecision survives into provenance and the fingerprint even when an earlier blocker (plan admission BLOCKED) wins", () => {
+  const soldScope = excludedSoldScope("scope-f1-earlier-plan");
+  const without = compileProjectActivationProfile({
+    ...baseInput("plan-f1-earlier-plan", blueprintA, recipeA, soldScope),
+  });
+  const decision = createMaterialPlatformDecision({
+    decisionRef: "decision-f1-earlier-plan",
+    status: "RESOLVED",
+    reason: "standard track selected",
+    actor: "NONE",
+    selectedOptionRef: "standard-track",
+  });
+  const withDecision = compileProjectActivationProfile({
+    ...baseInput("plan-f1-earlier-plan", blueprintA, recipeA, soldScope),
+    platformDecision: decision,
+  });
+  assert.equal(without.profile.state, "ACTION_REQUIRED");
+  assert.equal(without.profile.nextRequiredAction?.code, "PLAN_ADMISSION_BLOCKED");
+  assert.equal(withDecision.profile.state, "ACTION_REQUIRED");
+  assert.equal(withDecision.profile.nextRequiredAction?.code, "PLAN_ADMISSION_BLOCKED");
+  // blocker priority is unchanged - the plan blocker still drives the actor
+  assert.equal(withDecision.profile.nextRequiredActor, "HUMAN_REVIEW");
+  // but the supplied decision's provenance is never dropped
+  assert.deepEqual(withDecision.profile.platformDecision, decision);
+  assert.notEqual(withDecision.profile.sourceFingerprint, without.profile.sourceFingerprint);
 });
 
 // ---------------------------------------------------------------------------
