@@ -38,6 +38,16 @@ export interface ServiceCatalogAdmission {
   readonly blueprintId: OfferBlueprintVersion["blueprintId"];
   readonly blueprintVersion: OfferBlueprintVersion["version"];
   readonly recipeId: DeliveryRecipe["recipeId"];
+  /**
+   * V5-CONV-001 Rev117: the exact concrete `DeliveryRecipe.version` this
+   * admission actually authorized, recorded directly from the concrete
+   * recipe passed to `admitServiceCatalogEntry` - never inferred. Without
+   * this, a different concrete version of an already-admitted `recipeId`
+   * could be bound to a plan with no service-admission fact authorizing
+   * that specific version (`bindAdmittedRecipeToPlan` now enforces exact
+   * equality against this field).
+   */
+  readonly recipeVersion: DeliveryRecipe["version"];
   readonly executionRoutingPolicy: ServiceExecutionRoutingPolicy;
   readonly status: ServiceCatalogAdmissionStatus;
   readonly admittedByAuthorityId: string;
@@ -131,6 +141,7 @@ export function admitServiceCatalogEntry(input: {
     blueprintId: input.catalogEntry.blueprintId,
     blueprintVersion: input.catalogEntry.blueprintVersion,
     recipeId: input.catalogEntry.recipeId,
+    recipeVersion: input.recipe.version,
     executionRoutingPolicy: input.catalogEntry.executionRoutingPolicy,
     status: "ADMITTED",
     admittedByAuthorityId: input.authorizingWorker.workerId,
