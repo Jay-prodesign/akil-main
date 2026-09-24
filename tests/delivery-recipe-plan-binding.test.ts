@@ -251,7 +251,7 @@ test("AI7: bindAdmittedRecipeToPlan is deterministic - replaying the exact same 
 
 // --- AI8: recipe-version provenance honesty ---
 
-test("AI8 (provenance honesty): consumedRecipeVersion records the concrete recipe version bound, not an admission-level version claim", () => {
+test("AI8 (V5-CONV-001 Rev117, superseding the prior provenance-honesty framing): consumedRecipeVersion now equals the admission's own exact recipeVersion, not merely the concrete recipe passed at bind time", () => {
   const { plan, specs } = buildWebsiteBuildV1Plan();
   const versionedRecipe = createDeliveryRecipe({ ...WEBSITE_BUILD_V1_RECIPE, version: 7 });
   const catalogEntry: ServiceCatalogEntry = {
@@ -268,11 +268,76 @@ test("AI8 (provenance honesty): consumedRecipeVersion records the concrete recip
     evidenceRef: "evidence:catalog-review-1",
     admittedAt: "2026-01-01T00:00:00.000Z",
   });
-  // ServiceCatalogAdmission structurally carries recipeId only, never a
-  // version - so there is no admission-level version to even disagree with.
-  assert.equal((admission as unknown as Record<string, unknown>)["recipeVersion"], undefined);
+  // Rev117: ServiceCatalogAdmission now carries the exact admitted
+  // recipeVersion, recorded directly from the concrete recipe passed to
+  // admitServiceCatalogEntry - the prior "no admission-level version to
+  // even disagree with" framing is historical for the pre-Rev117 shape.
+  assert.equal(admission.recipeVersion, 7);
   const binding = bindAdmittedRecipeToPlan({ admission, recipe: versionedRecipe, plan, specs });
   assert.equal(binding.consumedRecipeVersion, 7);
+});
+
+test("Rev117 (adversarial): a concrete recipe with a different version than the one recorded on the admission cannot bind, even though recipeId matches", () => {
+  const { plan, specs } = buildWebsiteBuildV1Plan();
+  const admittedRecipe = createDeliveryRecipe({ ...WEBSITE_BUILD_V1_RECIPE, version: 1 });
+  const catalogEntry: ServiceCatalogEntry = {
+    serviceRef: "service:website-build-v1",
+    blueprintId: plan.sourceBlueprintId,
+    blueprintVersion: plan.sourceBlueprintVersion,
+    recipeId: admittedRecipe.recipeId,
+    executionRoutingPolicy: "MANUAL_EXECUTION_ALLOWED",
+  };
+  const admission = admitServiceCatalogEntry({
+    catalogEntry,
+    recipe: admittedRecipe,
+    authorizingWorker: elevatedWorker(),
+    evidenceRef: "evidence:catalog-review-1",
+    admittedAt: "2026-01-01T00:00:00.000Z",
+  });
+  const differentConcreteVersion = createDeliveryRecipe({ ...WEBSITE_BUILD_V1_RECIPE, version: 2 });
+  assert.throws(
+    () =>
+      bindAdmittedRecipeToPlan({ admission, recipe: differentConcreteVersion, plan, specs }),
+    InvalidDeliveryRecipePlanBindingError,
+  );
+});
+
+test("Rev117 (adversarial): revoking a v1 admission and admitting a fresh v2 admission means only the currently-ADMITTED version can bind", () => {
+  const { plan, specs } = buildWebsiteBuildV1Plan();
+  const recipeV1 = createDeliveryRecipe({ ...WEBSITE_BUILD_V1_RECIPE, version: 1 });
+  const recipeV2 = createDeliveryRecipe({ ...WEBSITE_BUILD_V1_RECIPE, version: 2 });
+  const catalogEntryFor = (recipe: DeliveryRecipe): ServiceCatalogEntry => ({
+    serviceRef: "service:website-build-v1",
+    blueprintId: plan.sourceBlueprintId,
+    blueprintVersion: plan.sourceBlueprintVersion,
+    recipeId: recipe.recipeId,
+    executionRoutingPolicy: "MANUAL_EXECUTION_ALLOWED",
+  });
+  const admissionV1 = admitServiceCatalogEntry({
+    catalogEntry: catalogEntryFor(recipeV1),
+    recipe: recipeV1,
+    authorizingWorker: elevatedWorker(),
+    evidenceRef: "evidence:catalog-review-v1",
+    admittedAt: "2026-01-01T00:00:00.000Z",
+  });
+  const revokedV1 = revokeServiceCatalogAdmission({
+    admission: admissionV1,
+    revokedAt: "2026-01-02T00:00:00.000Z",
+    reason: "superseded by v2",
+  });
+  const admissionV2 = admitServiceCatalogEntry({
+    catalogEntry: catalogEntryFor(recipeV2),
+    recipe: recipeV2,
+    authorizingWorker: elevatedWorker(),
+    evidenceRef: "evidence:catalog-review-v2",
+    admittedAt: "2026-01-02T00:00:00.000Z",
+  });
+  assert.throws(
+    () => bindAdmittedRecipeToPlan({ admission: revokedV1, recipe: recipeV1, plan, specs }),
+    InvalidDeliveryRecipePlanBindingError,
+  );
+  const binding = bindAdmittedRecipeToPlan({ admission: admissionV2, recipe: recipeV2, plan, specs });
+  assert.equal(binding.consumedRecipeVersion, 2);
 });
 
 // --- AI10/AI11/AI12 (Brain PR #65 F1, adversarial): canonical derived-spec authenticity + completeness ---

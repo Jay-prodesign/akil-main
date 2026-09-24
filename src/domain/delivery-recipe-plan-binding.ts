@@ -117,6 +117,16 @@ export function bindAdmittedRecipeToPlan(input: {
     );
   }
 
+  // V5-CONV-001 Rev117: the admission's own recorded recipeVersion is the
+  // only authority for which concrete version of an admitted recipeId is
+  // trusted - a different concrete version of the same recipeId can never
+  // silently bind just because the recipeId matches.
+  if (admission.recipeVersion !== recipe.version) {
+    throw new InvalidDeliveryRecipePlanBindingError(
+      `admission.recipeVersion "${admission.recipeVersion}" does not match recipe.version "${recipe.version}" for recipeId "${recipe.recipeId}" - a different concrete recipe version requires its own admission`,
+    );
+  }
+
   if (recipe.jobFamily !== plan.sourceBlueprintId) {
     throw new InvalidDeliveryRecipePlanBindingError(
       `recipe.jobFamily "${recipe.jobFamily}" is not compatible with plan's sourceBlueprintId "${plan.sourceBlueprintId}"`,
