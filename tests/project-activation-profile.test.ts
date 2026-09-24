@@ -1141,6 +1141,60 @@ test("Rev116: changing the admitted service/recipe binding's provenance changes 
   assert.notEqual(resultA.profile.sourceFingerprint, resultB.profile.sourceFingerprint);
 });
 
+test("Rev117 (V5-CONV-001 mandatory witness): a valid admitted recipe-version migration (v1 -> v2) changes the ProjectActivationProfile's binding/fingerprint/provenance, while same-ID wrong-version substitution still fails closed", () => {
+  const inputs = readyInputs("plan-rev117-version-migration");
+  const recipeV1 = recipeA;
+  const recipeV2 = createDeliveryRecipe({ ...recipeA, version: (recipeA.version as number) + 1 });
+  const admissionV1 = serviceAdmissionFor(blueprintA, recipeV1);
+  const admissionV2 = admitServiceCatalogEntry({
+    catalogEntry: {
+      serviceRef: admissionV1.serviceRef,
+      blueprintId: admissionV1.blueprintId,
+      blueprintVersion: admissionV1.blueprintVersion,
+      recipeId: admissionV1.recipeId,
+      executionRoutingPolicy: admissionV1.executionRoutingPolicy,
+    },
+    recipe: recipeV2,
+    authorizingWorker: elevatedAdmittingWorker(),
+    evidenceRef: "evidence://adm-proj-001-service-admission-rev117-v2-migration",
+    admittedAt: "2026-09-23T00:00:01.000Z",
+  });
+
+  // Valid migration: admission and recipe both at v1, then both at v2 -
+  // both compile READY, but with distinct recipeVersion/fingerprint/binding
+  // provenance, proving the version change is genuinely load-bearing.
+  const resultV1 = compileProjectActivationProfile({
+    ...inputs,
+    recipe: recipeV1,
+    serviceAdmission: admissionV1,
+  });
+  const resultV2 = compileProjectActivationProfile({
+    ...inputs,
+    recipe: recipeV2,
+    serviceAdmission: admissionV2,
+  });
+  assert.equal(resultV1.profile.state, "READY");
+  assert.equal(resultV2.profile.state, "READY");
+  assert.equal(resultV1.profile.recipeVersion, recipeV1.version);
+  assert.equal(resultV2.profile.recipeVersion, recipeV2.version);
+  assert.notEqual(resultV1.profile.recipeVersion, resultV2.profile.recipeVersion);
+  assert.notEqual(resultV1.profile.sourceFingerprint, resultV2.profile.sourceFingerprint);
+  assert.equal(resultV1.recipeBinding.consumedRecipeVersion, recipeV1.version);
+  assert.equal(resultV2.recipeBinding.consumedRecipeVersion, recipeV2.version);
+
+  // Same-ID wrong-version substitution still fails closed in both
+  // directions - a valid migration is never an excuse to relax the
+  // admission/recipe version-equality guard itself.
+  assert.throws(
+    () => compileProjectActivationProfile({ ...inputs, recipe: recipeV2, serviceAdmission: admissionV1 }),
+    InvalidDeliveryRecipePlanBindingError,
+  );
+  assert.throws(
+    () => compileProjectActivationProfile({ ...inputs, recipe: recipeV1, serviceAdmission: admissionV2 }),
+    InvalidDeliveryRecipePlanBindingError,
+  );
+});
+
 // ---------------------------------------------------------------------------
 // A18: material mutations change the fingerprint
 // ---------------------------------------------------------------------------
