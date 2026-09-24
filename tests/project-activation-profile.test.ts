@@ -381,6 +381,57 @@ test("F2 regression: the compiler rejects a hand-built RESOLVED MaterialPlatform
   );
 });
 
+test("Rev109 F1 regression: a structural mismatch wins priority over a coexisting invalid hand-built AcceptedCommercialReference", () => {
+  const soldScope = includedSoldScope("scope-rev109-priority-commercial");
+  const otherTenant = createTenantScope("tenant-rev109-other");
+  const otherCustomer = createCustomer({
+    tenantScope: otherTenant,
+    customerId: "cust-rev109-other",
+    displayName: "Other",
+  });
+  const invalidCommercialReference: AcceptedCommercialReference = {
+    acceptanceRef: "",
+    sourceBlueprintId: blueprintA.blueprintId,
+    sourceBlueprintVersion: blueprintA.version,
+    soldScopeId: soldScope.soldScopeId,
+    outcomeContractRef: soldScope.outcomeContractRef,
+  };
+  assert.throws(
+    () =>
+      compileProjectActivationProfile({
+        ...baseInput("plan-rev109-priority-commercial", blueprintA, recipeA, soldScope),
+        customer: otherCustomer,
+        acceptedCommercialReference: invalidCommercialReference,
+      }),
+    InvalidProjectActivationProfileError,
+  );
+});
+
+test("Rev109 F1 regression: a structural mismatch wins priority over a coexisting invalid hand-built MaterialPlatformDecision", () => {
+  const soldScope = includedSoldScope("scope-rev109-priority-platform");
+  const otherTenant = createTenantScope("tenant-rev109-other-2");
+  const otherCustomer = createCustomer({
+    tenantScope: otherTenant,
+    customerId: "cust-rev109-other-2",
+    displayName: "Other",
+  });
+  const invalidPlatformDecision: MaterialPlatformDecision = {
+    decisionRef: "decision-rev109-priority",
+    status: "ACTION_REQUIRED",
+    reason: "should not be constructible",
+    actor: "NONE",
+  };
+  assert.throws(
+    () =>
+      compileProjectActivationProfile({
+        ...baseInput("plan-rev109-priority-platform", blueprintA, recipeA, soldScope),
+        customer: otherCustomer,
+        platformDecision: invalidPlatformDecision,
+      }),
+    InvalidProjectActivationProfileError,
+  );
+});
+
 // ---------------------------------------------------------------------------
 // A3: structural coherence throws
 // ---------------------------------------------------------------------------

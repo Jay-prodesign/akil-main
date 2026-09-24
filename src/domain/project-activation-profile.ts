@@ -525,20 +525,12 @@ export function compileProjectActivationProfile(input: {
   workerRoutes?: ReadonlyArray<ActivationWorkerRouteInput>;
   now: unknown;
 }): ProjectActivationCompilation {
-  // Rev108 F2: AcceptedCommercialReference/MaterialPlatformDecision are
-  // plain exported interfaces, not opaque/branded types - a caller can
-  // construct one by hand without going through
-  // createAcceptedCommercialReference/createMaterialPlatformDecision,
-  // bypassing their own invariants entirely. Re-running the same factories
-  // here (discarding their return value; only the validation side effect
-  // matters) makes those invariants non-bypassable at this compiler
-  // boundary, not just at construction time.
-  createAcceptedCommercialReference(input.acceptedCommercialReference);
-  if (input.platformDecision !== undefined) {
-    createMaterialPlatformDecision(input.platformDecision);
-  }
-
-  // Step 1: structural coherence.
+  // Step 1: structural coherence. This must remain the first failure class
+  // (Rev101's blocker priority: structural mismatch throws first) - the
+  // Rev108 F2 boundary re-validation below runs only after this block, so a
+  // combined adversarial input carrying both a structural mismatch and an
+  // invalid hand-built commercial/platform record still fails closed on the
+  // structural error first (Rev109 F1).
   if (input.customer.tenantId !== input.tenantScope.tenantId) {
     throw new InvalidProjectActivationProfileError(
       "customer does not belong to the given tenantScope",
@@ -572,6 +564,22 @@ export function compileProjectActivationProfile(input: {
     );
   }
   const now = requireNonEmptyString(input.now, "now");
+
+  // Rev108 F2 (order-corrected by Rev109 F1): AcceptedCommercialReference/
+  // MaterialPlatformDecision are plain exported interfaces, not opaque/
+  // branded types - a caller can construct one by hand without going
+  // through createAcceptedCommercialReference/createMaterialPlatformDecision,
+  // bypassing their own invariants entirely. Re-running the same factories
+  // here (discarding their return value; only the validation side effect
+  // matters) makes those invariants non-bypassable at this compiler
+  // boundary, not just at construction time - but only after Step 1's
+  // structural coherence has already passed, so structural mismatch always
+  // wins the priority race against a merely invalid commercial/platform
+  // record.
+  createAcceptedCommercialReference(input.acceptedCommercialReference);
+  if (input.platformDecision !== undefined) {
+    createMaterialPlatformDecision(input.platformDecision);
+  }
 
   // Step 2: commercial reference must exactly equal blueprint + soldScope.
   if (
