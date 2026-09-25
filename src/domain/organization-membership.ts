@@ -14,6 +14,13 @@ export class InvalidAssignmentReferenceError extends Error {
   }
 }
 
+export class InvalidOrganizationMembershipTransitionError extends Error {
+  constructor(reason: string) {
+    super(`Invalid OrganizationMembership transition: ${reason}`);
+    this.name = "InvalidOrganizationMembershipTransitionError";
+  }
+}
+
 type MembershipId = string & { readonly __brand: "MembershipId" };
 type AssignmentId = string & { readonly __brand: "AssignmentId" };
 
@@ -51,11 +58,30 @@ const ORGANIZATION_ROLE_VALUES: ReadonlySet<string> = new Set([
  * structural subtype of `string`, so no adapter is needed at the call
  * site.
  */
+/**
+ * Phase C (Rev131) minimum V0 lifecycle: `ACTIVE` is the only usable state;
+ * `REVOKED` is a one-way terminal stop. No reactivation, invitation,
+ * expiry, or suspension/pending state is representable here - richer
+ * lifecycle semantics remain a later, separately admitted concern. This is
+ * deliberately the minimal floor the Master Roadmap's revocation/
+ * currentness requirement needs, not a general-purpose status enum.
+ */
+export type OrganizationMembershipLifecycleState = "ACTIVE" | "REVOKED";
+
 export interface OrganizationMembership {
   readonly membershipId: MembershipId;
   readonly tenantId: TenantScope["tenantId"];
   readonly principalRef: string;
   readonly role: OrganizationRole;
+  /**
+   * Phase C (Rev131): `ACTIVE` never carries `revokedAt`/`revokedReason`;
+   * `REVOKED` always carries both, valid and non-empty. This field carries
+   * no permission of its own - `authority.ts`'s `AuthorityContext` remains
+   * the sole permission/protected-action source, unchanged by this state.
+   */
+  readonly state: OrganizationMembershipLifecycleState;
+  readonly revokedAt?: string;
+  readonly revokedReason?: string;
 }
 
 /**
@@ -120,6 +146,23 @@ function requireNonEmptyString(
 }
 
 /**
+ * Mirrors `organization.ts`'s own `requireValidTimestamp`: a malformed or
+ * non-parseable timestamp is a shape/format defect
+ * (`InvalidOrganizationMembershipTransitionError`), distinct from a
+ * state/ordering defect, even though both can surface during
+ * `revokeOrganizationMembership`. `OrganizationMembership` has no
+ * `createdAt` field to order against (Phase C's contract explicitly does
+ * not fabricate one), so this validates shape/parseability only.
+ */
+function requireValidRevocationTimestamp(value: unknown, field: string): string {
+  const raw = requireNonEmptyString(value, field, InvalidOrganizationMembershipTransitionError);
+  if (Number.isNaN(Date.parse(raw))) {
+    throw new InvalidOrganizationMembershipTransitionError(`${field} must be a valid ISO timestamp`);
+  }
+  return raw;
+}
+
+/**
  * Construction-time validation, matching the repository's existing
  * pattern (reject malformed/empty identifiers at construction, not at
  * later consumption). Immutable: a role change is a new
@@ -152,6 +195,68 @@ export function createOrganizationMembership(input: {
     tenantId: input.tenantScope.tenantId,
     principalRef,
     role: input.role as OrganizationRole,
+    state: "ACTIVE",
+  };
+}
+
+/**
+ * Phase C (Rev131): `OrganizationMembership` is an exported structural
+ * interface, so a caller can hand-build an object with an impossible
+ * lifecycle-field combination instead of reaching that shape only through
+ * `createOrganizationMembership`/`revokeOrganizationMembership` - the same
+ * factory-bypass concern `organization.ts` closed for `Organization`
+ * (Rev126 F1). This is the single reusable predicate every consumer
+ * (`revokeOrganizationMembership`, `resolveEffectiveOrganizationAccess`,
+ * `staff-membership-guard.ts`) must use rather than re-deriving its own
+ * "is this membership usable" check: it returns `true` only for a
+ * coherent `ACTIVE` record (no `revokedAt`/`revokedReason` present), and
+ * `false` for `REVOKED` (coherent or not), an unknown/malformed `state`,
+ * or an `ACTIVE` record already carrying stale revocation metadata.
+ */
+export function isOrganizationMembershipActive(membership: OrganizationMembership): boolean {
+  if (membership.state !== "ACTIVE") {
+    return false;
+  }
+  return membership.revokedAt === undefined && membership.revokedReason === undefined;
+}
+
+/**
+ * Phase C (Rev131): the single one-way `ACTIVE -> REVOKED` transition. No
+ * reactivation function is implemented or exposed. Revalidates the FULL
+ * pre-existing record via `isOrganizationMembershipActive` before
+ * consuming it - a hand-built `ACTIVE` record already carrying stale
+ * `revokedAt`/`revokedReason`, an already-`REVOKED` record (double
+ * revoke), or any other incoherent shape is rejected before the new
+ * `revokedAt`/`revokedReason` are even validated. `revokedReason` must be
+ * a non-empty, non-whitespace string; `revokedAt` must be a valid ISO
+ * timestamp. `OrganizationMembership` carries no creation timestamp, so
+ * this deliberately does not fabricate or enforce a
+ * `createdAt`-vs-`revokedAt` ordering rule that the type cannot support.
+ * Revocation carries no permission of its own - `permissions`/
+ * `canPerformProtectedActions` remain solely `authority.ts`'s
+ * `AuthorityContext` concern, untouched by this transition.
+ */
+export function revokeOrganizationMembership(input: {
+  membership: OrganizationMembership;
+  revokedAt: unknown;
+  revokedReason: unknown;
+}): OrganizationMembership {
+  if (!isOrganizationMembershipActive(input.membership)) {
+    throw new InvalidOrganizationMembershipTransitionError(
+      "membership must be a coherent ACTIVE record (no existing revocation metadata) to revoke",
+    );
+  }
+  const revokedAt = requireValidRevocationTimestamp(input.revokedAt, "revokedAt");
+  const revokedReason = requireNonEmptyString(
+    input.revokedReason,
+    "revokedReason",
+    InvalidOrganizationMembershipTransitionError,
+  );
+  return {
+    ...input.membership,
+    state: "REVOKED",
+    revokedAt,
+    revokedReason,
   };
 }
 
