@@ -52,8 +52,8 @@ test("A1: platform-only CONFIG and POLICY refs resolve deterministically with fu
   const first = resolveEffectiveConfigurationPolicy(request);
   const second = resolveEffectiveConfigurationPolicy(request);
   assert.deepEqual(first, second, "resolution must be deterministic for identical input");
-  assert.deepEqual(first.effectiveConfigRefs, ["theme@1#platform-theme-default"]);
-  assert.deepEqual(first.effectivePolicyRefs, ["retention@1#platform-retention-default"]);
+  assert.deepEqual(first.effectiveConfigRefs, [JSON.stringify(["theme", "1", "platform-theme-default"])]);
+  assert.deepEqual(first.effectivePolicyRefs, [JSON.stringify(["retention", "1", "platform-retention-default"])]);
   assert.deepEqual(first.effectiveControls, [
     { kind: "CONFIG", key: "theme", scope: "PLATFORM", sourceRef: "platform-theme-default", version: "1", protectedFloor: false },
     { kind: "POLICY", key: "retention", scope: "PLATFORM", sourceRef: "platform-retention-default", version: "1", protectedFloor: false },
@@ -68,7 +68,7 @@ test("A2: an organization ordinary control overrides the same kind+key platform 
     ],
   });
   const result = resolveEffectiveConfigurationPolicy(request);
-  assert.deepEqual(result.effectiveConfigRefs, ["theme@2#org-theme-dark"]);
+  assert.deepEqual(result.effectiveConfigRefs, [JSON.stringify(["theme", "2", "org-theme-dark"])]);
   assert.equal(result.effectiveControls.length, 1);
   assert.equal(result.effectiveControls[0]?.scope, "ORGANIZATION");
 });
@@ -90,7 +90,7 @@ test("A3: customer overrides organization; project overrides customer; job overr
   const result = resolveEffectiveConfigurationPolicy(request);
   assert.equal(result.effectiveControls.length, 1);
   assert.equal(result.effectiveControls[0]?.scope, "ACTION");
-  assert.deepEqual(result.effectiveConfigRefs, ["limit@5#action-limit"]);
+  assert.deepEqual(result.effectiveConfigRefs, [JSON.stringify(["limit", "5", "action-limit"])]);
 
   // Remove the ACTION entry: JOB should now win.
   const withoutAction = resolveEffectiveConfigurationPolicy({
@@ -112,7 +112,7 @@ test("A4: a protected PLATFORM floor for a key cannot be replaced by organizatio
 
   // Without the override attempt, the protected floor resolves cleanly.
   const clean = resolveEffectiveConfigurationPolicy({ ...request, controls: request.controls.slice(0, 1) });
-  assert.deepEqual(clean.effectivePolicyRefs, ["data-residency@1#platform-residency"]);
+  assert.deepEqual(clean.effectivePolicyRefs, [JSON.stringify(["data-residency", "1", "platform-residency"])]);
   assert.equal(clean.effectiveControls[0]?.protectedFloor, true);
 });
 
@@ -127,8 +127,11 @@ test("A5: unrelated keys from multiple scopes coexist and output ordering is det
     baseRequest({ controls: [...controlsInOneOrder].reverse() }),
   );
   assert.deepEqual(resultA, resultB, "output must not depend on caller array order");
-  assert.deepEqual(resultA.effectiveConfigRefs, ["alpha@1#org-alpha", "zeta@1#platform-zeta"]);
-  assert.deepEqual(resultA.effectivePolicyRefs, ["beta@1#platform-beta"]);
+  assert.deepEqual(resultA.effectiveConfigRefs, [
+    JSON.stringify(["alpha", "1", "org-alpha"]),
+    JSON.stringify(["zeta", "1", "platform-zeta"]),
+  ]);
+  assert.deepEqual(resultA.effectivePolicyRefs, [JSON.stringify(["beta", "1", "platform-beta"])]);
 });
 
 test("A6: duplicate same kind+key within one scope fails closed as ambiguous", () => {
@@ -139,6 +142,31 @@ test("A6: duplicate same kind+key within one scope fails closed as ambiguous", (
     ],
   });
   assert.throws(() => resolveEffectiveConfigurationPolicy(request), InvalidEffectiveConfigurationPolicyError);
+});
+
+test("Rev143 F1 (adversarial): two distinct (key, version, sourceRef) tuples that collide under raw '@'/'#' concatenation produce distinct effective refs under the corrected JSON-tuple encoding", () => {
+  // key="a@b"/version="c"/sourceRef="d" and key="a"/version="b@c"/sourceRef="d"
+  // both concatenate to the literal string "a@b@c#d" under the old, rejected
+  // `${key}@${version}#${sourceRef}` formula - the exact Rev143 F1 collision
+  // shape, at the effective-ref-encoding level rather than the durable-store
+  // key level (Rev44 F2's original instance of this same defect class).
+  const oldFormulaA = `${"a@b"}@${"c"}#${"d"}`;
+  const oldFormulaB = `${"a"}@${"b@c"}#${"d"}`;
+  assert.equal(
+    oldFormulaA,
+    oldFormulaB,
+    "sanity: the old raw concatenation formula must collide for this adversarial pair",
+  );
+
+  const request = baseRequest({
+    controls: [
+      { kind: "CONFIG", scope: "PLATFORM", key: "a@b", sourceRef: "d", version: "c", identity: {} },
+      { kind: "CONFIG", scope: "PLATFORM", key: "a", sourceRef: "d", version: "b@c", identity: {} },
+    ],
+  });
+  const result = resolveEffectiveConfigurationPolicy(request);
+  assert.equal(result.effectiveConfigRefs.length, 2);
+  assert.notEqual(result.effectiveConfigRefs[0], result.effectiveConfigRefs[1]);
 });
 
 test("A7: a foreign-tenant organization layer fails closed", () => {
@@ -328,8 +356,8 @@ test("A12: resolver output separates CONFIG vs POLICY refs and retains selected 
     ],
   });
   const result = resolveEffectiveConfigurationPolicy(request);
-  assert.deepEqual(result.effectiveConfigRefs, ["theme@1#platform-theme"]);
-  assert.deepEqual(result.effectivePolicyRefs, ["retention@3#customer-retention"]);
+  assert.deepEqual(result.effectiveConfigRefs, [JSON.stringify(["theme", "1", "platform-theme"])]);
+  assert.deepEqual(result.effectivePolicyRefs, [JSON.stringify(["retention", "3", "customer-retention"])]);
   const themeControl = result.effectiveControls.find((c) => c.key === "theme");
   const retentionControl = result.effectiveControls.find((c) => c.key === "retention");
   assert.deepEqual(themeControl, { kind: "CONFIG", key: "theme", scope: "PLATFORM", sourceRef: "platform-theme", version: "1", protectedFloor: false });

@@ -1436,3 +1436,30 @@ test("OS-V0-04 A13: a material change to a selected effective ref/version change
 
   assert.notEqual(varied.profile.sourceFingerprint, baseline.profile.sourceFingerprint);
 });
+
+test("Rev143 F1: two materially different single-control resolutions that would have collided under the old raw-concatenation ref encoding produce different sourceFingerprint values", () => {
+  // key="a@b"/version="c"/sourceRef="d" and key="a"/version="b@c"/sourceRef="d"
+  // both encoded to the identical old-formula ref string "a@b@c#d" - under
+  // the pre-Rev143 defect, these two materially distinct selected controls
+  // would have fed ProjectActivationProfile the exact same single-element
+  // effectiveConfigRefs array, collapsing to an identical sourceFingerprint
+  // despite representing different provenance. This proves the corrected
+  // encoding is load-bearing all the way through to the compiled profile.
+  const resolutionA = resolveEffectiveConfigurationPolicy({
+    tenantId: tenantScope.tenantId,
+    controls: [{ kind: "CONFIG", scope: "PLATFORM", key: "a@b", sourceRef: "d", version: "c", identity: {} }],
+  });
+  const resolutionB = resolveEffectiveConfigurationPolicy({
+    tenantId: tenantScope.tenantId,
+    controls: [{ kind: "CONFIG", scope: "PLATFORM", key: "a", sourceRef: "d", version: "b@c", identity: {} }],
+  });
+  assert.notDeepEqual(resolutionA.effectiveConfigRefs, resolutionB.effectiveConfigRefs);
+
+  // One shared base input (same planId and every other field held constant)
+  // - only effectiveConfigRefs varies between A and B, isolating the
+  // ref-encoding fix as the one variable under test.
+  const shared = readyInputs("plan-rev143-f1", { effectiveConfigRefs: [], effectivePolicyRefs: [] });
+  const profileA = compileProjectActivationProfile({ ...shared, effectiveConfigRefs: resolutionA.effectiveConfigRefs });
+  const profileB = compileProjectActivationProfile({ ...shared, effectiveConfigRefs: resolutionB.effectiveConfigRefs });
+  assert.notEqual(profileA.profile.sourceFingerprint, profileB.profile.sourceFingerprint);
+});

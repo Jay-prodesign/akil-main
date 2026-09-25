@@ -221,8 +221,23 @@ function validateControl(
   return { kind, key, scope, sourceRef, version, protectedFloor };
 }
 
+/**
+ * Rev143 F1 correction: raw `@`/`#`-delimited concatenation of
+ * key/version/sourceRef is not actually collision-safe - these components
+ * are validated only as non-empty trimmed strings, never as delimiter-free,
+ * so a component containing `@` or `#` can shift the apparent field
+ * boundaries and make two distinct (key, version, sourceRef) tuples encode
+ * to the identical ref string (witness: key="a@b"/version="c"/sourceRef="d"
+ * and key="a"/version="b@c"/sourceRef="d" both produced "a@b@c#d" under the
+ * old formula). This is the same collision-safety defect class already
+ * corrected elsewhere in this repository (Brain Rev44 F2,
+ * `durable-plan-admission-store.ts`'s `planKey`): `JSON.stringify` of the
+ * tuple as an array is injective for this purpose, since JSON string
+ * escaping means two distinct tuples can never serialize to the same
+ * string.
+ */
 function effectiveRef(control: ValidatedControl): string {
-  return `${control.key}@${control.version}#${control.sourceRef}`;
+  return JSON.stringify([control.key, control.version, control.sourceRef]);
 }
 
 /**
