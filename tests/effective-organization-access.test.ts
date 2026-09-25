@@ -9,6 +9,7 @@ import { createOrganization, activateOrganization, type Organization } from "../
 import {
   createOrganizationMembership,
   createAssignmentReference,
+  revokeOrganizationMembership,
   type OrganizationMembership,
   type AssignmentReference,
 } from "../src/domain/organization-membership.js";
@@ -962,7 +963,12 @@ test("A14/boundary: effective-organization-access.ts contains no session/provide
 
 test("A14/boundary: effective-organization-access.ts imports only tenant-scope.ts/organization.ts/organization-membership.ts/authority.ts/project.ts - no ownership-assignment.ts/partner-organization.ts/customer.ts import", () => {
   const content = readFileSync(join(REPO_ROOT, RESOLVER_SOURCE_PATH), "utf8");
-  const importLines = content.split("\n").filter((line) => line.trim().startsWith("import"));
+  // Matched against `from "..."` specifiers directly (not line-by-line
+  // "starts with import") so a multi-line named-import statement (e.g.
+  // Rev131's `import {\n  resolveAssignmentStatus,\n  ...\n} from "...";`)
+  // is scanned correctly regardless of how it wraps.
+  const importedModules = [...content.matchAll(/from\s+"([^"]+)"/g)].map((match) => match[1]);
+  assert.ok(importedModules.length > 0, "expected at least one import statement");
   const allowedModules = [
     "tenant-scope.js",
     "organization.js",
@@ -970,15 +976,152 @@ test("A14/boundary: effective-organization-access.ts imports only tenant-scope.t
     "authority.js",
     "project.js",
   ];
-  for (const line of importLines) {
+  for (const specifier of importedModules) {
     assert.ok(
-      allowedModules.some((mod) => line.includes(mod)),
-      `unexpected import line: ${line}`,
+      allowedModules.some((mod) => specifier?.includes(mod)),
+      `unexpected import specifier: ${specifier}`,
     );
   }
   for (const forbidden of ["ownership-assignment.js", "partner-organization.js", "customer.js", "project-ownership.js"]) {
     assert.equal(content.includes(forbidden), false, `must not import "${forbidden}"`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Rev131 Phase C: membership revocation/currentness floor (C7-C9, C15, C16)
+// ---------------------------------------------------------------------------
+
+test("C7: a revoked membership is DENIED even when tenant, currentPrincipalRef, AuthorityContext and exact Project assignment all otherwise match", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const revoked = revokeOrganizationMembership({
+    membership,
+    revokedAt: "2026-09-25T00:00:00.000Z",
+    revokedReason: "offboarded",
+  });
+  const authority = buildAuthority();
+  const project = buildProject();
+  const assignment = buildAssignment({ membership });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership: revoked,
+    currentPrincipalRef: revoked.principalRef,
+    authority,
+    project,
+    assignments: [assignment],
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.equal(result.permissions.size, 0);
+  assert.equal(result.canPerformProtectedActions, false);
+  assert.match(result.reasons[0] ?? "", /active, coherent membership/);
+});
+
+test("C7: a revoked membership is DENIED at the organization level (no Project) too", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const revoked = revokeOrganizationMembership({
+    membership,
+    revokedAt: "2026-09-25T00:00:00.000Z",
+    revokedReason: "offboarded",
+  });
+  const authority = buildAuthority();
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership: revoked,
+    currentPrincipalRef: revoked.principalRef,
+    authority,
+  });
+  assert.equal(result.decision, "DENIED");
+});
+
+test("C9 (adversarial): a revoked membership cannot be rescued by a matching Project.ownerRef, exact AssignmentReference, or canPerformProtectedActions:true", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const revoked = revokeOrganizationMembership({
+    membership,
+    revokedAt: "2026-09-25T00:00:00.000Z",
+    revokedReason: "offboarded",
+  });
+  const authority = buildAuthority({ permissions: ["READ", "WRITE", "EXECUTE"], canPerformProtectedActions: true });
+  const project = createProject({
+    tenantScope,
+    customer: createCustomer({ tenantScope, customerId: "cust-os-v0-02", displayName: "Reference Customer" }),
+    projectId: "proj-os-v0-02",
+    ownerRef: revoked.principalRef,
+    state: "active",
+  });
+  const assignment = buildAssignment({ membership: revoked });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership: revoked,
+    currentPrincipalRef: revoked.principalRef,
+    authority,
+    project,
+    assignments: [assignment],
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.equal(result.permissions.size, 0);
+  assert.equal(result.canPerformProtectedActions, false);
+});
+
+test("C9 (adversarial): a hand-built membership incoherently claiming ACTIVE while already carrying revocation metadata is DENIED, not silently granted", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const forged = {
+    ...membership,
+    state: "ACTIVE",
+    revokedAt: "2026-01-01T00:00:00.000Z",
+    revokedReason: "stale",
+  } as unknown as OrganizationMembership;
+  const authority = buildAuthority();
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership: forged,
+    currentPrincipalRef: forged.principalRef,
+    authority,
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.match(result.reasons[0] ?? "", /active, coherent membership/);
+});
+
+test("C15: repeated resolution against a revoked membership is deterministic (deep-equal DENIED on every call)", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const revoked = revokeOrganizationMembership({
+    membership,
+    revokedAt: "2026-09-25T00:00:00.000Z",
+    revokedReason: "offboarded",
+  });
+  const authority = buildAuthority();
+  const resultA = resolveEffectiveOrganizationAccess({
+    organization,
+    membership: revoked,
+    currentPrincipalRef: revoked.principalRef,
+    authority,
+  });
+  const resultB = resolveEffectiveOrganizationAccess({
+    organization,
+    membership: revoked,
+    currentPrincipalRef: revoked.principalRef,
+    authority,
+  });
+  assert.deepEqual(resultA, resultB);
+  assert.equal(resultA.decision, "DENIED");
+});
+
+test("C16: an ACTIVE lifecycle state never widens permissions/protected-action eligibility beyond the exact AuthorityContext - active-vs-revoked only ever narrows, never grants", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const authority = buildAuthority({ permissions: ["READ"], canPerformProtectedActions: false });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+  });
+  assert.equal(result.decision, "GRANTED");
+  assert.deepEqual([...result.permissions], ["READ"]);
+  assert.equal(result.canPerformProtectedActions, false);
 });
 
 // ---------------------------------------------------------------------------

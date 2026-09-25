@@ -1,6 +1,11 @@
 import type { TenantScope } from "./tenant-scope.js";
 import type { Organization } from "./organization.js";
-import { resolveAssignmentStatus, type AssignmentReference, type OrganizationMembership } from "./organization-membership.js";
+import {
+  resolveAssignmentStatus,
+  isOrganizationMembershipActive,
+  type AssignmentReference,
+  type OrganizationMembership,
+} from "./organization-membership.js";
 import type { AuthorityContext, Permission } from "./authority.js";
 import type { Project } from "./project.js";
 
@@ -26,7 +31,10 @@ export type EffectiveOrganizationRole = "MEMBER";
  * caller's current `AssignmentReference` evidence. This module does not
  * authenticate `currentPrincipalRef` or resolve who the current caller is
  * (that identity boundary remains a future, separate application concern);
- * it only proves the supplied membership record belongs to the identity the
+ * it requires (Phase C, Rev131) the supplied membership to be an active,
+ * coherent `OrganizationMembership` record via `isOrganizationMembershipActive`
+ * - a revoked or malformed membership fails closed regardless of any other
+ * input - it then proves that membership belongs to the identity the
  * caller currently asserts (Rev129: closes same-tenant membership
  * substitution, which tenant correlation alone cannot detect) and, when a
  * `Project` is supplied, that exact current assignment evidence exists for
@@ -35,12 +43,14 @@ export type EffectiveOrganizationRole = "MEMBER";
  * member is actually assigned to that project). It grants no permission of
  * its own: `permissions`/`canPerformProtectedActions` on a `GRANTED`
  * resolution are always the exact `AuthorityContext` values, read verbatim,
- * after tenant-correlation, principal-binding, and (when scoped) assignment
- * validation - never widened by role, ownership, or any other signal.
- * `reasons` always explains the decision explicitly; there is no silent
- * default. This function is pure (no wall-clock/randomness/persistence), so
- * re-invoking it with current inputs is the only way to get a current
- * answer - it cannot itself preserve a stale decision.
+ * after membership-currentness, tenant-correlation, principal-binding, and
+ * (when scoped) assignment validation - never widened by role, ownership,
+ * revocation-lifecycle state, or any other signal. `reasons` always
+ * explains the decision explicitly; there is no silent default. This
+ * function is pure (no wall-clock/randomness/persistence), so re-invoking
+ * it with current inputs is the only way to get a current answer - it
+ * cannot itself preserve a stale decision, and re-resolving after a
+ * membership is revoked is exactly how a caller observes that revocation.
  */
 export interface EffectiveAccessResolution {
   readonly decision: AccessDecision;
@@ -92,23 +102,27 @@ function isValidCurrentPrincipalRef(value: string): boolean {
 }
 
 /**
- * Resolution order: membership presence, then `currentPrincipalRef`
- * structural validity, then membership/authority/(optional) project
- * tenant correlation (each against the given `Organization`'s own
- * `tenantId` - the exact structural anchor), then exact
- * `membership.principalRef === currentPrincipalRef` equality (Rev129:
- * closes same-tenant membership substitution, which tenant correlation
- * alone cannot detect), then - only when a `Project` is supplied - exact
- * assignment evidence via the existing `resolveAssignmentStatus` (Rev130
- * Phase B: `assignments` defaults to an empty list, which
- * `resolveAssignmentStatus` already resolves to `"UNASSIGNED"`, so an
- * omitted/empty evidence list fails closed exactly like a missing
- * membership does). Only once every check passes does this function read
- * `authority.permissions`/`authority.canPerformProtectedActions` verbatim
- * onto the `GRANTED` resolution. `membership.role` and `Project.ownerRef`
- * are never read for this decision - a role or an ownerRef match can never
- * substitute for `AssignmentReference` evidence or grant permission; the
- * projected `role` output is always `"MEMBER"`.
+ * Resolution order: membership presence, then (Phase C, Rev131) membership
+ * currentness via `isOrganizationMembershipActive` - a revoked or
+ * incoherent membership denies immediately, before `currentPrincipalRef`
+ * is even inspected - then `currentPrincipalRef` structural validity, then
+ * membership/authority/(optional) project tenant correlation (each
+ * against the given `Organization`'s own `tenantId` - the exact structural
+ * anchor), then exact `membership.principalRef === currentPrincipalRef`
+ * equality (Rev129: closes same-tenant membership substitution, which
+ * tenant correlation alone cannot detect), then - only when a `Project` is
+ * supplied - exact assignment evidence via the existing
+ * `resolveAssignmentStatus` (Rev130 Phase B: `assignments` defaults to an
+ * empty list, which `resolveAssignmentStatus` already resolves to
+ * `"UNASSIGNED"`, so an omitted/empty evidence list fails closed exactly
+ * like a missing membership does). Only once every check passes does this
+ * function read `authority.permissions`/`authority.canPerformProtectedActions`
+ * verbatim onto the `GRANTED` resolution. `membership.role`,
+ * `membership.state`, and `Project.ownerRef` are never read to *grant*
+ * anything - `state` only ever gates (via `isOrganizationMembershipActive`),
+ * a role or an ownerRef match can never substitute for `AssignmentReference`
+ * evidence or grant permission, and the projected `role` output is always
+ * `"MEMBER"`.
  */
 export function resolveEffectiveOrganizationAccess(input: {
   organization: Organization;
@@ -124,6 +138,14 @@ export function resolveEffectiveOrganizationAccess(input: {
       membership: undefined,
       project: input.project,
       reason: "membership is required for effective access resolution",
+    });
+  }
+  if (!isOrganizationMembershipActive(input.membership)) {
+    return denied({
+      organization: input.organization,
+      membership: input.membership,
+      project: input.project,
+      reason: "membership is not an active, coherent membership record",
     });
   }
   if (!isValidCurrentPrincipalRef(input.currentPrincipalRef)) {
