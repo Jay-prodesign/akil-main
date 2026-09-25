@@ -17,6 +17,7 @@ import {
 const tenantScope = createTenantScope("tenant-os-v0-02");
 const otherTenantScope = createTenantScope("tenant-os-v0-02-other");
 const NOW = "2026-09-25T00:00:00.000Z";
+const PRINCIPAL_REF = "principal-os-v0-02";
 
 function buildOrganization(overrides: { tenantScope?: typeof tenantScope } = {}): Organization {
   return createOrganization({
@@ -30,11 +31,12 @@ function buildOrganization(overrides: { tenantScope?: typeof tenantScope } = {})
 function buildMembership(overrides: {
   tenantScope?: typeof tenantScope;
   role?: "STAFF" | "JUNIOR" | "STUDENT" | "CLIENT_ASSOCIATE";
+  principalRef?: string;
 } = {}): OrganizationMembership {
   return createOrganizationMembership({
     membershipId: "membership-os-v0-02",
     tenantScope: overrides.tenantScope ?? tenantScope,
-    principalRef: "principal-os-v0-02",
+    principalRef: overrides.principalRef ?? PRINCIPAL_REF,
     role: overrides.role ?? "STAFF",
   });
 }
@@ -71,11 +73,16 @@ function buildProject(overrides: { tenantScope?: typeof tenantScope } = {}): Pro
 // A1: same-tenant deterministic success
 // ---------------------------------------------------------------------------
 
-test("A1: same-tenant Organization/Membership/Authority resolves GRANTED with the exact authority permissions", () => {
+test("A1: same-tenant Organization/Membership/Authority resolves GRANTED with the exact authority permissions (exact matching currentPrincipalRef)", () => {
   const organization = buildOrganization();
   const membership = buildMembership();
   const authority = buildAuthority({ permissions: ["READ", "WRITE"] });
-  const result = resolveEffectiveOrganizationAccess({ organization, membership, authority });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+  });
   assert.equal(result.decision, "GRANTED");
   assert.equal(result.tenantId, tenantScope.tenantId);
   assert.equal(result.organizationId, organization.organizationId);
@@ -84,6 +91,7 @@ test("A1: same-tenant Organization/Membership/Authority resolves GRANTED with th
   assert.deepEqual([...result.permissions].sort(), ["READ", "WRITE"]);
   assert.equal(result.canPerformProtectedActions, false);
   assert.ok(result.reasons.length > 0);
+  assert.match(result.reasons[0] ?? "", /principal matches/);
 });
 
 test("A1: an activated Organization (ACTIVE state) still resolves GRANTED the same way - this resolver does not gate on lifecycle state", () => {
@@ -93,7 +101,12 @@ test("A1: an activated Organization (ACTIVE state) still resolves GRANTED the sa
   });
   const membership = buildMembership();
   const authority = buildAuthority();
-  const result = resolveEffectiveOrganizationAccess({ organization, membership, authority });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+  });
   assert.equal(result.decision, "GRANTED");
 });
 
@@ -105,7 +118,12 @@ test("A2: a membership belonging to a foreign tenant is denied", () => {
   const organization = buildOrganization();
   const membership = buildMembership({ tenantScope: otherTenantScope });
   const authority = buildAuthority();
-  const result = resolveEffectiveOrganizationAccess({ organization, membership, authority });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+  });
   assert.equal(result.decision, "DENIED");
   assert.equal(result.permissions.size, 0);
   assert.equal(result.canPerformProtectedActions, false);
@@ -116,7 +134,12 @@ test("A3: an authority belonging to a foreign tenant is denied, even with a legi
   const organization = buildOrganization();
   const membership = buildMembership();
   const authority = buildAuthority({ tenantScope: otherTenantScope });
-  const result = resolveEffectiveOrganizationAccess({ organization, membership, authority });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+  });
   assert.equal(result.decision, "DENIED");
   assert.match(result.reasons[0] ?? "", /authority belongs to a different tenant/);
 });
@@ -126,7 +149,13 @@ test("A4: a Project belonging to a foreign tenant is denied, even with legitimat
   const membership = buildMembership();
   const authority = buildAuthority();
   const project = buildProject({ tenantScope: otherTenantScope });
-  const result = resolveEffectiveOrganizationAccess({ organization, membership, authority, project });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    project,
+  });
   assert.equal(result.decision, "DENIED");
   assert.match(result.reasons[0] ?? "", /project belongs to a different tenant/);
 });
@@ -136,7 +165,13 @@ test("A4: a same-tenant Project scope resolves GRANTED and carries the exact pro
   const membership = buildMembership();
   const authority = buildAuthority();
   const project = buildProject();
-  const result = resolveEffectiveOrganizationAccess({ organization, membership, authority, project });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    project,
+  });
   assert.equal(result.decision, "GRANTED");
   assert.equal(result.projectId, project.projectId);
 });
@@ -149,7 +184,12 @@ test("A5: READ-only authority never yields WRITE/EXECUTE in the resolution", () 
   const organization = buildOrganization();
   const membership = buildMembership();
   const authority = buildAuthority({ permissions: ["READ"] });
-  const result = resolveEffectiveOrganizationAccess({ organization, membership, authority });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+  });
   assert.equal(result.decision, "GRANTED");
   assert.deepEqual([...result.permissions], ["READ"]);
 });
@@ -158,7 +198,12 @@ test("A6: EXECUTE permission alone never yields protected-action eligibility", (
   const organization = buildOrganization();
   const membership = buildMembership();
   const authority = buildAuthority({ permissions: ["EXECUTE"], canPerformProtectedActions: false });
-  const result = resolveEffectiveOrganizationAccess({ organization, membership, authority });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+  });
   assert.equal(result.decision, "GRANTED");
   assert.ok(result.permissions.has("EXECUTE"));
   assert.equal(result.canPerformProtectedActions, false);
@@ -168,7 +213,12 @@ test("A6: canPerformProtectedActions is granted only when the AuthorityContext e
   const organization = buildOrganization();
   const membership = buildMembership();
   const authority = buildAuthority({ permissions: ["EXECUTE"], canPerformProtectedActions: true });
-  const result = resolveEffectiveOrganizationAccess({ organization, membership, authority });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+  });
   assert.equal(result.canPerformProtectedActions, true);
 });
 
@@ -177,7 +227,12 @@ test("A7: every legacy membership role (STAFF/JUNIOR/STUDENT/CLIENT_ASSOCIATE) r
   const organization = buildOrganization();
   for (const role of ["STAFF", "JUNIOR", "STUDENT", "CLIENT_ASSOCIATE"] as const) {
     const membership = buildMembership({ role });
-    const result = resolveEffectiveOrganizationAccess({ organization, membership, authority });
+    const result = resolveEffectiveOrganizationAccess({
+      organization,
+      membership,
+      currentPrincipalRef: membership.principalRef,
+      authority,
+    });
     assert.equal(result.decision, "GRANTED");
     assert.equal(result.role, "MEMBER");
     assert.deepEqual([...result.permissions], ["READ"]);
@@ -198,8 +253,20 @@ test("A8: Project.ownerRef cannot grant permission or approval - the resolution 
     ownerRef: "a-completely-different-owner-ref",
     state: "active",
   });
-  const resultA = resolveEffectiveOrganizationAccess({ organization, membership, authority, project: projectA });
-  const resultB = resolveEffectiveOrganizationAccess({ organization, membership, authority, project: projectB });
+  const resultA = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    project: projectA,
+  });
+  const resultB = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    project: projectB,
+  });
   assert.equal(resultA.decision, "GRANTED");
   assert.equal(resultB.decision, "GRANTED");
   assert.deepEqual([...resultA.permissions], [...resultB.permissions]);
@@ -208,13 +275,18 @@ test("A8: Project.ownerRef cannot grant permission or approval - the resolution 
 });
 
 // ---------------------------------------------------------------------------
-// A9: missing/substituted membership fails closed
+// A9: missing/substituted membership fails closed (cross-tenant AND
+// same-tenant wrong-principal substitution - Rev129)
 // ---------------------------------------------------------------------------
 
 test("A9: a missing membership fails closed with zero permissions", () => {
   const organization = buildOrganization();
   const authority = buildAuthority();
-  const result = resolveEffectiveOrganizationAccess({ organization, authority });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    currentPrincipalRef: PRINCIPAL_REF,
+    authority,
+  });
   assert.equal(result.decision, "DENIED");
   assert.equal(result.membershipId, undefined);
   assert.equal(result.permissions.size, 0);
@@ -224,10 +296,15 @@ test("A9: a missing membership fails closed with zero permissions", () => {
 test("A9: a substituted (foreign-tenant) membership fails closed identically to a missing one - zero permissions either way", () => {
   const organization = buildOrganization();
   const authority = buildAuthority();
-  const missing = resolveEffectiveOrganizationAccess({ organization, authority });
+  const missing = resolveEffectiveOrganizationAccess({
+    organization,
+    currentPrincipalRef: PRINCIPAL_REF,
+    authority,
+  });
   const substituted = resolveEffectiveOrganizationAccess({
     organization,
     membership: buildMembership({ tenantScope: otherTenantScope }),
+    currentPrincipalRef: PRINCIPAL_REF,
     authority,
   });
   assert.equal(missing.decision, "DENIED");
@@ -236,20 +313,122 @@ test("A9: a substituted (foreign-tenant) membership fails closed identically to 
   assert.equal(substituted.permissions.size, 0);
 });
 
+test("A9 (Rev129): a same-tenant membership belonging to a DIFFERENT principal than the current caller identity fails closed, even though every tenant correlation passes", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership({ principalRef: "principal-real-owner" });
+  const authority = buildAuthority();
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: "principal-impersonator",
+    authority,
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.equal(result.permissions.size, 0);
+  assert.equal(result.canPerformProtectedActions, false);
+  assert.match(result.reasons[0] ?? "", /different principal/);
+});
+
+test("A9 (Rev129): a same-tenant, same-role membership with the correct principalRef resolves GRANTED - proves the mismatch above is caused by principal identity, not tenant/role", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership({ principalRef: "principal-real-owner" });
+  const authority = buildAuthority();
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: "principal-real-owner",
+    authority,
+  });
+  assert.equal(result.decision, "GRANTED");
+});
+
+// ---------------------------------------------------------------------------
+// A9/A13 (Rev129): malformed/blank currentPrincipalRef fails closed
+// ---------------------------------------------------------------------------
+
+test("A9 (Rev129): an empty-string currentPrincipalRef fails closed even with an otherwise-valid same-tenant membership", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const authority = buildAuthority();
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: "",
+    authority,
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.equal(result.permissions.size, 0);
+  assert.match(result.reasons[0] ?? "", /currentPrincipalRef/);
+});
+
+test("A9 (Rev129): a whitespace-only currentPrincipalRef fails closed", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const authority = buildAuthority();
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: "   ",
+    authority,
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.match(result.reasons[0] ?? "", /currentPrincipalRef/);
+});
+
+test("A9 (Rev129): a currentPrincipalRef with leading/trailing whitespace fails closed, even though its trimmed form would match membership.principalRef exactly", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const authority = buildAuthority();
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: ` ${membership.principalRef} `,
+    authority,
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.match(result.reasons[0] ?? "", /currentPrincipalRef/);
+});
+
+test("A9 (Rev129, adversarial): a hand-built non-string currentPrincipalRef fails closed - the resolver does not coerce or trust the declared type alone", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const authority = buildAuthority();
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: undefined as unknown as string,
+    authority,
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.match(result.reasons[0] ?? "", /currentPrincipalRef/);
+});
+
 // ---------------------------------------------------------------------------
 // A10: explainable context/reasons
 // ---------------------------------------------------------------------------
 
-test("A10: every resolution (granted or denied) carries explicit tenantId/organizationId provenance and a non-empty reasons list", () => {
+test("A10: every resolution (granted, cross-tenant-denied, or same-tenant-wrong-principal-denied) carries explicit tenantId/organizationId provenance and a non-empty reasons list", () => {
   const organization = buildOrganization();
+  const membership = buildMembership();
   const authority = buildAuthority();
   const granted = resolveEffectiveOrganizationAccess({
     organization,
-    membership: buildMembership(),
+    membership,
+    currentPrincipalRef: membership.principalRef,
     authority,
   });
-  const deniedResult = resolveEffectiveOrganizationAccess({ organization, authority });
-  for (const result of [granted, deniedResult]) {
+  const missingMembershipDenied = resolveEffectiveOrganizationAccess({
+    organization,
+    currentPrincipalRef: PRINCIPAL_REF,
+    authority,
+  });
+  const wrongPrincipalDenied = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: "principal-someone-else",
+    authority,
+  });
+  for (const result of [granted, missingMembershipDenied, wrongPrincipalDenied]) {
     assert.equal(result.tenantId, tenantScope.tenantId);
     assert.equal(result.organizationId, organization.organizationId);
     assert.ok(result.reasons.length > 0, "expected a non-empty reasons list");
@@ -305,11 +484,13 @@ test("A11: org_akilta and a controlled second organization resolve access throug
   const resultAkilta = resolveEffectiveOrganizationAccess({
     organization: orgAkilta,
     membership: membershipAkilta,
+    currentPrincipalRef: membershipAkilta.principalRef,
     authority: authorityAkilta,
   });
   const resultControlled = resolveEffectiveOrganizationAccess({
     organization: orgControlled,
     membership: membershipControlled,
+    currentPrincipalRef: membershipControlled.principalRef,
     authority: authorityControlled,
   });
 
@@ -323,14 +504,46 @@ test("A11: org_akilta and a controlled second organization resolve access throug
 // A12: deterministic replay
 // ---------------------------------------------------------------------------
 
-test("A12: identical inputs produce a deep-equal resolution", () => {
+test("A12: identical inputs (including currentPrincipalRef) produce a deep-equal GRANTED resolution", () => {
   const organization = buildOrganization();
   const membership = buildMembership();
   const authority = buildAuthority();
   const project = buildProject();
-  const resultA = resolveEffectiveOrganizationAccess({ organization, membership, authority, project });
-  const resultB = resolveEffectiveOrganizationAccess({ organization, membership, authority, project });
+  const resultA = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    project,
+  });
+  const resultB = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    project,
+  });
   assert.deepEqual(resultA, resultB);
+});
+
+test("A12 (Rev129): identical inputs with a wrong-principal currentPrincipalRef produce a deep-equal DENIED resolution on repeat calls - principal binding is deterministic, not just tenant correlation", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const authority = buildAuthority();
+  const resultA = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: "principal-not-the-member",
+    authority,
+  });
+  const resultB = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: "principal-not-the-member",
+    authority,
+  });
+  assert.deepEqual(resultA, resultB);
+  assert.equal(resultA.decision, "DENIED");
 });
 
 // ---------------------------------------------------------------------------
@@ -340,8 +553,11 @@ test("A12: identical inputs produce a deep-equal resolution", () => {
 test("A13 (adversarial): a hand-built membership object with a forged tenantId matching the organization cannot be used to smuggle a mismatched principal context - it is still evaluated purely on the tenantId field", () => {
   // The resolver has no way to detect a "forged" membership beyond its
   // structural tenantId - this test proves that field is exactly what
-  // gates the decision (not, say, principalRef or role), so a caller
-  // cannot bypass scope by varying any field other than tenantId.
+  // gates the decision (not, say, role), so a caller cannot bypass scope
+  // by varying any field other than tenantId. currentPrincipalRef is
+  // deliberately set to match the forged principalRef here, isolating
+  // tenantId as the sole cause of denial (Rev129's own principal-binding
+  // gate is exercised separately in the A9 (Rev129) tests above).
   const organization = buildOrganization();
   const authority = buildAuthority();
   const forgedMembership = {
@@ -350,7 +566,12 @@ test("A13 (adversarial): a hand-built membership object with a forged tenantId m
     principalRef: "principal-forged",
     role: "STAFF",
   } as unknown as OrganizationMembership;
-  const result = resolveEffectiveOrganizationAccess({ organization, membership: forgedMembership, authority });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership: forgedMembership,
+    currentPrincipalRef: "principal-forged",
+    authority,
+  });
   assert.equal(result.decision, "DENIED");
 });
 
@@ -362,7 +583,12 @@ test("A13 (adversarial): a hand-built AuthorityContext with an empty permissions
     permissions: [],
     canPerformProtectedActions: false,
   });
-  const result = resolveEffectiveOrganizationAccess({ organization, membership, authority: emptyAuthority });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority: emptyAuthority,
+  });
   assert.equal(result.decision, "GRANTED");
   assert.equal(result.permissions.size, 0);
 });
