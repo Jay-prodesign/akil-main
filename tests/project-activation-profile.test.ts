@@ -39,6 +39,7 @@ import {
   type AcceptedCommercialReference,
   type ActivationWorkerRouteInput,
 } from "../src/domain/project-activation-profile.js";
+import { resolveEffectiveConfigurationPolicy } from "../src/domain/effective-configuration-policy.js";
 
 const tenantScope = createTenantScope("tenant-adm-proj-001");
 const customer = createCustomer({
@@ -1355,4 +1356,83 @@ test("A20/boundary: no new runtime dependency was introduced", () => {
     Object.keys(packageJson.devDependencies ?? {}).sort(),
     ["@types/node", "typescript"],
   );
+});
+
+// ---------------------------------------------------------------------------
+// OS-V0-04 Phase A13: effective-configuration-policy integration witness
+// ---------------------------------------------------------------------------
+
+test("OS-V0-04 A13: compileProjectActivationProfile consumes resolveEffectiveConfigurationPolicy's output unchanged, with no compiler-source modification", () => {
+  const resolution = resolveEffectiveConfigurationPolicy({
+    tenantId: tenantScope.tenantId,
+    customerId: customer.customerId,
+    projectId: project.projectId,
+    controls: [
+      { kind: "CONFIG", scope: "PLATFORM", key: "theme", sourceRef: "platform-theme", version: "1", identity: {} },
+      {
+        kind: "POLICY",
+        scope: "PROJECT",
+        key: "publish-gate",
+        sourceRef: "project-publish-gate",
+        version: "1",
+        identity: { tenantId: tenantScope.tenantId, customerId: customer.customerId, projectId: project.projectId },
+      },
+    ],
+  });
+
+  const result = compileProjectActivationProfile(
+    readyInputs("plan-os-v0-04-a13", {
+      effectiveConfigRefs: resolution.effectiveConfigRefs,
+      effectivePolicyRefs: resolution.effectivePolicyRefs,
+    }),
+  );
+
+  assert.deepEqual(result.profile.effectiveConfigRefs, resolution.effectiveConfigRefs);
+  assert.deepEqual(result.profile.effectivePolicyRefs, resolution.effectivePolicyRefs);
+});
+
+test("OS-V0-04 A13: a material change to a selected effective ref/version changes ProjectActivationProfile.sourceFingerprint", () => {
+  const baselineResolution = resolveEffectiveConfigurationPolicy({
+    tenantId: tenantScope.tenantId,
+    customerId: customer.customerId,
+    projectId: project.projectId,
+    controls: [
+      { kind: "CONFIG", scope: "PLATFORM", key: "theme", sourceRef: "platform-theme", version: "1", identity: {} },
+    ],
+  });
+  const baseline = compileProjectActivationProfile(
+    readyInputs("plan-os-v0-04-a13-fp", {
+      effectiveConfigRefs: baselineResolution.effectiveConfigRefs,
+      effectivePolicyRefs: [],
+    }),
+  );
+
+  // Same key, overridden at PROJECT scope with a different sourceRef/version
+  // - the exact "material selected ref/version change" this witness proves
+  // propagates through to a different sourceFingerprint.
+  const variedResolution = resolveEffectiveConfigurationPolicy({
+    tenantId: tenantScope.tenantId,
+    customerId: customer.customerId,
+    projectId: project.projectId,
+    controls: [
+      { kind: "CONFIG", scope: "PLATFORM", key: "theme", sourceRef: "platform-theme", version: "1", identity: {} },
+      {
+        kind: "CONFIG",
+        scope: "PROJECT",
+        key: "theme",
+        sourceRef: "project-theme-override",
+        version: "2",
+        identity: { tenantId: tenantScope.tenantId, customerId: customer.customerId, projectId: project.projectId },
+      },
+    ],
+  });
+  assert.notDeepEqual(variedResolution.effectiveConfigRefs, baselineResolution.effectiveConfigRefs);
+  const varied = compileProjectActivationProfile(
+    readyInputs("plan-os-v0-04-a13-fp", {
+      effectiveConfigRefs: variedResolution.effectiveConfigRefs,
+      effectivePolicyRefs: [],
+    }),
+  );
+
+  assert.notEqual(varied.profile.sourceFingerprint, baseline.profile.sourceFingerprint);
 });
