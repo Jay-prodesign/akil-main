@@ -17,12 +17,19 @@ import { createAuthorityContext, type AuthorityContext } from "../src/domain/aut
 import { createProject, type Project } from "../src/domain/project.js";
 import {
   resolveEffectiveOrganizationAccess,
+  resolveEffectiveServicePrincipalAccess,
   type EffectiveAccessResolution,
+  type EffectiveServicePrincipalAccessResolution,
 } from "../src/domain/effective-organization-access.js";
 import {
   createOrganizationAccessRoleContext,
   type OrganizationAccessRoleContext,
 } from "../src/domain/organization-access-role.js";
+import {
+  createOrganizationServicePrincipal,
+  revokeOrganizationServicePrincipal,
+  type OrganizationServicePrincipal,
+} from "../src/domain/organization-service-principal.js";
 
 const tenantScope = createTenantScope("tenant-os-v0-02");
 const otherTenantScope = createTenantScope("tenant-os-v0-02-other");
@@ -979,7 +986,7 @@ test("A14/boundary: effective-organization-access.ts contains no session/provide
   }
 });
 
-test("A14/boundary: effective-organization-access.ts imports only tenant-scope.ts/organization.ts/organization-membership.ts/authority.ts/project.ts/organization-access-role.ts - no ownership-assignment.ts/partner-organization.ts/customer.ts import", () => {
+test("A14/boundary: effective-organization-access.ts imports only tenant-scope.ts/organization.ts/organization-membership.ts/authority.ts/project.ts/organization-access-role.ts/organization-service-principal.ts - no ownership-assignment.ts/partner-organization.ts/customer.ts/worker-routing-policy.ts import", () => {
   const content = readFileSync(join(REPO_ROOT, RESOLVER_SOURCE_PATH), "utf8");
   // Matched against `from "..."` specifiers directly (not line-by-line
   // "starts with import") so a multi-line named-import statement (e.g.
@@ -994,6 +1001,7 @@ test("A14/boundary: effective-organization-access.ts imports only tenant-scope.t
     "authority.js",
     "project.js",
     "organization-access-role.js",
+    "organization-service-principal.js",
   ];
   for (const specifier of importedModules) {
     assert.ok(
@@ -1001,7 +1009,7 @@ test("A14/boundary: effective-organization-access.ts imports only tenant-scope.t
       `unexpected import specifier: ${specifier}`,
     );
   }
-  for (const forbidden of ["ownership-assignment.js", "partner-organization.js", "customer.js", "project-ownership.js"]) {
+  for (const forbidden of ["ownership-assignment.js", "partner-organization.js", "customer.js", "project-ownership.js", "worker-routing-policy.js", "worker-invoker.js"]) {
     assert.equal(content.includes(forbidden), false, `must not import "${forbidden}"`);
   }
 });
@@ -1436,6 +1444,265 @@ test("D14: org_akilta and a controlled second organization use identical OWNER/A
   assert.equal(resultAkiltaA.role, "OWNER");
   assert.equal(resultControlled.decision, "GRANTED");
   assert.equal(resultControlled.role, "OWNER");
+  assert.deepEqual(resultAkiltaA, resultAkiltaB);
+});
+
+// ---------------------------------------------------------------------------
+// Rev136 final convergence: Worker/Service Principal effective access
+// (acceptance items C, D, E, F, G)
+// ---------------------------------------------------------------------------
+
+function buildServicePrincipal(overrides: {
+  tenantScope?: typeof tenantScope;
+  servicePrincipalId?: string;
+  workerRef?: string;
+} = {}): OrganizationServicePrincipal {
+  return createOrganizationServicePrincipal({
+    servicePrincipalId: overrides.servicePrincipalId ?? "sp-os-v0-02",
+    tenantScope: overrides.tenantScope ?? tenantScope,
+    workerRef: overrides.workerRef ?? "worker-os-v0-02",
+  });
+}
+
+test("D (service principal): a same-tenant service principal with a matching currentWorkerRef resolves GRANTED with the exact AuthorityContext permissions and no role field at all", () => {
+  const organization = buildOrganization();
+  const servicePrincipal = buildServicePrincipal();
+  const authority = buildAuthority({ permissions: ["READ", "EXECUTE"], canPerformProtectedActions: true });
+  const result = resolveEffectiveServicePrincipalAccess({
+    organization,
+    servicePrincipal,
+    currentWorkerRef: servicePrincipal.workerRef,
+    authority,
+  });
+  assert.equal(result.decision, "GRANTED");
+  assert.equal(result.servicePrincipalId, servicePrincipal.servicePrincipalId);
+  assert.deepEqual([...result.permissions].sort(), ["EXECUTE", "READ"]);
+  assert.equal(result.canPerformProtectedActions, true);
+  assert.equal("role" in result, false);
+  assert.equal("membershipId" in result, false);
+});
+
+test("service principal: missing servicePrincipal fails closed with zero permissions", () => {
+  const organization = buildOrganization();
+  const authority = buildAuthority();
+  const result = resolveEffectiveServicePrincipalAccess({
+    organization,
+    currentWorkerRef: "worker-os-v0-02",
+    authority,
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.equal(result.servicePrincipalId, undefined);
+  assert.equal(result.permissions.size, 0);
+});
+
+test("C (adversarial, cross-tenant): a service principal belonging to a foreign tenant is denied even with a matching currentWorkerRef", () => {
+  const organization = buildOrganization();
+  const servicePrincipal = buildServicePrincipal({ tenantScope: otherTenantScope });
+  const authority = buildAuthority();
+  const result = resolveEffectiveServicePrincipalAccess({
+    organization,
+    servicePrincipal,
+    currentWorkerRef: servicePrincipal.workerRef,
+    authority,
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.match(result.reasons[0] ?? "", /different tenant/);
+});
+
+test("C (adversarial, cross-worker): a service principal bound to a different workerRef than the current caller identity fails closed", () => {
+  const organization = buildOrganization();
+  const servicePrincipal = buildServicePrincipal({ workerRef: "worker-real" });
+  const authority = buildAuthority();
+  const result = resolveEffectiveServicePrincipalAccess({
+    organization,
+    servicePrincipal,
+    currentWorkerRef: "worker-impersonator",
+    authority,
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.equal(result.permissions.size, 0);
+  assert.match(result.reasons[0] ?? "", /different worker/);
+});
+
+test("service principal: authority belonging to a foreign tenant is denied, even with a legitimate same-tenant service principal", () => {
+  const organization = buildOrganization();
+  const servicePrincipal = buildServicePrincipal();
+  const authority = buildAuthority({ tenantScope: otherTenantScope });
+  const result = resolveEffectiveServicePrincipalAccess({
+    organization,
+    servicePrincipal,
+    currentWorkerRef: servicePrincipal.workerRef,
+    authority,
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.match(result.reasons[0] ?? "", /authority belongs to a different tenant/);
+});
+
+test("service principal: a malformed/blank currentWorkerRef fails closed even with an otherwise-valid same-tenant service principal", () => {
+  const organization = buildOrganization();
+  const servicePrincipal = buildServicePrincipal();
+  const authority = buildAuthority();
+  const result = resolveEffectiveServicePrincipalAccess({
+    organization,
+    servicePrincipal,
+    currentWorkerRef: "",
+    authority,
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.match(result.reasons[0] ?? "", /currentWorkerRef/);
+});
+
+test("E: a revoked service principal is DENIED even when tenant/authority/currentWorkerRef all otherwise match perfectly", () => {
+  const organization = buildOrganization();
+  const servicePrincipal = buildServicePrincipal();
+  const revoked = revokeOrganizationServicePrincipal({
+    servicePrincipal,
+    revokedAt: "2026-09-25T00:00:00.000Z",
+    revokedReason: "decommissioned",
+  });
+  const authority = buildAuthority({ permissions: ["READ", "WRITE", "EXECUTE"], canPerformProtectedActions: true });
+  const result = resolveEffectiveServicePrincipalAccess({
+    organization,
+    servicePrincipal: revoked,
+    currentWorkerRef: revoked.workerRef,
+    authority,
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.equal(result.permissions.size, 0);
+  assert.equal(result.canPerformProtectedActions, false);
+  assert.match(result.reasons[0] ?? "", /active, coherent/);
+});
+
+test("E: repeated resolution against a revoked service principal is deterministic (deep-equal DENIED on every call)", () => {
+  const organization = buildOrganization();
+  const servicePrincipal = buildServicePrincipal();
+  const revoked = revokeOrganizationServicePrincipal({
+    servicePrincipal,
+    revokedAt: "2026-09-25T00:00:00.000Z",
+    revokedReason: "decommissioned",
+  });
+  const authority = buildAuthority();
+  const resultA = resolveEffectiveServicePrincipalAccess({
+    organization,
+    servicePrincipal: revoked,
+    currentWorkerRef: revoked.workerRef,
+    authority,
+  });
+  const resultB = resolveEffectiveServicePrincipalAccess({
+    organization,
+    servicePrincipal: revoked,
+    currentWorkerRef: revoked.workerRef,
+    authority,
+  });
+  assert.deepEqual(resultA, resultB);
+  assert.equal(resultA.decision, "DENIED");
+});
+
+test("D (adversarial): resolveEffectiveServicePrincipalAccess cannot be handed a human OrganizationMembership - the input shapes are structurally disjoint (TypeScript-level proof via a same-file compile pass, runtime proof via a hand-cast forgery still failing on the missing workerRef field)", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const forgedAsServicePrincipal = membership as unknown as OrganizationServicePrincipal;
+  const authority = buildAuthority();
+  const result = resolveEffectiveServicePrincipalAccess({
+    organization,
+    servicePrincipal: forgedAsServicePrincipal,
+    currentWorkerRef: "principal-os-v0-02",
+    authority,
+  });
+  // OrganizationMembership carries state: "ACTIVE" with no revokedAt/
+  // revokedReason (Phase C), which happens to satisfy
+  // isOrganizationServicePrincipalActive's coherent-ACTIVE shape trivially
+  // - so the currentness gate alone does NOT prove this forgery fails. The
+  // actual denial comes from the workerRef correlation gate: a
+  // OrganizationMembership has no workerRef field at all, so
+  // forgedAsServicePrincipal.workerRef is undefined, which can never equal
+  // the supplied currentWorkerRef string. This is exactly the intended
+  // proof: a human membership has no workerRef to bind to, so it can never
+  // pass as a service principal, but through the correlation gate, not the
+  // currentness gate alone.
+  assert.equal(result.decision, "DENIED");
+  assert.match(result.reasons[0] ?? "", /different worker/);
+});
+
+test("F: EffectiveServicePrincipalAccessResolution never carries a role/membershipId/projectId field - human and worker identity families cannot substitute for one another at the type level", () => {
+  const organization = buildOrganization();
+  const servicePrincipal = buildServicePrincipal();
+  const authority = buildAuthority();
+  const result: EffectiveServicePrincipalAccessResolution = resolveEffectiveServicePrincipalAccess({
+    organization,
+    servicePrincipal,
+    currentWorkerRef: servicePrincipal.workerRef,
+    authority,
+  });
+  assert.deepEqual(Object.keys(result).sort(), [
+    "canPerformProtectedActions",
+    "decision",
+    "organizationId",
+    "permissions",
+    "reasons",
+    "servicePrincipalId",
+    "tenantId",
+  ]);
+});
+
+test("G: org_akilta and a controlled second organization resolve service-principal access through the identical resolver, deterministically, with no special branch", () => {
+  const akiltaTenantScope = createTenantScope("tenant-akilta-os-v0-02-sp");
+  const controlledTenantScope = createTenantScope("tenant-controlled-os-v0-02-sp");
+
+  const orgAkilta = createOrganization({
+    organizationId: "org_akilta",
+    tenantScope: akiltaTenantScope,
+    displayName: "AKILTA (Organization Zero)",
+    createdAt: NOW,
+  });
+  const orgControlled = createOrganization({
+    organizationId: "org-controlled-os-v0-02-sp",
+    tenantScope: controlledTenantScope,
+    displayName: "Controlled Second Organization",
+    createdAt: NOW,
+  });
+
+  const spAkilta = createOrganizationServicePrincipal({
+    servicePrincipalId: "sp-akilta",
+    tenantScope: akiltaTenantScope,
+    workerRef: "worker-akilta",
+  });
+  const spControlled = createOrganizationServicePrincipal({
+    servicePrincipalId: "sp-controlled",
+    tenantScope: controlledTenantScope,
+    workerRef: "worker-controlled",
+  });
+
+  const authorityAkilta = createAuthorityContext({
+    tenantScope: akiltaTenantScope,
+    permissions: ["READ"],
+    canPerformProtectedActions: false,
+  });
+  const authorityControlled = createAuthorityContext({
+    tenantScope: controlledTenantScope,
+    permissions: ["READ"],
+    canPerformProtectedActions: false,
+  });
+
+  const resolveAkilta = () =>
+    resolveEffectiveServicePrincipalAccess({
+      organization: orgAkilta,
+      servicePrincipal: spAkilta,
+      currentWorkerRef: spAkilta.workerRef,
+      authority: authorityAkilta,
+    });
+
+  const resultAkiltaA = resolveAkilta();
+  const resultAkiltaB = resolveAkilta();
+  const resultControlled = resolveEffectiveServicePrincipalAccess({
+    organization: orgControlled,
+    servicePrincipal: spControlled,
+    currentWorkerRef: spControlled.workerRef,
+    authority: authorityControlled,
+  });
+
+  assert.equal(resultAkiltaA.decision, "GRANTED");
+  assert.equal(resultControlled.decision, "GRANTED");
   assert.deepEqual(resultAkiltaA, resultAkiltaB);
 });
 

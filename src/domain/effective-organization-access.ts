@@ -9,6 +9,10 @@ import {
 import type { AuthorityContext, Permission } from "./authority.js";
 import type { Project } from "./project.js";
 import { isValidOrganizationAccessRole, type OrganizationAccessRole, type OrganizationAccessRoleContext } from "./organization-access-role.js";
+import {
+  isOrganizationServicePrincipalActive,
+  type OrganizationServicePrincipal,
+} from "./organization-service-principal.js";
 
 export type AccessDecision = "GRANTED" | "DENIED";
 
@@ -266,6 +270,145 @@ export function resolveEffectiveOrganizationAccess(input: {
         (input.roleContext !== undefined
           ? "; curated role context verified against the current membership identity"
           : ""),
+    ],
+  };
+}
+
+/**
+ * OS-V0-02 final convergence (Rev136): the non-human counterpart to
+ * `resolveEffectiveOrganizationAccess`, deliberately a SEPARATE function
+ * with a SEPARATE result type - it accepts no `OrganizationMembership`,
+ * projects no `EffectiveOrganizationRole` (`OWNER`/`ADMIN`/`MEMBER` remain
+ * exclusively human-membership-bound, per `organization-access-role.ts`),
+ * and cannot be handed a human identity by accident (the input shapes are
+ * structurally disjoint). This is what "human and worker identity families
+ * cannot substitute for one another" means at the type level, not merely by
+ * runtime convention. `currentWorkerRef` is an already-resolved
+ * application-boundary identity claim - the exact same trust footing as
+ * `currentPrincipalRef` for humans - never inferred from the service
+ * principal record itself. Permission comes only from the supplied
+ * `AuthorityContext`, read verbatim, after every correlation below passes:
+ * this function never reads worker trust/admission/capability/cost/
+ * availability (it has no dependency on `worker-routing-policy.ts` at all),
+ * so worker routing status can never manufacture Organization authority,
+ * and Organization authority can never manufacture worker admission -
+ * those remain two entirely separate concerns composed later by a caller,
+ * not fused here. Project-scoped worker grants are explicitly NOT
+ * implemented in this slice (see `docs/exec-plans/active/OS-V0-02.md`'s
+ * final convergence audit) - inventing a hidden equivalence to human
+ * `AssignmentReference` would misrepresent a service principal as a
+ * membership, which this module must never do.
+ */
+export interface EffectiveServicePrincipalAccessResolution {
+  readonly decision: AccessDecision;
+  readonly tenantId: TenantScope["tenantId"];
+  readonly organizationId: Organization["organizationId"];
+  readonly servicePrincipalId?: OrganizationServicePrincipal["servicePrincipalId"];
+  readonly permissions: ReadonlySet<Permission>;
+  readonly canPerformProtectedActions: boolean;
+  readonly reasons: ReadonlyArray<string>;
+}
+
+function deniedServicePrincipal(input: {
+  organization: Organization;
+  servicePrincipal: OrganizationServicePrincipal | undefined;
+  reason: string;
+}): EffectiveServicePrincipalAccessResolution {
+  return {
+    decision: "DENIED",
+    tenantId: input.organization.tenantId,
+    organizationId: input.organization.organizationId,
+    ...(input.servicePrincipal !== undefined
+      ? { servicePrincipalId: input.servicePrincipal.servicePrincipalId }
+      : {}),
+    permissions: new Set<Permission>(),
+    canPerformProtectedActions: false,
+    reasons: [input.reason],
+  };
+}
+
+function isValidCurrentWorkerRef(value: string): boolean {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.trim().length > 0 &&
+    value.trim() === value
+  );
+}
+
+/**
+ * Resolution order (deliberately mirrors `resolveEffectiveOrganizationAccess`'s
+ * own structure, so the two identity families stay explainable in the same
+ * way without ever sharing state): service-principal presence, then
+ * currentness/coherence via `isOrganizationServicePrincipalActive` (a
+ * revoked or incoherent service principal denies immediately), then
+ * `currentWorkerRef` structural validity, then service-principal/authority
+ * tenant correlation against the given `Organization`'s own `tenantId`,
+ * then exact `servicePrincipal.workerRef === currentWorkerRef` equality -
+ * closing cross-worker substitution the same way `currentPrincipalRef`
+ * closes cross-principal membership substitution for humans. Only once
+ * every check passes does this function read `authority.permissions`/
+ * `authority.canPerformProtectedActions` verbatim onto the `GRANTED`
+ * resolution.
+ */
+export function resolveEffectiveServicePrincipalAccess(input: {
+  organization: Organization;
+  servicePrincipal?: OrganizationServicePrincipal;
+  currentWorkerRef: string;
+  authority: AuthorityContext;
+}): EffectiveServicePrincipalAccessResolution {
+  if (input.servicePrincipal === undefined) {
+    return deniedServicePrincipal({
+      organization: input.organization,
+      servicePrincipal: undefined,
+      reason: "service principal is required for effective service-principal access resolution",
+    });
+  }
+  if (!isOrganizationServicePrincipalActive(input.servicePrincipal)) {
+    return deniedServicePrincipal({
+      organization: input.organization,
+      servicePrincipal: input.servicePrincipal,
+      reason: "service principal is not an active, coherent record",
+    });
+  }
+  if (!isValidCurrentWorkerRef(input.currentWorkerRef)) {
+    return deniedServicePrincipal({
+      organization: input.organization,
+      servicePrincipal: input.servicePrincipal,
+      reason: "currentWorkerRef is required and must be a non-empty, non-whitespace string",
+    });
+  }
+  if (input.servicePrincipal.tenantId !== input.organization.tenantId) {
+    return deniedServicePrincipal({
+      organization: input.organization,
+      servicePrincipal: input.servicePrincipal,
+      reason: "service principal belongs to a different tenant than the organization",
+    });
+  }
+  if (input.authority.tenantId !== input.organization.tenantId) {
+    return deniedServicePrincipal({
+      organization: input.organization,
+      servicePrincipal: input.servicePrincipal,
+      reason: "authority belongs to a different tenant than the organization",
+    });
+  }
+  if (input.servicePrincipal.workerRef !== input.currentWorkerRef) {
+    return deniedServicePrincipal({
+      organization: input.organization,
+      servicePrincipal: input.servicePrincipal,
+      reason: "service principal is bound to a different worker than the current caller identity",
+    });
+  }
+
+  return {
+    decision: "GRANTED",
+    tenantId: input.organization.tenantId,
+    organizationId: input.organization.organizationId,
+    servicePrincipalId: input.servicePrincipal.servicePrincipalId,
+    permissions: new Set(input.authority.permissions),
+    canPerformProtectedActions: input.authority.canPerformProtectedActions,
+    reasons: [
+      "organization/service-principal/authority tenant correlation verified; service principal worker binding matches current caller identity",
     ],
   };
 }
