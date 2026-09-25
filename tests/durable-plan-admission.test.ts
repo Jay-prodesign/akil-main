@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createTenantScope } from "../src/domain/tenant-scope.js";
 import { createOfferBlueprintVersion } from "../src/domain/offer-blueprint.js";
 import { createSoldScope } from "../src/domain/sold-scope.js";
@@ -14,7 +15,9 @@ import {
   recordEvaluation,
   recordAnswer,
   InvalidPlanAdmissionAnswerError,
+  CorruptedPlanAdmissionEventError,
 } from "../src/domain/durable-plan-admission-store.js";
+import { readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { createEvaluationRecordedEvent, createAnswerRecordedEvent } from "../src/domain/plan-admission-event.js";
 import {
   applyPlanAdmissionEvent,
@@ -28,6 +31,574 @@ import { buildFullReadinessAssertions } from "./helpers/readiness-fixture.js";
 function freshStoreDir(): string {
   return mkdtempSync(join(tmpdir(), "del-003-plan-admission-store-"));
 }
+
+function singleFilePathIn(dir: string): string {
+  const files = readdirSync(dir).filter((name) => name.endsWith(".jsonl"));
+  assert.equal(files.length, 1, `expected exactly one durable file in ${dir}, found ${files.length}`);
+  return join(dir, files[0]!);
+}
+
+function overwriteFileWithSingleLine(filePath: string, event: unknown): void {
+  writeFileSync(filePath, `${JSON.stringify(event)}\n`, "utf8");
+}
+
+// ---------------------------------------------------------------------------
+// OS-V0-03 Phase A: fail-closed persisted-event replay validation
+// ---------------------------------------------------------------------------
+
+test("OS-V0-03 P2: a foreign-tenant FIRST persisted event in the requested tuple's own file is rejected fail-closed before state construction", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const plan = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: fixture.project,
+      planId: "plan-os-v0-03-p2",
+      version: 1,
+      blueprint: fixture.blueprint,
+      soldScope: fixture.soldScope,
+      evidence: fixture.evidence,
+      now: "2026-09-25T00:00:00.000Z",
+    });
+    const result = admitPlan({
+      plan,
+      blueprint: fixture.blueprint,
+      readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, plan),
+    });
+    const store = new FileDurablePlanAdmissionStore(dir);
+    recordEvaluation({ store, result, recordedAt: "2026-09-25T00:00:00.000Z" });
+
+    const filePath = singleFilePathIn(dir);
+    const legitEvent = JSON.parse(readFileSync(filePath, "utf8").trim());
+    const forged = {
+      ...legitEvent,
+      eventId: "forged-p2-foreign-tenant",
+      tenantId: "tenant-os-v0-03-foreign",
+      result: { ...legitEvent.result, tenantId: "tenant-os-v0-03-foreign" },
+    };
+    overwriteFileWithSingleLine(filePath, forged);
+
+    assert.throws(
+      () =>
+        store.getState(
+          fixture.tenantScope.tenantId,
+          fixture.customer.customerId,
+          fixture.project.projectId,
+          plan.planId,
+        ),
+      CorruptedPlanAdmissionEventError,
+    );
+    assert.throws(
+      () =>
+        store.getEvents(
+          fixture.tenantScope.tenantId,
+          fixture.customer.customerId,
+          fixture.project.projectId,
+          plan.planId,
+        ),
+      CorruptedPlanAdmissionEventError,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("OS-V0-03 P3: a same-tenant but wrong-customer persisted event is rejected", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const plan = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: fixture.project,
+      planId: "plan-os-v0-03-p3",
+      version: 1,
+      blueprint: fixture.blueprint,
+      soldScope: fixture.soldScope,
+      evidence: fixture.evidence,
+      now: "2026-09-25T00:00:00.000Z",
+    });
+    const result = admitPlan({
+      plan,
+      blueprint: fixture.blueprint,
+      readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, plan),
+    });
+    const store = new FileDurablePlanAdmissionStore(dir);
+    recordEvaluation({ store, result, recordedAt: "2026-09-25T00:00:00.000Z" });
+
+    const filePath = singleFilePathIn(dir);
+    const legitEvent = JSON.parse(readFileSync(filePath, "utf8").trim());
+    const forged = {
+      ...legitEvent,
+      eventId: "forged-p3-wrong-customer",
+      customerId: "cust-os-v0-03-foreign",
+      result: { ...legitEvent.result, customerId: "cust-os-v0-03-foreign" },
+    };
+    overwriteFileWithSingleLine(filePath, forged);
+
+    assert.throws(
+      () =>
+        store.getState(
+          fixture.tenantScope.tenantId,
+          fixture.customer.customerId,
+          fixture.project.projectId,
+          plan.planId,
+        ),
+      CorruptedPlanAdmissionEventError,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("OS-V0-03 P4: a same-tenant/customer but wrong-project persisted event is rejected", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const plan = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: fixture.project,
+      planId: "plan-os-v0-03-p4",
+      version: 1,
+      blueprint: fixture.blueprint,
+      soldScope: fixture.soldScope,
+      evidence: fixture.evidence,
+      now: "2026-09-25T00:00:00.000Z",
+    });
+    const result = admitPlan({
+      plan,
+      blueprint: fixture.blueprint,
+      readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, plan),
+    });
+    const store = new FileDurablePlanAdmissionStore(dir);
+    recordEvaluation({ store, result, recordedAt: "2026-09-25T00:00:00.000Z" });
+
+    const filePath = singleFilePathIn(dir);
+    const legitEvent = JSON.parse(readFileSync(filePath, "utf8").trim());
+    const forged = {
+      ...legitEvent,
+      eventId: "forged-p4-wrong-project",
+      projectId: "project-os-v0-03-foreign",
+      result: { ...legitEvent.result, projectId: "project-os-v0-03-foreign" },
+    };
+    overwriteFileWithSingleLine(filePath, forged);
+
+    assert.throws(
+      () =>
+        store.getState(
+          fixture.tenantScope.tenantId,
+          fixture.customer.customerId,
+          fixture.project.projectId,
+          plan.planId,
+        ),
+      CorruptedPlanAdmissionEventError,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("OS-V0-03 P5: a same-tenant/customer/project but wrong-planId persisted event is rejected", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const plan = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: fixture.project,
+      planId: "plan-os-v0-03-p5",
+      version: 1,
+      blueprint: fixture.blueprint,
+      soldScope: fixture.soldScope,
+      evidence: fixture.evidence,
+      now: "2026-09-25T00:00:00.000Z",
+    });
+    const result = admitPlan({
+      plan,
+      blueprint: fixture.blueprint,
+      readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, plan),
+    });
+    const store = new FileDurablePlanAdmissionStore(dir);
+    recordEvaluation({ store, result, recordedAt: "2026-09-25T00:00:00.000Z" });
+
+    const filePath = singleFilePathIn(dir);
+    const legitEvent = JSON.parse(readFileSync(filePath, "utf8").trim());
+    const forged = {
+      ...legitEvent,
+      eventId: "forged-p5-wrong-plan",
+      planId: "plan-os-v0-03-foreign",
+      result: { ...legitEvent.result, planId: "plan-os-v0-03-foreign" },
+    };
+    overwriteFileWithSingleLine(filePath, forged);
+
+    assert.throws(
+      () =>
+        store.getState(
+          fixture.tenantScope.tenantId,
+          fixture.customer.customerId,
+          fixture.project.projectId,
+          plan.planId,
+        ),
+      CorruptedPlanAdmissionEventError,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("OS-V0-03 P6: EVALUATION_RECORDED envelope matches the requested scope but the nested result carries a foreign tenant/customer/project/plan - rejected", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const plan = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: fixture.project,
+      planId: "plan-os-v0-03-p6",
+      version: 1,
+      blueprint: fixture.blueprint,
+      soldScope: fixture.soldScope,
+      evidence: fixture.evidence,
+      now: "2026-09-25T00:00:00.000Z",
+    });
+    const result = admitPlan({
+      plan,
+      blueprint: fixture.blueprint,
+      readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, plan),
+    });
+    const store = new FileDurablePlanAdmissionStore(dir);
+    recordEvaluation({ store, result, recordedAt: "2026-09-25T00:00:00.000Z" });
+
+    const filePath = singleFilePathIn(dir);
+    const legitEvent = JSON.parse(readFileSync(filePath, "utf8").trim());
+    // Envelope-level fields are left correct; only the NESTED result's
+    // identity is forged - the exact "nested result scope not revalidated
+    // against the event envelope" gap this task closes.
+    const forged = {
+      ...legitEvent,
+      eventId: "forged-p6-nested-foreign",
+      result: { ...legitEvent.result, tenantId: "tenant-os-v0-03-nested-foreign" },
+    };
+    overwriteFileWithSingleLine(filePath, forged);
+
+    assert.throws(
+      () =>
+        store.getState(
+          fixture.tenantScope.tenantId,
+          fixture.customer.customerId,
+          fixture.project.projectId,
+          plan.planId,
+        ),
+      CorruptedPlanAdmissionEventError,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("OS-V0-03 P7: EVALUATION_RECORDED nested result.planVersion mismatch vs the event envelope's own planVersion - rejected", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const plan = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: fixture.project,
+      planId: "plan-os-v0-03-p7",
+      version: 1,
+      blueprint: fixture.blueprint,
+      soldScope: fixture.soldScope,
+      evidence: fixture.evidence,
+      now: "2026-09-25T00:00:00.000Z",
+    });
+    const result = admitPlan({
+      plan,
+      blueprint: fixture.blueprint,
+      readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, plan),
+    });
+    const store = new FileDurablePlanAdmissionStore(dir);
+    recordEvaluation({ store, result, recordedAt: "2026-09-25T00:00:00.000Z" });
+
+    const filePath = singleFilePathIn(dir);
+    const legitEvent = JSON.parse(readFileSync(filePath, "utf8").trim());
+    const forged = {
+      ...legitEvent,
+      eventId: "forged-p7-version-mismatch",
+      result: { ...legitEvent.result, planVersion: 999 },
+    };
+    overwriteFileWithSingleLine(filePath, forged);
+
+    assert.throws(
+      () =>
+        store.getState(
+          fixture.tenantScope.tenantId,
+          fixture.customer.customerId,
+          fixture.project.projectId,
+          plan.planId,
+        ),
+      CorruptedPlanAdmissionEventError,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("OS-V0-03 P8: unknown event type or malformed required event identity/planVersion/eventId/recordedAt is rejected", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const plan = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: fixture.project,
+      planId: "plan-os-v0-03-p8",
+      version: 1,
+      blueprint: fixture.blueprint,
+      soldScope: fixture.soldScope,
+      evidence: fixture.evidence,
+      now: "2026-09-25T00:00:00.000Z",
+    });
+    const result = admitPlan({
+      plan,
+      blueprint: fixture.blueprint,
+      readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, plan),
+    });
+    const store = new FileDurablePlanAdmissionStore(dir);
+    recordEvaluation({ store, result, recordedAt: "2026-09-25T00:00:00.000Z" });
+    const filePath = singleFilePathIn(dir);
+    const legitEvent = JSON.parse(readFileSync(filePath, "utf8").trim());
+    const getState = () =>
+      store.getState(
+        fixture.tenantScope.tenantId,
+        fixture.customer.customerId,
+        fixture.project.projectId,
+        plan.planId,
+      );
+
+    overwriteFileWithSingleLine(filePath, { ...legitEvent, type: "UNKNOWN_EVENT_TYPE" });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "unknown event type must be rejected");
+
+    overwriteFileWithSingleLine(filePath, { ...legitEvent, eventId: "" });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "empty eventId must be rejected");
+
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      planVersion: 0,
+      result: { ...legitEvent.result, planVersion: 0 },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "non-positive planVersion must be rejected");
+
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      planVersion: 1.5,
+      result: { ...legitEvent.result, planVersion: 1.5 },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "non-integer planVersion must be rejected");
+
+    overwriteFileWithSingleLine(filePath, { ...legitEvent, recordedAt: "" });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "empty recordedAt must be rejected");
+
+    const { result: _omitted, ...withoutResult } = legitEvent;
+    overwriteFileWithSingleLine(filePath, withoutResult);
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "missing EVALUATION_RECORDED.result must be rejected");
+
+    overwriteFileWithSingleLine(filePath, { ...legitEvent, result: { ...legitEvent.result, status: "UNKNOWN_STATUS" } });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "unrecognized result.status must be rejected");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("OS-V0-03 P9: a malformed ANSWER_RECORDED answeredEntity, or one carrying a wrong embedded scope, is rejected at the raw event-log level", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const waitingSoldScope = createSoldScope({
+      tenantScope: fixture.tenantScope,
+      project: fixture.project,
+      soldScopeId: "sold-scope-os-v0-03-p9",
+      outcomeContractRef: "outcome-contract-os-v0-03-p9",
+      includedRequirementIds: ["optional-multilingual-content"],
+    });
+    const waitingPlan = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: fixture.project,
+      planId: "plan-os-v0-03-p9",
+      version: 1,
+      blueprint: fixture.blueprint,
+      soldScope: waitingSoldScope,
+      evidence: fixture.evidence,
+      now: "2026-09-25T00:00:00.000Z",
+    });
+    const waitingResult = admitPlan({ plan: waitingPlan, blueprint: fixture.blueprint });
+    assert.equal(waitingResult.status, "WAITING");
+
+    const store = new FileDurablePlanAdmissionStore(dir);
+    recordEvaluation({ store, result: waitingResult, recordedAt: "2026-09-25T00:00:00.000Z" });
+    const legitAnswer = createAnswerRecordedEvent({
+      tenantId: fixture.tenantScope.tenantId,
+      customerId: fixture.customer.customerId,
+      projectId: fixture.project.projectId,
+      planId: waitingPlan.planId,
+      planVersion: waitingResult.planVersion,
+      answeredEntity: "optional-ecommerce-integration",
+      eventId: "answer-os-v0-03-p9",
+      recordedAt: "2026-09-25T00:05:00.000Z",
+    });
+    store.appendEvent(legitAnswer);
+    const getState = () =>
+      store.getState(
+        fixture.tenantScope.tenantId,
+        fixture.customer.customerId,
+        fixture.project.projectId,
+        waitingPlan.planId,
+      );
+    // Sanity: the legitimate two-line file reconstructs cleanly before any
+    // corruption is introduced.
+    assert.equal(getState()?.answeredEntities.length, 1);
+
+    const filePath = singleFilePathIn(dir);
+    const lines = readFileSync(filePath, "utf8").split("\n").filter((line) => line.trim().length > 0);
+    assert.equal(lines.length, 2);
+    const legitEvaluationLine = lines[0]!;
+    const legitAnswerEvent = JSON.parse(lines[1]!);
+
+    writeFileSync(
+      filePath,
+      `${legitEvaluationLine}\n${JSON.stringify({ ...legitAnswerEvent, eventId: "forged-p9-empty-entity", answeredEntity: "" })}\n`,
+      "utf8",
+    );
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "empty answeredEntity must be rejected");
+
+    writeFileSync(
+      filePath,
+      `${legitEvaluationLine}\n${JSON.stringify({ ...legitAnswerEvent, eventId: "forged-p9-wrong-tenant", tenantId: "tenant-os-v0-03-p9-foreign" })}\n`,
+      "utf8",
+    );
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "ANSWER_RECORDED with wrong embedded tenant must be rejected");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("OS-V0-03 P10: getEvents/getState expose no cross-scope event or state - a corrupted file never leaks a partially-reconstructed foreign projection", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const plan = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: fixture.project,
+      planId: "plan-os-v0-03-p10",
+      version: 1,
+      blueprint: fixture.blueprint,
+      soldScope: fixture.soldScope,
+      evidence: fixture.evidence,
+      now: "2026-09-25T00:00:00.000Z",
+    });
+    const result = admitPlan({
+      plan,
+      blueprint: fixture.blueprint,
+      readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, plan),
+    });
+    const store = new FileDurablePlanAdmissionStore(dir);
+    recordEvaluation({ store, result, recordedAt: "2026-09-25T00:00:00.000Z" });
+    const filePath = singleFilePathIn(dir);
+    const legitEvent = JSON.parse(readFileSync(filePath, "utf8").trim());
+    overwriteFileWithSingleLine(filePath, { ...legitEvent, customerId: "cust-os-v0-03-p10-foreign" });
+
+    let thrown = false;
+    try {
+      store.getEvents(fixture.tenantScope.tenantId, fixture.customer.customerId, fixture.project.projectId, plan.planId);
+    } catch (cause) {
+      thrown = true;
+      assert.ok(cause instanceof CorruptedPlanAdmissionEventError);
+    }
+    assert.equal(thrown, true, "getEvents must throw rather than return a cross-scope event array");
+
+    thrown = false;
+    try {
+      store.getState(fixture.tenantScope.tenantId, fixture.customer.customerId, fixture.project.projectId, plan.planId);
+    } catch (cause) {
+      thrown = true;
+      assert.ok(cause instanceof CorruptedPlanAdmissionEventError);
+    }
+    assert.equal(thrown, true, "getState must throw rather than return a state constructed from a cross-scope event");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("OS-V0-03 P11: two legitimate independent tuples that reuse opaque id strings remain independently reconstructible - hardening introduces no false collision", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const store = new FileDurablePlanAdmissionStore(dir);
+
+    const planA = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: fixture.project,
+      planId: "plan-os-v0-03-p11-shared",
+      version: 1,
+      blueprint: fixture.blueprint,
+      soldScope: fixture.soldScope,
+      evidence: fixture.evidence,
+      now: "2026-09-25T00:00:00.000Z",
+    });
+    const resultA = admitPlan({
+      plan: planA,
+      blueprint: fixture.blueprint,
+      readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, planA),
+    });
+    recordEvaluation({ store, result: resultA, recordedAt: "2026-09-25T00:00:00.000Z" });
+
+    const otherCustomer = createCustomer({
+      tenantScope: fixture.tenantScope,
+      customerId: "cust-os-v0-03-p11-other",
+      displayName: "OS-V0-03 P11 Other Customer",
+    });
+    const otherProject = createProject({
+      tenantScope: fixture.tenantScope,
+      customer: otherCustomer,
+      projectId: fixture.project.projectId,
+      ownerRef: "owner-os-v0-03-p11-other",
+      state: "active",
+    });
+    const otherSoldScope = createSoldScope({
+      tenantScope: fixture.tenantScope,
+      project: otherProject,
+      soldScopeId: "sold-scope-os-v0-03-p11-other",
+      outcomeContractRef: "outcome-contract-os-v0-03-p11-other",
+      includedRequirementIds: ["optional-multilingual-content"],
+      excludedRequirementIds: ["optional-ecommerce-integration"],
+    });
+    const planB = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: otherProject,
+      planId: "plan-os-v0-03-p11-shared",
+      version: 1,
+      blueprint: fixture.blueprint,
+      soldScope: otherSoldScope,
+      now: "2026-09-25T00:00:00.000Z",
+    });
+    const approvalB = createApprovalReference({
+      plan: planB,
+      approvalId: "approval-os-v0-03-p11-other",
+      approvedAt: "2026-09-25T00:00:00.000Z",
+      approverRef: "owner:founder",
+    });
+    const resultB = admitPlan({
+      plan: planB,
+      blueprint: fixture.blueprint,
+      readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, otherProject, planB),
+      approval: approvalB,
+    });
+    recordEvaluation({ store, result: resultB, recordedAt: "2026-09-25T00:00:00.000Z" });
+
+    const stateA = store.getState(fixture.tenantScope.tenantId, fixture.customer.customerId, fixture.project.projectId, planA.planId);
+    const stateB = store.getState(fixture.tenantScope.tenantId, otherCustomer.customerId, otherProject.projectId, planB.planId);
+    assert.equal(stateA?.latestResult?.status, resultA.status);
+    assert.equal(stateB?.latestResult?.status, "ADMITTED");
+    assert.equal(stateA?.customerId, fixture.customer.customerId);
+    assert.equal(stateB?.customerId, otherCustomer.customerId);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("T7: a durably recorded WAITING evaluation survives a simulated process restart (fresh store instance over the same directory)", () => {
   const dir = freshStoreDir();
@@ -563,5 +1134,27 @@ test("Brain Rev44 F2 (adversarial): two distinct tenant/customer/project/plan tu
     assert.equal(stateB?.customerId, customerB.customerId);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("OS-V0-03 P14: boundary - durable-plan-admission-store.ts introduces no new import/dependency and the source-file line count grows only by the validator", () => {
+  const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  const sourcePath = join(REPO_ROOT, "src/domain/durable-plan-admission-store.ts");
+  const content = readFileSync(sourcePath, "utf8");
+  const importedModules = [...content.matchAll(/from\s+"([^"]+)"/g)].map((match) => match[1]);
+  const allowedModules = [
+    "./tenant-scope.js",
+    "./customer.js",
+    "./project.js",
+    "./project-plan.js",
+    "./plan-admission.js",
+    "./plan-admission-event.js",
+    "./plan-admission-run-state.js",
+  ];
+  for (const specifier of importedModules) {
+    assert.ok(specifier === "node:fs" || specifier === "node:path" || allowedModules.includes(specifier ?? ""), `unexpected import specifier: ${specifier}`);
+  }
+  for (const forbidden of ["worker-routing-policy.js", "worker-invoker.js", "organization-membership.js", "organization-service-principal.js", "authority.js"]) {
+    assert.equal(content.includes(forbidden), false, `must not import "${forbidden}"`);
   }
 });

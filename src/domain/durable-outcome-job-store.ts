@@ -1,13 +1,97 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { TenantScope } from "./tenant-scope.js";
-import type { OutcomeJob } from "./outcome-job.js";
+import type { OutcomeJob, OutcomeJobState } from "./outcome-job.js";
 
 export class InvalidDurableOutcomeJobStoreError extends Error {
   constructor(reason: string) {
     super(`Invalid DurableOutcomeJobStore operation: ${reason}`);
     this.name = "InvalidDurableOutcomeJobStoreError";
   }
+}
+
+export class CorruptedOutcomeJobLineError extends Error {
+  constructor(filePath: string, reason: string) {
+    super(`Corrupted durable outcome-job line (${filePath}): ${reason}`);
+    this.name = "CorruptedOutcomeJobLineError";
+  }
+}
+
+const RECOGNIZED_OUTCOME_JOB_STATES: ReadonlySet<string> = new Set<OutcomeJobState>([
+  "DRAFT",
+  "QUALIFIED",
+  "READY",
+  "EXECUTING",
+  "VERIFYING",
+  "VERIFIED",
+  "CLOSED",
+  "BLOCKED",
+  "RECOVERING",
+  "ESCALATED",
+  "STOPPED",
+]);
+
+function failCorruptedLine(filePath: string, reason: string): never {
+  throw new CorruptedOutcomeJobLineError(filePath, reason);
+}
+
+function requireNonEmptyStringField(value: unknown, field: string, filePath: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    failCorruptedLine(filePath, `${field} must be a non-empty string`);
+  }
+  return value as string;
+}
+
+/**
+ * OS-V0-03 Phase B: persisted state is an external/untrusted boundary on
+ * replay, exactly like every other durable store in this repository that
+ * already revalidates on read (`validatePersistedOutcomeJobRow` in
+ * `postgres-outcome-job-store.ts`, `validatePersistedConnectorConnection`).
+ * Before this correction, `FileDurableOutcomeJobStore.readAll` blindly
+ * `JSON.parse`-cast every line as `OutcomeJob`: a corrupted or forged record
+ * with a foreign embedded `tenantId` could be returned by `get()`/`list()`
+ * from the requested tenant's own file, since nothing checked the record's
+ * own identity fields against the tenant whose file was actually read.
+ * Every failure throws `CorruptedOutcomeJobLineError` (fail-closed) rather
+ * than silently dropping or coercing a bad line.
+ */
+function validatePersistedOutcomeJobLine(
+  raw: unknown,
+  expectedTenantId: TenantScope["tenantId"],
+  filePath: string,
+): OutcomeJob {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    failCorruptedLine(filePath, "line must be a JSON object, not an array or primitive");
+  }
+  const record = raw as Record<string, unknown>;
+  const tenantId = requireNonEmptyStringField(record["tenantId"], "tenantId", filePath);
+  const tenantMismatch = tenantId !== expectedTenantId;
+  if (tenantMismatch) {
+    failCorruptedLine(
+      filePath,
+      `record is stored under tenant file "${expectedTenantId}" but its own tenantId is "${tenantId}" - cross-tenant contamination`,
+    );
+  }
+  const customerId = requireNonEmptyStringField(record["customerId"], "customerId", filePath);
+  const projectId = requireNonEmptyStringField(record["projectId"], "projectId", filePath);
+  const jobId = requireNonEmptyStringField(record["jobId"], "jobId", filePath);
+  const jobFamily = requireNonEmptyStringField(record["jobFamily"], "jobFamily", filePath);
+  const businessObjective = requireNonEmptyStringField(record["businessObjective"], "businessObjective", filePath);
+  const state = requireNonEmptyStringField(record["state"], "state", filePath);
+  const stateUnrecognized = !RECOGNIZED_OUTCOME_JOB_STATES.has(state);
+  if (stateUnrecognized) {
+    failCorruptedLine(filePath, `state "${state}" is not a recognized OutcomeJobState`);
+  }
+
+  return {
+    tenantId: tenantId as TenantScope["tenantId"],
+    customerId: customerId as unknown as OutcomeJob["customerId"],
+    projectId: projectId as unknown as OutcomeJob["projectId"],
+    jobId: jobId as unknown as OutcomeJob["jobId"],
+    jobFamily,
+    businessObjective,
+    state: state as OutcomeJobState,
+  };
 }
 
 export interface PersistJobResult {
@@ -66,7 +150,15 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
     return content
       .split("\n")
       .filter((line) => line.trim().length > 0)
-      .map((line) => JSON.parse(line) as OutcomeJob);
+      .map((line) => {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line);
+        } catch (cause) {
+          throw new CorruptedOutcomeJobLineError(filePath, `line is not valid JSON (${(cause as Error).message})`);
+        }
+        return validatePersistedOutcomeJobLine(parsed, tenantId, filePath);
+      });
   }
 
   private dedupedByJobId(jobs: ReadonlyArray<OutcomeJob>): Map<OutcomeJob["jobId"], OutcomeJob> {
