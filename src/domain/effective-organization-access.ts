@@ -8,19 +8,23 @@ import {
 } from "./organization-membership.js";
 import type { AuthorityContext, Permission } from "./authority.js";
 import type { Project } from "./project.js";
+import { isValidOrganizationAccessRole, type OrganizationAccessRole, type OrganizationAccessRoleContext } from "./organization-access-role.js";
 
 export type AccessDecision = "GRANTED" | "DENIED";
 
 /**
  * OS-V0-02 Phase A: legacy `OrganizationMembership.role` (`STAFF`/`JUNIOR`/
- * `STUDENT`/`CLIENT_ASSOCIATE`) projects uniformly to `"MEMBER"` - none of
- * those roles, nor `Project.ownerRef`/`OwnershipAssignment` (never even
- * imported here), can be used to fabricate a richer `OWNER`/`ADMIN`
- * classification. If current primitives are later extended to truthfully
- * distinguish ownership/administration, that is separate future policy
- * work, not invented in this bounded slice.
+ * `STUDENT`/`CLIENT_ASSOCIATE`) projects uniformly to `"MEMBER"` when no
+ * curated role context is supplied - none of those legacy roles, nor
+ * `Project.ownerRef`/`OwnershipAssignment` (never even imported here), can
+ * be used to fabricate a richer `OWNER`/`ADMIN` classification. (Phase D,
+ * Rev135) `OWNER`/`ADMIN` are now representable, but only via an exact,
+ * structurally-validated `OrganizationAccessRoleContext` (see
+ * `organization-access-role.ts`) bound to the current membership's own
+ * identity - never inferred from legacy role, ownership, or any other
+ * signal.
  */
-export type EffectiveOrganizationRole = "MEMBER";
+export type EffectiveOrganizationRole = OrganizationAccessRole;
 
 /**
  * OS-V0-02 "Effective Access Resolution Foundation": a pure, deterministic,
@@ -40,17 +44,27 @@ export type EffectiveOrganizationRole = "MEMBER";
  * `Project` is supplied, that exact current assignment evidence exists for
  * that membership and project via the existing `resolveAssignmentStatus`
  * semantics (Rev130 Phase B: tenant correlation alone does not prove the
- * member is actually assigned to that project). It grants no permission of
- * its own: `permissions`/`canPerformProtectedActions` on a `GRANTED`
- * resolution are always the exact `AuthorityContext` values, read verbatim,
- * after membership-currentness, tenant-correlation, principal-binding, and
- * (when scoped) assignment validation - never widened by role, ownership,
- * revocation-lifecycle state, or any other signal. `reasons` always
- * explains the decision explicitly; there is no silent default. This
- * function is pure (no wall-clock/randomness/persistence), so re-invoking
- * it with current inputs is the only way to get a current answer - it
- * cannot itself preserve a stale decision, and re-resolving after a
- * membership is revoked is exactly how a caller observes that revocation.
+ * member is actually assigned to that project). (Phase D, Rev135) an
+ * optional `OrganizationAccessRoleContext` may additionally project `role`
+ * as `OWNER`/`ADMIN` instead of the `MEMBER` floor, but ONLY when that
+ * context's own `tenantId`/`membershipId`/`principalRef` exactly match the
+ * already-validated current membership - a mismatched, malformed, or
+ * substituted role context denies the ENTIRE resolution (never silently
+ * downgraded to `MEMBER`), and this check runs only after every Phase A-C
+ * gate (membership currentness, principal binding, tenant correlation,
+ * project assignment) has already passed, so a stale role context can
+ * never rescue a revoked membership or a missing project assignment. It
+ * grants no permission of its own: `permissions`/`canPerformProtectedActions`
+ * on a `GRANTED` resolution are always the exact `AuthorityContext` values,
+ * read verbatim, after membership-currentness, tenant-correlation,
+ * principal-binding, assignment, and role-context validation - never
+ * widened by role (curated or legacy), ownership, revocation-lifecycle
+ * state, or any other signal. `reasons` always explains the decision
+ * explicitly; there is no silent default. This function is pure (no
+ * wall-clock/randomness/persistence), so re-invoking it with current
+ * inputs is the only way to get a current answer - it cannot itself
+ * preserve a stale decision, and re-resolving after a membership is
+ * revoked is exactly how a caller observes that revocation.
  */
 export interface EffectiveAccessResolution {
   readonly decision: AccessDecision;
@@ -115,14 +129,22 @@ function isValidCurrentPrincipalRef(value: string): boolean {
  * `resolveAssignmentStatus` (Rev130 Phase B: `assignments` defaults to an
  * empty list, which `resolveAssignmentStatus` already resolves to
  * `"UNASSIGNED"`, so an omitted/empty evidence list fails closed exactly
- * like a missing membership does). Only once every check passes does this
- * function read `authority.permissions`/`authority.canPerformProtectedActions`
- * verbatim onto the `GRANTED` resolution. `membership.role`,
- * `membership.state`, and `Project.ownerRef` are never read to *grant*
- * anything - `state` only ever gates (via `isOrganizationMembershipActive`),
- * a role or an ownerRef match can never substitute for `AssignmentReference`
- * evidence or grant permission, and the projected `role` output is always
- * `"MEMBER"`.
+ * like a missing membership does), then finally - only when a `roleContext`
+ * is supplied - exact `OrganizationAccessRoleContext` correlation (Phase D,
+ * Rev135): its `tenantId`/`membershipId`/`principalRef` must exactly match
+ * the already-validated current membership and its `role` must be a valid
+ * `OrganizationAccessRole`, or the entire resolution denies (never silently
+ * downgraded to `MEMBER`). Placing this check last means a stale/malformed
+ * role context can never rescue a revoked membership, a wrong-principal
+ * caller, or a missing project assignment - every earlier gate has already
+ * run. Only once every check passes does this function read
+ * `authority.permissions`/`authority.canPerformProtectedActions` verbatim
+ * onto the `GRANTED` resolution. `membership.role`, `membership.state`,
+ * and `Project.ownerRef` are never read to *grant* anything - `state` only
+ * ever gates (via `isOrganizationMembershipActive`), a legacy role or an
+ * ownerRef match can never substitute for `AssignmentReference` evidence,
+ * a curated role context, or grant permission; the projected `role` output
+ * is `"MEMBER"` unless a validated `roleContext` says otherwise.
  */
 export function resolveEffectiveOrganizationAccess(input: {
   organization: Organization;
@@ -131,6 +153,7 @@ export function resolveEffectiveOrganizationAccess(input: {
   authority: AuthorityContext;
   project?: Project;
   assignments?: ReadonlyArray<AssignmentReference>;
+  roleContext?: OrganizationAccessRoleContext;
 }): EffectiveAccessResolution {
   if (input.membership === undefined) {
     return denied({
@@ -207,19 +230,41 @@ export function resolveEffectiveOrganizationAccess(input: {
     }
   }
 
+  let role: OrganizationAccessRole = "MEMBER";
+  if (input.roleContext !== undefined) {
+    if (
+      input.roleContext.tenantId !== input.membership.tenantId ||
+      input.roleContext.membershipId !== input.membership.membershipId ||
+      input.roleContext.principalRef !== input.membership.principalRef ||
+      !isValidOrganizationAccessRole(input.roleContext.role)
+    ) {
+      return denied({
+        organization: input.organization,
+        membership: input.membership,
+        project: input.project,
+        reason:
+          "role context does not exactly match the current membership identity, or is malformed",
+      });
+    }
+    role = input.roleContext.role;
+  }
+
   return {
     decision: "GRANTED",
     tenantId: input.organization.tenantId,
     organizationId: input.organization.organizationId,
     membershipId: input.membership.membershipId,
     ...(input.project !== undefined ? { projectId: input.project.projectId } : {}),
-    role: "MEMBER",
+    role,
     permissions: new Set(input.authority.permissions),
     canPerformProtectedActions: input.authority.canPerformProtectedActions,
     reasons: [
       "organization/membership/authority tenant correlation verified; membership principal matches current caller identity" +
         (input.project !== undefined
           ? "; exact assignment evidence verified for the project scope"
+          : "") +
+        (input.roleContext !== undefined
+          ? "; curated role context verified against the current membership identity"
           : ""),
     ],
   };

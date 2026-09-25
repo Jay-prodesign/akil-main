@@ -19,6 +19,10 @@ import {
   resolveEffectiveOrganizationAccess,
   type EffectiveAccessResolution,
 } from "../src/domain/effective-organization-access.js";
+import {
+  createOrganizationAccessRoleContext,
+  type OrganizationAccessRoleContext,
+} from "../src/domain/organization-access-role.js";
 
 const tenantScope = createTenantScope("tenant-os-v0-02");
 const otherTenantScope = createTenantScope("tenant-os-v0-02-other");
@@ -90,6 +94,20 @@ function buildAssignment(overrides: {
     membership,
     customerId: overrides.customerId ?? "cust-os-v0-02",
     projectId: overrides.projectId ?? "proj-os-v0-02",
+  });
+}
+
+// Rev135 Phase D: curated OWNER/ADMIN/MEMBER role context, built from the
+// existing OrganizationAccessRoleContext factory (never a new permission
+// concept).
+function buildRoleContext(overrides: {
+  membership?: OrganizationMembership;
+  role?: "OWNER" | "ADMIN" | "MEMBER";
+} = {}): OrganizationAccessRoleContext {
+  const membership = overrides.membership ?? buildMembership();
+  return createOrganizationAccessRoleContext({
+    membership,
+    role: overrides.role ?? "OWNER",
   });
 }
 
@@ -961,7 +979,7 @@ test("A14/boundary: effective-organization-access.ts contains no session/provide
   }
 });
 
-test("A14/boundary: effective-organization-access.ts imports only tenant-scope.ts/organization.ts/organization-membership.ts/authority.ts/project.ts - no ownership-assignment.ts/partner-organization.ts/customer.ts import", () => {
+test("A14/boundary: effective-organization-access.ts imports only tenant-scope.ts/organization.ts/organization-membership.ts/authority.ts/project.ts/organization-access-role.ts - no ownership-assignment.ts/partner-organization.ts/customer.ts import", () => {
   const content = readFileSync(join(REPO_ROOT, RESOLVER_SOURCE_PATH), "utf8");
   // Matched against `from "..."` specifiers directly (not line-by-line
   // "starts with import") so a multi-line named-import statement (e.g.
@@ -975,6 +993,7 @@ test("A14/boundary: effective-organization-access.ts imports only tenant-scope.t
     "organization-membership.js",
     "authority.js",
     "project.js",
+    "organization-access-role.js",
   ];
   for (const specifier of importedModules) {
     assert.ok(
@@ -1122,6 +1141,302 @@ test("C16: an ACTIVE lifecycle state never widens permissions/protected-action e
   assert.equal(result.decision, "GRANTED");
   assert.deepEqual([...result.permissions], ["READ"]);
   assert.equal(result.canPerformProtectedActions, false);
+});
+
+// ---------------------------------------------------------------------------
+// Rev135 Phase D: curated organization access role context (D4-D14)
+// ---------------------------------------------------------------------------
+
+test("D4: valid access with no role context preserves the existing MEMBER result and all Phase A-C behavior", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const authority = buildAuthority();
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+  });
+  assert.equal(result.decision, "GRANTED");
+  assert.equal(result.role, "MEMBER");
+});
+
+test("D5: an exact OWNER role context projects OWNER; exact ADMIN projects ADMIN; exact MEMBER projects MEMBER", () => {
+  const organization = buildOrganization();
+  const authority = buildAuthority();
+  for (const role of ["OWNER", "ADMIN", "MEMBER"] as const) {
+    const membership = buildMembership();
+    const roleContext = buildRoleContext({ membership, role });
+    const result = resolveEffectiveOrganizationAccess({
+      organization,
+      membership,
+      currentPrincipalRef: membership.principalRef,
+      authority,
+      roleContext,
+    });
+    assert.equal(result.decision, "GRANTED");
+    assert.equal(result.role, role);
+  }
+});
+
+test("D6: a curated OWNER role context never widens AuthorityContext permissions and never changes canPerformProtectedActions", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const authority = buildAuthority({ permissions: ["READ"], canPerformProtectedActions: false });
+  const roleContext = buildRoleContext({ membership, role: "OWNER" });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    roleContext,
+  });
+  assert.equal(result.decision, "GRANTED");
+  assert.equal(result.role, "OWNER");
+  assert.deepEqual([...result.permissions], ["READ"]);
+  assert.equal(result.canPerformProtectedActions, false);
+});
+
+test("D7 (adversarial): a role context bound to a foreign tenant's membership fails closed, even though membershipId/principalRef happen to match", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const authority = buildAuthority();
+  const foreignMembership = buildMembership({ tenantScope: otherTenantScope });
+  const roleContext = {
+    tenantId: foreignMembership.tenantId,
+    membershipId: membership.membershipId,
+    principalRef: membership.principalRef,
+    role: "OWNER",
+  } as unknown as OrganizationAccessRoleContext;
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    roleContext,
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.equal(result.permissions.size, 0);
+  assert.match(result.reasons[0] ?? "", /role context/);
+});
+
+test("D8 (adversarial): a role context bound to a different membershipId fails closed", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const otherMembership = buildMembership({ membershipId: "membership-role-other" });
+  const authority = buildAuthority();
+  const roleContext = buildRoleContext({ membership: otherMembership, role: "OWNER" });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    roleContext,
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.match(result.reasons[0] ?? "", /role context/);
+});
+
+test("D9 (adversarial): a role context bound to a different principalRef fails closed", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const otherMembership = buildMembership({ principalRef: "principal-role-other" });
+  const authority = buildAuthority();
+  const roleContext = {
+    tenantId: membership.tenantId,
+    membershipId: membership.membershipId,
+    principalRef: otherMembership.principalRef,
+    role: "OWNER",
+  } as unknown as OrganizationAccessRoleContext;
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    roleContext,
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.match(result.reasons[0] ?? "", /role context/);
+});
+
+test("D10 (adversarial): a malformed/unknown role-context runtime shape fails closed and cannot project OWNER/ADMIN", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const authority = buildAuthority();
+  const malformedRoleContext = {
+    tenantId: membership.tenantId,
+    membershipId: membership.membershipId,
+    principalRef: membership.principalRef,
+    role: "SUPERADMIN",
+  } as unknown as OrganizationAccessRoleContext;
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    roleContext: malformedRoleContext,
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.equal(result.permissions.size, 0);
+  assert.match(result.reasons[0] ?? "", /role context/);
+});
+
+test("D11: an OWNER role context cannot bypass missing/wrong Project assignment evidence", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const authority = buildAuthority();
+  const project = buildProject();
+  const roleContext = buildRoleContext({ membership, role: "OWNER" });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    project,
+    roleContext,
+    assignments: [],
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.equal(result.permissions.size, 0);
+  assert.match(result.reasons[0] ?? "", /assignment evidence/);
+});
+
+test("D11: an OWNER role context resolves GRANTED with exact Project assignment evidence supplied", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const authority = buildAuthority();
+  const project = buildProject();
+  const roleContext = buildRoleContext({ membership, role: "OWNER" });
+  const assignment = buildAssignment({ membership });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    project,
+    roleContext,
+    assignments: [assignment],
+  });
+  assert.equal(result.decision, "GRANTED");
+  assert.equal(result.role, "OWNER");
+});
+
+test("D12 (adversarial): legacy membership role, Project.ownerRef and ownership evidence cannot substitute for a curated role context or manufacture OWNER/ADMIN", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership({ role: "STAFF" });
+  const authority = buildAuthority();
+  const project = createProject({
+    tenantScope,
+    customer: createCustomer({ tenantScope, customerId: "cust-os-v0-02-d12", displayName: "D12 Customer" }),
+    projectId: "proj-os-v0-02-d12",
+    ownerRef: membership.principalRef,
+    state: "active",
+  });
+  const assignment = buildAssignment({ membership, customerId: "cust-os-v0-02-d12", projectId: "proj-os-v0-02-d12" });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    project,
+    assignments: [assignment],
+  });
+  assert.equal(result.decision, "GRANTED");
+  assert.equal(result.role, "MEMBER");
+});
+
+test("D13 (adversarial): revoking the underlying membership after a role context was created causes effective access to DENY - a stale role context cannot rescue a revoked membership", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const roleContext = buildRoleContext({ membership, role: "OWNER" });
+  const revoked = revokeOrganizationMembership({
+    membership,
+    revokedAt: "2026-09-25T00:00:00.000Z",
+    revokedReason: "offboarded",
+  });
+  const authority = buildAuthority();
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership: revoked,
+    currentPrincipalRef: revoked.principalRef,
+    authority,
+    roleContext,
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.equal(result.permissions.size, 0);
+  assert.match(result.reasons[0] ?? "", /active, coherent membership/);
+});
+
+test("D14: org_akilta and a controlled second organization use identical OWNER/ADMIN/MEMBER semantics through the identical resolver, deterministically", () => {
+  const akiltaTenantScope = createTenantScope("tenant-akilta-os-v0-02-d");
+  const controlledTenantScope = createTenantScope("tenant-controlled-os-v0-02-d");
+
+  const orgAkilta = createOrganization({
+    organizationId: "org_akilta",
+    tenantScope: akiltaTenantScope,
+    displayName: "AKILTA (Organization Zero)",
+    createdAt: NOW,
+  });
+  const orgControlled = createOrganization({
+    organizationId: "org-controlled-os-v0-02-d",
+    tenantScope: controlledTenantScope,
+    displayName: "Controlled Second Organization",
+    createdAt: NOW,
+  });
+
+  const membershipAkilta = createOrganizationMembership({
+    membershipId: "membership-akilta-d",
+    tenantScope: akiltaTenantScope,
+    principalRef: "principal-akilta-d",
+    role: "STAFF",
+  });
+  const membershipControlled = createOrganizationMembership({
+    membershipId: "membership-controlled-d",
+    tenantScope: controlledTenantScope,
+    principalRef: "principal-controlled-d",
+    role: "STAFF",
+  });
+
+  const authorityAkilta = createAuthorityContext({
+    tenantScope: akiltaTenantScope,
+    permissions: ["READ"],
+    canPerformProtectedActions: false,
+  });
+  const authorityControlled = createAuthorityContext({
+    tenantScope: controlledTenantScope,
+    permissions: ["READ"],
+    canPerformProtectedActions: false,
+  });
+
+  const roleContextAkilta = createOrganizationAccessRoleContext({ membership: membershipAkilta, role: "OWNER" });
+  const roleContextControlled = createOrganizationAccessRoleContext({ membership: membershipControlled, role: "OWNER" });
+
+  const resolveAkilta = () =>
+    resolveEffectiveOrganizationAccess({
+      organization: orgAkilta,
+      membership: membershipAkilta,
+      currentPrincipalRef: membershipAkilta.principalRef,
+      authority: authorityAkilta,
+      roleContext: roleContextAkilta,
+    });
+  const resolveControlled = () =>
+    resolveEffectiveOrganizationAccess({
+      organization: orgControlled,
+      membership: membershipControlled,
+      currentPrincipalRef: membershipControlled.principalRef,
+      authority: authorityControlled,
+      roleContext: roleContextControlled,
+    });
+
+  const resultAkiltaA = resolveAkilta();
+  const resultAkiltaB = resolveAkilta();
+  const resultControlled = resolveControlled();
+
+  assert.equal(resultAkiltaA.decision, "GRANTED");
+  assert.equal(resultAkiltaA.role, "OWNER");
+  assert.equal(resultControlled.decision, "GRANTED");
+  assert.equal(resultControlled.role, "OWNER");
+  assert.deepEqual(resultAkiltaA, resultAkiltaB);
 });
 
 // ---------------------------------------------------------------------------
