@@ -6,7 +6,12 @@ import { fileURLToPath } from "node:url";
 import { createTenantScope } from "../src/domain/tenant-scope.js";
 import { createCustomer } from "../src/domain/customer.js";
 import { createOrganization, activateOrganization, type Organization } from "../src/domain/organization.js";
-import { createOrganizationMembership, type OrganizationMembership } from "../src/domain/organization-membership.js";
+import {
+  createOrganizationMembership,
+  createAssignmentReference,
+  type OrganizationMembership,
+  type AssignmentReference,
+} from "../src/domain/organization-membership.js";
 import { createAuthorityContext, type AuthorityContext } from "../src/domain/authority.js";
 import { createProject, type Project } from "../src/domain/project.js";
 import {
@@ -32,9 +37,10 @@ function buildMembership(overrides: {
   tenantScope?: typeof tenantScope;
   role?: "STAFF" | "JUNIOR" | "STUDENT" | "CLIENT_ASSOCIATE";
   principalRef?: string;
+  membershipId?: string;
 } = {}): OrganizationMembership {
   return createOrganizationMembership({
-    membershipId: "membership-os-v0-02",
+    membershipId: overrides.membershipId ?? "membership-os-v0-02",
     tenantScope: overrides.tenantScope ?? tenantScope,
     principalRef: overrides.principalRef ?? PRINCIPAL_REF,
     role: overrides.role ?? "STAFF",
@@ -66,6 +72,23 @@ function buildProject(overrides: { tenantScope?: typeof tenantScope } = {}): Pro
     projectId: "proj-os-v0-02",
     ownerRef: "owner-os-v0-02",
     state: "active",
+  });
+}
+
+// Rev130 Phase B: exact assignment evidence, built from the existing
+// OrganizationMembership.createAssignmentReference/resolveAssignmentStatus
+// primitives (never a new persistence/store concept).
+function buildAssignment(overrides: {
+  membership?: OrganizationMembership;
+  customerId?: string;
+  projectId?: string;
+} = {}): AssignmentReference {
+  const membership = overrides.membership ?? buildMembership();
+  return createAssignmentReference({
+    assignmentId: "assignment-os-v0-02",
+    membership,
+    customerId: overrides.customerId ?? "cust-os-v0-02",
+    projectId: overrides.projectId ?? "proj-os-v0-02",
   });
 }
 
@@ -160,17 +183,19 @@ test("A4: a Project belonging to a foreign tenant is denied, even with legitimat
   assert.match(result.reasons[0] ?? "", /project belongs to a different tenant/);
 });
 
-test("A4: a same-tenant Project scope resolves GRANTED and carries the exact projectId", () => {
+test("A4/B2: a same-tenant Project scope with exact assignment evidence resolves GRANTED and carries the exact projectId", () => {
   const organization = buildOrganization();
   const membership = buildMembership();
   const authority = buildAuthority();
   const project = buildProject();
+  const assignment = buildAssignment({ membership });
   const result = resolveEffectiveOrganizationAccess({
     organization,
     membership,
     currentPrincipalRef: membership.principalRef,
     authority,
     project,
+    assignments: [assignment],
   });
   assert.equal(result.decision, "GRANTED");
   assert.equal(result.projectId, project.projectId);
@@ -239,7 +264,7 @@ test("A7: every legacy membership role (STAFF/JUNIOR/STUDENT/CLIENT_ASSOCIATE) r
   }
 });
 
-test("A8: Project.ownerRef cannot grant permission or approval - the resolution is identical regardless of ownerRef, and the resolver never reads it", () => {
+test("A8/B8: Project.ownerRef cannot grant permission or approval - the resolution is identical regardless of ownerRef, and the resolver never reads it (with matching assignment evidence supplied for both projects)", () => {
   const organization = buildOrganization();
   const membership = buildMembership();
   const authority = buildAuthority({ permissions: [] });
@@ -253,12 +278,15 @@ test("A8: Project.ownerRef cannot grant permission or approval - the resolution 
     ownerRef: "a-completely-different-owner-ref",
     state: "active",
   });
+  const assignmentA = buildAssignment({ membership, customerId: projectA.customerId, projectId: projectA.projectId });
+  const assignmentB = buildAssignment({ membership, customerId: projectB.customerId, projectId: projectB.projectId });
   const resultA = resolveEffectiveOrganizationAccess({
     organization,
     membership,
     currentPrincipalRef: membership.principalRef,
     authority,
     project: projectA,
+    assignments: [assignmentA],
   });
   const resultB = resolveEffectiveOrganizationAccess({
     organization,
@@ -266,12 +294,292 @@ test("A8: Project.ownerRef cannot grant permission or approval - the resolution 
     currentPrincipalRef: membership.principalRef,
     authority,
     project: projectB,
+    assignments: [assignmentB],
   });
   assert.equal(resultA.decision, "GRANTED");
   assert.equal(resultB.decision, "GRANTED");
   assert.deepEqual([...resultA.permissions], [...resultB.permissions]);
   assert.equal(resultA.canPerformProtectedActions, resultB.canPerformProtectedActions);
   assert.equal(resultA.role, resultB.role);
+});
+
+test("B8: Project.ownerRef matching currentPrincipalRef cannot substitute for missing AssignmentReference evidence - still DENIED", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const authority = buildAuthority();
+  const project = createProject({
+    tenantScope,
+    customer: createCustomer({ tenantScope, customerId: "cust-os-v0-02", displayName: "Reference Customer" }),
+    projectId: "proj-os-v0-02",
+    ownerRef: membership.principalRef,
+    state: "active",
+  });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    project,
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.equal(result.permissions.size, 0);
+  assert.match(result.reasons[0] ?? "", /assignment evidence/);
+});
+
+// ---------------------------------------------------------------------------
+// Rev130 Phase B: project-scope assignment enforcement (B1-B13)
+// ---------------------------------------------------------------------------
+
+test("B3: a Project scope with no assignment evidence at all fails closed", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const authority = buildAuthority();
+  const project = buildProject();
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    project,
+    assignments: [],
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.equal(result.permissions.size, 0);
+  assert.equal(result.canPerformProtectedActions, false);
+  assert.match(result.reasons[0] ?? "", /assignment evidence/);
+});
+
+test("B4: an assignment that belongs to a DIFFERENT membershipId (wrong member) does not satisfy the current membership's project scope", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const otherMembership = buildMembership({ membershipId: "membership-someone-else" });
+  const authority = buildAuthority();
+  const project = buildProject();
+  const wrongMemberAssignment = buildAssignment({ membership: otherMembership });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    project,
+    assignments: [wrongMemberAssignment],
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.match(result.reasons[0] ?? "", /assignment evidence/);
+});
+
+test("B5: an assignment for the current membership but a DIFFERENT projectId does not satisfy this project's scope", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const authority = buildAuthority();
+  const project = buildProject();
+  const wrongProjectAssignment = buildAssignment({ membership, projectId: "proj-os-v0-02-different" });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    project,
+    assignments: [wrongProjectAssignment],
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.match(result.reasons[0] ?? "", /assignment evidence/);
+});
+
+test("B6: an assignment for the current membership/project's projectId but a DIFFERENT customerId does not satisfy this project's scope", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const authority = buildAuthority();
+  const project = buildProject();
+  const wrongCustomerAssignment = buildAssignment({ membership, customerId: "cust-os-v0-02-different" });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    project,
+    assignments: [wrongCustomerAssignment],
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.match(result.reasons[0] ?? "", /assignment evidence/);
+});
+
+test("B7 (adversarial): a same-membershipId assignment collision from a FOREIGN tenant resolves UNAVAILABLE via resolveAssignmentStatus, not ASSIGNED - still fails closed", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const authority = buildAuthority();
+  const project = buildProject();
+  // A hand-built cross-tenant collision: same membershipId as the current
+  // membership, but tagged with a foreign tenantId - the same adversarial
+  // shape resolveAssignmentStatus's own tests (organization-membership.ts)
+  // already prove resolves to "UNAVAILABLE", never "ASSIGNED".
+  const collidingAssignment = {
+    assignmentId: "assignment-colliding",
+    tenantId: otherTenantScope.tenantId,
+    membershipId: membership.membershipId,
+    customerId: project.customerId,
+    projectId: project.projectId,
+  } as unknown as AssignmentReference;
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    project,
+    assignments: [collidingAssignment],
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.match(result.reasons[0] ?? "", /assignment evidence/);
+});
+
+test("B9: a JUNIOR/STUDENT/CLIENT_ASSOCIATE role membership needs the identical exact assignment evidence as STAFF - role never substitutes for or waives assignment", () => {
+  const organization = buildOrganization();
+  const authority = buildAuthority({ permissions: ["READ"] });
+  const project = buildProject();
+  for (const role of ["JUNIOR", "STUDENT", "CLIENT_ASSOCIATE"] as const) {
+    const membership = buildMembership({ role });
+    const deniedResult = resolveEffectiveOrganizationAccess({
+      organization,
+      membership,
+      currentPrincipalRef: membership.principalRef,
+      authority,
+      project,
+      assignments: [],
+    });
+    assert.equal(deniedResult.decision, "DENIED", `role ${role} must not bypass assignment gating`);
+    const grantedResult = resolveEffectiveOrganizationAccess({
+      organization,
+      membership,
+      currentPrincipalRef: membership.principalRef,
+      authority,
+      project,
+      assignments: [buildAssignment({ membership })],
+    });
+    assert.equal(grantedResult.decision, "GRANTED");
+    assert.equal(grantedResult.role, "MEMBER");
+    assert.deepEqual([...grantedResult.permissions], ["READ"]);
+  }
+});
+
+test("B11: a wrong-principal currentPrincipalRef is still denied even when exact assignment evidence exists for the (substituted) membership and project", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership({ principalRef: "principal-real-owner" });
+  const authority = buildAuthority();
+  const project = buildProject();
+  const assignment = buildAssignment({ membership });
+  const result = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: "principal-impersonator",
+    authority,
+    project,
+    assignments: [assignment],
+  });
+  assert.equal(result.decision, "DENIED");
+  assert.equal(result.permissions.size, 0);
+  assert.match(result.reasons[0] ?? "", /different principal/);
+});
+
+test("B13: org_akilta and a controlled second organization resolve project-scoped access through the identical resolver, each with its own matching membership/assignment/principal", () => {
+  const akiltaTenantScope = createTenantScope("tenant-akilta-os-v0-02-b");
+  const controlledTenantScope = createTenantScope("tenant-controlled-os-v0-02-b");
+
+  const orgAkilta = createOrganization({
+    organizationId: "org_akilta",
+    tenantScope: akiltaTenantScope,
+    displayName: "AKILTA (Organization Zero)",
+    createdAt: NOW,
+  });
+  const orgControlled = createOrganization({
+    organizationId: "org-controlled-os-v0-02-b",
+    tenantScope: controlledTenantScope,
+    displayName: "Controlled Second Organization",
+    createdAt: NOW,
+  });
+
+  const membershipAkilta = createOrganizationMembership({
+    membershipId: "membership-akilta-b",
+    tenantScope: akiltaTenantScope,
+    principalRef: "principal-akilta-b",
+    role: "STAFF",
+  });
+  const membershipControlled = createOrganizationMembership({
+    membershipId: "membership-controlled-b",
+    tenantScope: controlledTenantScope,
+    principalRef: "principal-controlled-b",
+    role: "STAFF",
+  });
+
+  const authorityAkilta = createAuthorityContext({
+    tenantScope: akiltaTenantScope,
+    permissions: ["READ"],
+    canPerformProtectedActions: false,
+  });
+  const authorityControlled = createAuthorityContext({
+    tenantScope: controlledTenantScope,
+    permissions: ["READ"],
+    canPerformProtectedActions: false,
+  });
+
+  const customerAkilta = createCustomer({
+    tenantScope: akiltaTenantScope,
+    customerId: "cust-akilta-b",
+    displayName: "AKILTA Customer",
+  });
+  const customerControlled = createCustomer({
+    tenantScope: controlledTenantScope,
+    customerId: "cust-controlled-b",
+    displayName: "Controlled Customer",
+  });
+  const projectAkilta = createProject({
+    tenantScope: akiltaTenantScope,
+    customer: customerAkilta,
+    projectId: "proj-akilta-b",
+    ownerRef: "owner-akilta-b",
+    state: "active",
+  });
+  const projectControlled = createProject({
+    tenantScope: controlledTenantScope,
+    customer: customerControlled,
+    projectId: "proj-controlled-b",
+    ownerRef: "owner-controlled-b",
+    state: "active",
+  });
+
+  const assignmentAkilta = createAssignmentReference({
+    assignmentId: "assignment-akilta-b",
+    membership: membershipAkilta,
+    customerId: customerAkilta.customerId,
+    projectId: projectAkilta.projectId,
+  });
+  const assignmentControlled = createAssignmentReference({
+    assignmentId: "assignment-controlled-b",
+    membership: membershipControlled,
+    customerId: customerControlled.customerId,
+    projectId: projectControlled.projectId,
+  });
+
+  const resultAkilta = resolveEffectiveOrganizationAccess({
+    organization: orgAkilta,
+    membership: membershipAkilta,
+    currentPrincipalRef: membershipAkilta.principalRef,
+    authority: authorityAkilta,
+    project: projectAkilta,
+    assignments: [assignmentAkilta],
+  });
+  const resultControlled = resolveEffectiveOrganizationAccess({
+    organization: orgControlled,
+    membership: membershipControlled,
+    currentPrincipalRef: membershipControlled.principalRef,
+    authority: authorityControlled,
+    project: projectControlled,
+    assignments: [assignmentControlled],
+  });
+
+  assert.equal(resultAkilta.decision, "GRANTED");
+  assert.equal(resultControlled.decision, "GRANTED");
+  assert.equal(resultAkilta.role, resultControlled.role);
+  assert.deepEqual([...resultAkilta.permissions].sort(), [...resultControlled.permissions].sort());
 });
 
 // ---------------------------------------------------------------------------
@@ -504,17 +812,19 @@ test("A11: org_akilta and a controlled second organization resolve access throug
 // A12: deterministic replay
 // ---------------------------------------------------------------------------
 
-test("A12: identical inputs (including currentPrincipalRef) produce a deep-equal GRANTED resolution", () => {
+test("A12: identical inputs (including currentPrincipalRef and assignment evidence) produce a deep-equal GRANTED resolution", () => {
   const organization = buildOrganization();
   const membership = buildMembership();
   const authority = buildAuthority();
   const project = buildProject();
+  const assignment = buildAssignment({ membership });
   const resultA = resolveEffectiveOrganizationAccess({
     organization,
     membership,
     currentPrincipalRef: membership.principalRef,
     authority,
     project,
+    assignments: [assignment],
   });
   const resultB = resolveEffectiveOrganizationAccess({
     organization,
@@ -522,8 +832,41 @@ test("A12: identical inputs (including currentPrincipalRef) produce a deep-equal
     currentPrincipalRef: membership.principalRef,
     authority,
     project,
+    assignments: [assignment],
   });
+  assert.equal(resultA.decision, "GRANTED");
   assert.deepEqual(resultA, resultB);
+});
+
+test("B12: reordering irrelevant assignment evidence ahead of the matching one produces the identical deterministic GRANTED resolution", () => {
+  const organization = buildOrganization();
+  const membership = buildMembership();
+  const authority = buildAuthority();
+  const project = buildProject();
+  const matching = buildAssignment({ membership });
+  const irrelevant = buildAssignment({
+    membership,
+    customerId: "cust-os-v0-02-other",
+    projectId: "proj-os-v0-02-other",
+  });
+  const resultOrderA = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    project,
+    assignments: [irrelevant, matching],
+  });
+  const resultOrderB = resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: membership.principalRef,
+    authority,
+    project,
+    assignments: [matching, irrelevant],
+  });
+  assert.equal(resultOrderA.decision, "GRANTED");
+  assert.deepEqual(resultOrderA, resultOrderB);
 });
 
 test("A12 (Rev129): identical inputs with a wrong-principal currentPrincipalRef produce a deep-equal DENIED resolution on repeat calls - principal binding is deterministic, not just tenant correlation", () => {

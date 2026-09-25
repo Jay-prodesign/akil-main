@@ -1,6 +1,6 @@
 import type { TenantScope } from "./tenant-scope.js";
 import type { Organization } from "./organization.js";
-import type { OrganizationMembership } from "./organization-membership.js";
+import { resolveAssignmentStatus, type AssignmentReference, type OrganizationMembership } from "./organization-membership.js";
 import type { AuthorityContext, Permission } from "./authority.js";
 import type { Project } from "./project.js";
 
@@ -22,21 +22,25 @@ export type EffectiveOrganizationRole = "MEMBER";
  * explainable composition over already-distinct primitives - `Organization`
  * (OS-V0-01), `OrganizationMembership`, a caller-supplied
  * `currentPrincipalRef` identity claim, a caller-supplied `AuthorityContext`,
- * and an optional `Project` scope. This module does not authenticate
- * `currentPrincipalRef` or resolve who the current caller is (that identity
- * boundary remains a future, separate application concern); it only proves
- * the supplied
- * membership record belongs to the identity the caller currently asserts
- * (Rev129: closes same-tenant membership substitution, which tenant
- * correlation alone cannot detect) and grants no permission of its own:
- * `permissions`/`canPerformProtectedActions` on a `GRANTED` resolution are
- * always the exact `AuthorityContext` values, read verbatim, after
- * tenant-correlation and principal-binding validation - never widened by
- * role, ownership, or any other signal. `reasons` always explains the
- * decision explicitly; there is no silent default. This function is pure
- * (no wall-clock/randomness/persistence), so re-invoking it with current
- * inputs is the only way to get a current answer - it cannot itself
- * preserve a stale decision.
+ * an optional `Project` scope, and (Phase B) an optional list of the
+ * caller's current `AssignmentReference` evidence. This module does not
+ * authenticate `currentPrincipalRef` or resolve who the current caller is
+ * (that identity boundary remains a future, separate application concern);
+ * it only proves the supplied membership record belongs to the identity the
+ * caller currently asserts (Rev129: closes same-tenant membership
+ * substitution, which tenant correlation alone cannot detect) and, when a
+ * `Project` is supplied, that exact current assignment evidence exists for
+ * that membership and project via the existing `resolveAssignmentStatus`
+ * semantics (Rev130 Phase B: tenant correlation alone does not prove the
+ * member is actually assigned to that project). It grants no permission of
+ * its own: `permissions`/`canPerformProtectedActions` on a `GRANTED`
+ * resolution are always the exact `AuthorityContext` values, read verbatim,
+ * after tenant-correlation, principal-binding, and (when scoped) assignment
+ * validation - never widened by role, ownership, or any other signal.
+ * `reasons` always explains the decision explicitly; there is no silent
+ * default. This function is pure (no wall-clock/randomness/persistence), so
+ * re-invoking it with current inputs is the only way to get a current
+ * answer - it cannot itself preserve a stale decision.
  */
 export interface EffectiveAccessResolution {
   readonly decision: AccessDecision;
@@ -94,11 +98,17 @@ function isValidCurrentPrincipalRef(value: string): boolean {
  * `tenantId` - the exact structural anchor), then exact
  * `membership.principalRef === currentPrincipalRef` equality (Rev129:
  * closes same-tenant membership substitution, which tenant correlation
- * alone cannot detect). Only once every check passes does this function
- * read `authority.permissions`/`authority.canPerformProtectedActions`
- * verbatim onto the `GRANTED` resolution. `membership.role` is read only
- * to confirm a membership exists; its exact value never influences the
- * decision or the projected `role` output, which is always `"MEMBER"`.
+ * alone cannot detect), then - only when a `Project` is supplied - exact
+ * assignment evidence via the existing `resolveAssignmentStatus` (Rev130
+ * Phase B: `assignments` defaults to an empty list, which
+ * `resolveAssignmentStatus` already resolves to `"UNASSIGNED"`, so an
+ * omitted/empty evidence list fails closed exactly like a missing
+ * membership does). Only once every check passes does this function read
+ * `authority.permissions`/`authority.canPerformProtectedActions` verbatim
+ * onto the `GRANTED` resolution. `membership.role` and `Project.ownerRef`
+ * are never read for this decision - a role or an ownerRef match can never
+ * substitute for `AssignmentReference` evidence or grant permission; the
+ * projected `role` output is always `"MEMBER"`.
  */
 export function resolveEffectiveOrganizationAccess(input: {
   organization: Organization;
@@ -106,6 +116,7 @@ export function resolveEffectiveOrganizationAccess(input: {
   currentPrincipalRef: string;
   authority: AuthorityContext;
   project?: Project;
+  assignments?: ReadonlyArray<AssignmentReference>;
 }): EffectiveAccessResolution {
   if (input.membership === undefined) {
     return denied({
@@ -156,6 +167,23 @@ export function resolveEffectiveOrganizationAccess(input: {
       reason: "membership belongs to a different principal than the current caller identity",
     });
   }
+  if (input.project !== undefined) {
+    const assignmentStatus = resolveAssignmentStatus({
+      membership: input.membership,
+      assignments: input.assignments ?? [],
+      customerId: input.project.customerId,
+      projectId: input.project.projectId,
+    });
+    if (assignmentStatus !== "ASSIGNED") {
+      return denied({
+        organization: input.organization,
+        membership: input.membership,
+        project: input.project,
+        reason:
+          "no exact assignment evidence exists for the current membership and project scope",
+      });
+    }
+  }
 
   return {
     decision: "GRANTED",
@@ -168,7 +196,9 @@ export function resolveEffectiveOrganizationAccess(input: {
     canPerformProtectedActions: input.authority.canPerformProtectedActions,
     reasons: [
       "organization/membership/authority tenant correlation verified; membership principal matches current caller identity" +
-        (input.project !== undefined ? " (including project scope)" : ""),
+        (input.project !== undefined
+          ? "; exact assignment evidence verified for the project scope"
+          : ""),
     ],
   };
 }
