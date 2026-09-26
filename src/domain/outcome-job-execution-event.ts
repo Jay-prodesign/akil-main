@@ -79,18 +79,33 @@ export function isRecognizedOutcomeJobExecutionEventType(value: unknown): value 
  * Rev44 F2 / Rev143 F1 collision-safety discipline: `eventId` is never a
  * caller-supplied string. It is derived deterministically from the exact
  * identity tuple that must uniquely address one event slot -
- * (tenantId, customerId, projectId, jobId, runId, attempt, sequence, type) -
- * using `JSON.stringify` of the tuple as an array, which is injective
- * (JSON string escaping means two distinct tuples can never serialize to
- * the same string). `type` is included because `ACCEPTED` (run-level) and
- * an attempt's own `ATTEMPT_STARTED` deliberately share the same
- * (attempt: 1, sequence: 1) coordinate by convention - without `type` in
- * the tuple those two structurally distinct events would collide onto one
- * eventId and the second would be silently deduped away as a false
- * "duplicate" of the first. This makes retrying "record this event"
- * structurally idempotent: the same logical event always derives the same
- * eventId, with no caller-side idempotency-key bookkeeping required
- * (Minimum Adversarial Evidence #1, #3, #9).
+ * (tenantId, customerId, projectId, jobId, runId, correlationId, attempt,
+ * sequence, type) - using `JSON.stringify` of the tuple as an array, which
+ * is injective (JSON string escaping means two distinct tuples can never
+ * serialize to the same string).
+ *
+ * `type` is included because `ACCEPTED` (run-level) and an attempt's own
+ * `ATTEMPT_STARTED` deliberately share the same (attempt: 1, sequence: 1)
+ * coordinate by convention - without `type` in the tuple those two
+ * structurally distinct events would collide onto one eventId and the
+ * second would be silently deduped away as a false "duplicate" of the
+ * first.
+ *
+ * Rev146 F5: `correlationId` is likewise included. Package semantics bind
+ * a run's identity to tenantId+customerId+projectId+jobId+runId+
+ * correlationId+attempt, and the reducer itself rejects a correlationId
+ * mismatch against an already-durable run - but without correlationId in
+ * this tuple, two events sharing every other coordinate under two
+ * DIFFERENT correlationIds would derive the identical eventId, letting the
+ * store's own eventId-based dedupe (Rev145 F1's atomic claim) silently
+ * swallow the mismatch before the reducer's identity check ever runs.
+ * Including it here closes that gap structurally, the same way including
+ * `type` closed the ACCEPTED/ATTEMPT_STARTED collision.
+ *
+ * This makes retrying "record this event" structurally idempotent: the
+ * same logical event always derives the same eventId, with no caller-side
+ * idempotency-key bookkeeping required (Minimum Adversarial Evidence #1,
+ * #3, #9).
  */
 export function deriveOutcomeJobExecutionEventId(input: {
   tenantId: TenantScope["tenantId"];
@@ -98,6 +113,7 @@ export function deriveOutcomeJobExecutionEventId(input: {
   projectId: Project["projectId"];
   jobId: OutcomeJob["jobId"];
   runId: string;
+  correlationId: string;
   attempt: number;
   sequence: number;
   type: OutcomeJobExecutionEventType;
@@ -108,6 +124,7 @@ export function deriveOutcomeJobExecutionEventId(input: {
     input.projectId,
     input.jobId,
     input.runId,
+    input.correlationId,
     input.attempt,
     input.sequence,
     input.type,
@@ -285,6 +302,7 @@ export function createOutcomeJobExecutionEvent(input: {
     projectId: input.project.projectId,
     jobId: input.job.jobId,
     runId: core.runId,
+    correlationId: core.correlationId,
     attempt: core.attempt,
     sequence: core.sequence,
     type: core.type,
@@ -366,6 +384,7 @@ export function validatePersistedOutcomeJobExecutionEventRecord(
     projectId: projectId as unknown as Project["projectId"],
     jobId: jobId as unknown as OutcomeJob["jobId"],
     runId: core.runId,
+    correlationId: core.correlationId,
     attempt: core.attempt,
     sequence: core.sequence,
     type: core.type,

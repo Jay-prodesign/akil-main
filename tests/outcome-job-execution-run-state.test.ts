@@ -49,13 +49,14 @@ function ev(overrides: Partial<Parameters<typeof createOutcomeJobExecutionEvent>
   });
 }
 
-test("EV1: deriveOutcomeJobExecutionEventId is injective over the identity tuple, including type - ACCEPTED and ATTEMPT_STARTED at the same (attempt, sequence) coordinate never collide", () => {
+test("EV1: deriveOutcomeJobExecutionEventId is injective over the identity tuple, including type and correlationId - ACCEPTED and ATTEMPT_STARTED at the same (attempt, sequence) coordinate never collide, and neither do two distinct correlationIds", () => {
   const idA = deriveOutcomeJobExecutionEventId({
     tenantId: tenantScope.tenantId,
     customerId: customer.customerId,
     projectId: project.projectId,
     jobId: job.jobId,
     runId: "run-1",
+    correlationId: "corr-1",
     attempt: 1,
     sequence: 2,
     type: "ACCEPTED",
@@ -66,6 +67,7 @@ test("EV1: deriveOutcomeJobExecutionEventId is injective over the identity tuple
     projectId: project.projectId,
     jobId: job.jobId,
     runId: "run-1",
+    correlationId: "corr-1",
     attempt: 1,
     sequence: 2,
     type: "FAILED",
@@ -78,6 +80,7 @@ test("EV1: deriveOutcomeJobExecutionEventId is injective over the identity tuple
     projectId: project.projectId,
     jobId: job.jobId,
     runId: "run-1",
+    correlationId: "corr-1",
     attempt: 1,
     sequence: 1,
     type: "ACCEPTED",
@@ -88,11 +91,41 @@ test("EV1: deriveOutcomeJobExecutionEventId is injective over the identity tuple
     projectId: project.projectId,
     jobId: job.jobId,
     runId: "run-1",
+    correlationId: "corr-1",
     attempt: 1,
     sequence: 1,
     type: "ATTEMPT_STARTED",
   });
   assert.notEqual(idC, idD, "ACCEPTED and ATTEMPT_STARTED share the same (attempt, sequence) coordinate by convention and must not collide");
+
+  // Rev146 F5: two events sharing every other coordinate but differing
+  // ONLY in correlationId must derive distinct eventIds - otherwise the
+  // store's own eventId-based dedupe (Rev145 F1) could silently swallow a
+  // genuine correlationId mismatch before the reducer's own identity check
+  // ever runs.
+  const idE = deriveOutcomeJobExecutionEventId({
+    tenantId: tenantScope.tenantId,
+    customerId: customer.customerId,
+    projectId: project.projectId,
+    jobId: job.jobId,
+    runId: "run-1",
+    correlationId: "corr-1",
+    attempt: 1,
+    sequence: 1,
+    type: "ACCEPTED",
+  });
+  const idF = deriveOutcomeJobExecutionEventId({
+    tenantId: tenantScope.tenantId,
+    customerId: customer.customerId,
+    projectId: project.projectId,
+    jobId: job.jobId,
+    runId: "run-1",
+    correlationId: "corr-2-different",
+    attempt: 1,
+    sequence: 1,
+    type: "ACCEPTED",
+  });
+  assert.notEqual(idE, idF, "two distinct correlationIds must never derive the same eventId");
 });
 
 test("R1 (#1): a run's first event must be ACCEPTED at attempt 1 sequence 1, and events target the same run without identifier collision", () => {

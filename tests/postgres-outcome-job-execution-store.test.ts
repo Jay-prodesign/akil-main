@@ -46,14 +46,20 @@ class FakeSqlClient implements SqlClient {
         eventId, type, occurredAt, reason, progressRef, checkpointRef, executorRef,
       ] = params as [string, string, string, string, string, string, number, number, string, string, string, string | null, string | null, string | null, string | null];
       const conflict = this.rows.some((row) => row.tenant_id === tenantId && row.event_id === eventId);
-      if (!conflict) {
-        this.rows.push({
-          tenant_id: tenantId, customer_id: customerId, project_id: projectId, job_id: jobId, run_id: runId,
-          correlation_id: correlationId, attempt, sequence, event_id: eventId, type, occurred_at: occurredAt,
-          reason, progress_ref: progressRef, checkpoint_ref: checkpointRef, executor_ref: executorRef,
-        });
+      if (conflict) {
+        // Rev146 F7: `ON CONFLICT ... DO NOTHING RETURNING event_id` returns
+        // NO rows when the insert was suppressed by the unique constraint -
+        // faithfully model that (previously this always returned `rows: []`
+        // regardless of conflict, so `appendEvent`'s boolean return value
+        // was never actually exercised by this fake).
+        return { rows: [] as unknown as ReadonlyArray<Row> };
       }
-      return { rows: [] as unknown as ReadonlyArray<Row> };
+      this.rows.push({
+        tenant_id: tenantId, customer_id: customerId, project_id: projectId, job_id: jobId, run_id: runId,
+        correlation_id: correlationId, attempt, sequence, event_id: eventId, type, occurred_at: occurredAt,
+        reason, progress_ref: progressRef, checkpoint_ref: checkpointRef, executor_ref: executorRef,
+      });
+      return { rows: [{ event_id: eventId }] as unknown as ReadonlyArray<Row> };
     }
     if (text.includes("SELECT") && text.includes("FROM outcome_job_execution_events")) {
       const [tenantId, customerId, projectId, jobId, runId] = params as string[];
@@ -103,6 +109,20 @@ test("P2 (#14): concurrent duplicate append of the identical event is single-aut
   });
   await Promise.all([store.appendEvent(accepted), store.appendEvent(accepted)]);
   assert.equal(client.rows.length, 1, "two concurrent identical appends must never produce two rows");
+});
+
+test("P2b (Rev146 F7): appendEvent's own boolean return value is true for the winning insert and false for the duplicate - not merely inferred from row count", async () => {
+  const client = new FakeSqlClient();
+  const store = new PostgresOutcomeJobExecutionStore(client);
+  const accepted = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-pg-2b", correlationId: "corr-pg-2b",
+    attempt: 1, sequence: 1, type: "ACCEPTED", occurredAt: "2026-09-26T00:00:00.000Z",
+  });
+  const first = await store.appendEvent(accepted);
+  const second = await store.appendEvent(accepted);
+  assert.equal(first, true, "the first append must report it durably created the row (RETURNING event_id came back non-empty)");
+  assert.equal(second, false, "the duplicate append must report it did NOT create a row (ON CONFLICT ... DO NOTHING suppressed it)");
+  assert.equal(client.rows.length, 1);
 });
 
 test("P3: get fails closed on a corrupted row with an unrecognized event type", async () => {

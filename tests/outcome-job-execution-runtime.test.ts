@@ -6,7 +6,7 @@ import { createProject } from "../src/domain/project.js";
 import { createOutcomeJob, transitionOutcomeJob, type OutcomeJob } from "../src/domain/outcome-job.js";
 import { createAuthorityContext, InsufficientAuthorityError, type AuthorityContext } from "../src/domain/authority.js";
 import type { WorkerInvoker } from "../src/domain/worker-invoker.js";
-import type { OutcomeJobExecutionEvent } from "../src/domain/outcome-job-execution-event.js";
+import { createOutcomeJobExecutionEvent, type OutcomeJobExecutionEvent } from "../src/domain/outcome-job-execution-event.js";
 import { applyOutcomeJobExecutionEvent, type OutcomeJobExecutionRunState } from "../src/domain/outcome-job-execution-run-state.js";
 import {
   dispatchOutcomeJobExecutionRun,
@@ -468,4 +468,115 @@ test("D18 (Rev145 F4): retry/progress/result/cancel/checkpoint consume freshly r
   // stale copy.
   assert.equal(afterSecondProgress.attempts.get(1)?.lastProgressRef, "p2");
   assert.equal(afterSecondProgress.attempts.get(1)?.lastSequence, 3);
+});
+
+test("D19 (Rev146 F5): re-dispatching an existing run with a different correlationId fails closed, and the run's durable log survives undamaged", async () => {
+  const job = freshJob("job-d19");
+  const store = new InMemoryExecutionEventStore();
+  const first = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d19", correlationId: "corr-d19-original", store, invoker: acceptingInvoker(),
+  });
+  assert.equal(first.state.status, "RUNNING");
+
+  await assert.rejects(
+    () => dispatchOutcomeJobExecutionRun({
+      ...baseDispatch, job, authority, runId: "run-d19", correlationId: "corr-d19-DIFFERENT", store, invoker: acceptingInvoker(),
+    }),
+    InvalidOutcomeJobExecutionRuntimeError,
+  );
+
+  // The mismatched re-dispatch must never have appended anything - the run's
+  // own log/state is still exactly what it was before the rejected call.
+  const stillReadable = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d19");
+  assert.equal(stillReadable?.correlationId, "corr-d19-original");
+  assert.equal(stillReadable?.status, "RUNNING");
+});
+
+test("D20 (Rev146 F6): a pre-seeded ACCEPTED-only run (simulating a crash before ATTEMPT_STARTED became durable) is recovered by a later dispatch call, which invokes exactly once", async () => {
+  const job = freshJob("job-d20");
+  const store = new InMemoryExecutionEventStore();
+  // Simulate the crash window directly: only ACCEPTED is durable, never
+  // ATTEMPT_STARTED - exactly what Rev146 F6 describes as a process death
+  // between the two appends inside dispatchOutcomeJobExecutionRun.
+  const preSeededAccepted = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-d20", correlationId: "corr-d20",
+    attempt: 1, sequence: 1, type: "ACCEPTED", occurredAt: "2026-09-26T00:00:00.000Z",
+  });
+  store.appendEvent(preSeededAccepted);
+  const strandedState = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d20");
+  assert.equal(strandedState?.status, "ACCEPTED");
+  assert.equal(strandedState?.currentAttempt, 0);
+
+  let invokeCount = 0;
+  const invoker: WorkerInvoker = {
+    role: "CLAUDE_PRIMARY_ENGINEER",
+    invoke: async () => {
+      invokeCount += 1;
+      return { accepted: true };
+    },
+  };
+  const recovered = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d20", correlationId: "corr-d20", store, invoker,
+  });
+  assert.equal(invokeCount, 1, "the recovery dispatch must actually invoke the worker exactly once");
+  assert.equal(recovered.invoked, true);
+  assert.equal(recovered.state.status, "RUNNING");
+  assert.equal(recovered.state.currentAttempt, 1);
+});
+
+test("D21 (Rev146 F6): two concurrent recovery dispatch calls against the same ACCEPTED-only run still only invoke the worker once", async () => {
+  const job = freshJob("job-d21");
+  const store = new InMemoryExecutionEventStore();
+  const preSeededAccepted = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-d21", correlationId: "corr-d21",
+    attempt: 1, sequence: 1, type: "ACCEPTED", occurredAt: "2026-09-26T00:00:00.000Z",
+  });
+  store.appendEvent(preSeededAccepted);
+
+  let invokeCount = 0;
+  const invoker: WorkerInvoker = {
+    role: "CLAUDE_PRIMARY_ENGINEER",
+    invoke: async () => {
+      invokeCount += 1;
+      return { accepted: true };
+    },
+  };
+  const callOnce = () =>
+    dispatchOutcomeJobExecutionRun({
+      ...baseDispatch, job, authority, runId: "run-d21", correlationId: "corr-d21", store, invoker,
+    });
+  const [resultA, resultB] = await Promise.all([callOnce(), callOnce()]);
+  assert.equal(invokeCount, 1, "exactly one concurrent recovery caller must actually invoke the worker");
+  assert.deepEqual([resultA.invoked, resultB.invoked].sort(), [false, true]);
+});
+
+test("D22 (Rev146 F6): re-dispatching an already fully-progressed run (past attempt 1) remains a pure no-op that never re-invokes", async () => {
+  const job = freshJob("job-d22");
+  const store = new InMemoryExecutionEventStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d22", correlationId: "corr-d22", store, invoker: rejectingInvoker(),
+  });
+  assert.equal(dispatched.state.status, "FAILED");
+  const retried = await retryOutcomeJobExecutionAttempt({
+    tenantScope, customer, project, job, authority, currentState: dispatched.state,
+    now: "2026-09-26T00:01:00.000Z", executorKind: "INJECTED",
+    expectedFingerprint: "fp-1", currentFingerprint: "fp-1",
+    store, invoker: acceptingInvoker(), taskId: "task-1", branch: "b", checkpointSha: "sha-2",
+  });
+  assert.equal(retried.state.currentAttempt, 2);
+
+  let invokeCount = 0;
+  const invoker: WorkerInvoker = {
+    role: "CLAUDE_PRIMARY_ENGINEER",
+    invoke: async () => {
+      invokeCount += 1;
+      return { accepted: true };
+    },
+  };
+  const redispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d22", correlationId: "corr-d22", store, invoker,
+  });
+  assert.equal(invokeCount, 0, "a re-dispatch of an already-progressed run must never re-invoke");
+  assert.equal(redispatched.invoked, false);
+  assert.equal(redispatched.state.currentAttempt, 2, "re-dispatch must not disturb the real current attempt");
 });

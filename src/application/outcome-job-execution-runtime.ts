@@ -227,8 +227,19 @@ export async function dispatchOutcomeJobExecutionRun(
         runId,
       )
     : undefined;
-  if (existing !== undefined) {
-    return { state: existing, invoked: false };
+
+  // Rev146 F5: an existing run's correlationId is authoritative. Failing
+  // closed HERE - before anything is ever (re-)appended - matters: once
+  // `correlationId` is part of the eventId (see `deriveOutcomeJobExecutionEventId`),
+  // a mismatched re-dispatch's ACCEPTED event would otherwise be accepted
+  // as a genuinely new, distinct durable write (its eventId differs), only
+  // to have `getState`'s own replay permanently throw afterward, once the
+  // reducer's identity check rejects it - corrupting this run's log for
+  // every future read. Rejecting before any append is the only safe option.
+  if (existing !== undefined && existing.correlationId !== correlationId) {
+    throw new InvalidOutcomeJobExecutionRuntimeError(
+      `existing run "${runId}" has correlationId "${existing.correlationId}", but dispatch was called with a different correlationId "${correlationId}"`,
+    );
   }
 
   assertCurrentActivation(input.expectedFingerprint, input.currentFingerprint);
@@ -262,11 +273,23 @@ export async function dispatchOutcomeJobExecutionRun(
   const started = await appendAndGetState(input.store, startedEvent);
   state = started.state;
 
-  // Rev145 F1: only the caller who actually WON the durable claim on this
-  // exact ATTEMPT_STARTED event may invoke the worker - a concurrent caller
-  // that observed no prior state (a stale read) but lost the durable append
-  // race must not also invoke, even though the final durable state looks
-  // identical to both callers.
+  // Rev145 F1 / Rev146 F6: only the caller who actually WON the durable
+  // claim on this exact ATTEMPT_STARTED event may invoke the worker. This
+  // single atomic gate uniformly covers three cases: (1) a fresh run - both
+  // ACCEPTED and ATTEMPT_STARTED are newly created, this call wins and
+  // invokes; (2) a run that already fully progressed past attempt 1 - the
+  // ATTEMPT_STARTED append for attempt 1 already exists (whatever the
+  // CURRENT attempt now is, since its eventId depends only on the fixed
+  // attempt-1/sequence-1 coordinate), so this call durably loses and
+  // returns the real current state as a pure no-op; (3) Rev146 F6's
+  // ACCEPTED-only crash-recovery window - the process died after ACCEPTED
+  // became durable but before ATTEMPT_STARTED did, so a later re-dispatch
+  // (with the SAME correlationId, already verified above) finds ACCEPTED
+  // already durable (a harmless idempotent no-op re-append) but
+  // ATTEMPT_STARTED genuinely new - this call wins the claim and invokes
+  // exactly once, un-stranding the run. A concurrent recovery race between
+  // two such re-dispatches is resolved by this exact same atomic claim, so
+  // there is still only ever one invocation winner.
   if (!started.created) {
     return { state, invoked: false };
   }
