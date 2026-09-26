@@ -153,11 +153,22 @@ export class PostgresOutcomeJobExecutionStore implements AsyncOutcomeJobExecutio
     jobId: OutcomeJob["jobId"],
     runId: string,
   ): Promise<ReadonlyArray<OutcomeJobExecutionEvent>> {
+    // Rev147 F8: ACCEPTED and an attempt's own ATTEMPT_STARTED deliberately
+    // share the same (attempt, sequence) coordinate by convention (see
+    // `deriveOutcomeJobExecutionEventId`'s own doc comment), so
+    // `ORDER BY attempt, sequence` alone is not a total order - it leaves
+    // equal-key rows in unspecified (physical/insertion-order-dependent)
+    // order. A valid persisted run replayed with ATTEMPT_STARTED sorted
+    // before its own ACCEPTED would make the reducer reject a genuinely
+    // valid log at restart. This adds an explicit, semantic third sort key
+    // - ACCEPTED always sorts before every other type - and a final
+    // `event_id` tiebreaker for full determinism, so ordering never depends
+    // on physical/insertion order at all.
     const result = await this.client.query<RawOutcomeJobExecutionRow>(
       `SELECT tenant_id, customer_id, project_id, job_id, run_id, correlation_id, attempt, sequence, event_id, type, occurred_at, reason, progress_ref, checkpoint_ref, executor_ref
        FROM outcome_job_execution_events
        WHERE tenant_id = $1 AND customer_id = $2 AND project_id = $3 AND job_id = $4 AND run_id = $5
-       ORDER BY attempt ASC, sequence ASC`,
+       ORDER BY attempt ASC, sequence ASC, (CASE WHEN type = 'ACCEPTED' THEN 0 ELSE 1 END) ASC, event_id ASC`,
       [tenantId, customerId, projectId, jobId, runId],
     );
     return result.rows.map((row) =>

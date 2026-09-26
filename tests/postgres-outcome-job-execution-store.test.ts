@@ -63,9 +63,22 @@ class FakeSqlClient implements SqlClient {
     }
     if (text.includes("SELECT") && text.includes("FROM outcome_job_execution_events")) {
       const [tenantId, customerId, projectId, jobId, runId] = params as string[];
+      // Mirrors the real query's ORDER BY exactly (Rev147 F8): attempt,
+      // sequence, then ACCEPTED-sorts-first as an explicit semantic
+      // tiebreaker for the shared (attempt, sequence) coordinate, then
+      // event_id as a final deterministic tiebreaker - never physical/
+      // insertion (array push) order, which this fake deliberately does
+      // NOT preserve by not sorting on push order at all.
+      const typeOrdinal = (type: string) => (type === "ACCEPTED" ? 0 : 1);
       const matches = this.rows
         .filter((r) => r.tenant_id === tenantId && r.customer_id === customerId && r.project_id === projectId && r.job_id === jobId && r.run_id === runId)
-        .sort((a, b) => (a.attempt === b.attempt ? a.sequence - b.sequence : a.attempt - b.attempt));
+        .sort((a, b) => {
+          if (a.attempt !== b.attempt) return a.attempt - b.attempt;
+          if (a.sequence !== b.sequence) return a.sequence - b.sequence;
+          const ordinalDiff = typeOrdinal(a.type) - typeOrdinal(b.type);
+          if (ordinalDiff !== 0) return ordinalDiff;
+          return a.event_id < b.event_id ? -1 : a.event_id > b.event_id ? 1 : 0;
+        });
       return { rows: matches as unknown as ReadonlyArray<Row> };
     }
     throw new Error(`FakeSqlClient: unrecognized query: ${text}`);
@@ -183,6 +196,38 @@ test("P5: getEvents orders rows by attempt then sequence regardless of insertion
   await store.appendEvent(started);
   const events = await store.getEvents(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-pg-5");
   assert.deepEqual(events.map((e) => e.type), ["ACCEPTED", "ATTEMPT_STARTED", "PROGRESS"]);
+});
+
+test("P8 (Rev147 F8, adversarial): ACCEPTED always replays before ATTEMPT_STARTED at their shared (1,1) coordinate, even when ATTEMPT_STARTED is physically/durably written first", async () => {
+  const client = new FakeSqlClient();
+  const store = new PostgresOutcomeJobExecutionStore(client);
+  const accepted = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-pg-8", correlationId: "corr-pg-8",
+    attempt: 1, sequence: 1, type: "ACCEPTED", occurredAt: "2026-09-26T00:00:00.000Z",
+  });
+  const started = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-pg-8", correlationId: "corr-pg-8",
+    attempt: 1, sequence: 1, type: "ATTEMPT_STARTED", occurredAt: "2026-09-26T00:00:01.000Z",
+  });
+  // Deliberately reversed: ATTEMPT_STARTED is durably written BEFORE its own
+  // run's ACCEPTED (e.g. an out-of-order replicated write, or simply a
+  // different physical row order than logical order) - ordering must not
+  // depend on this.
+  await store.appendEvent(started);
+  await store.appendEvent(accepted);
+
+  const events = await store.getEvents(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-pg-8");
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ["ACCEPTED", "ATTEMPT_STARTED"],
+    "ACCEPTED must sort before ATTEMPT_STARTED at the shared (1,1) coordinate regardless of physical/insertion order",
+  );
+
+  // The whole point: a reducer replay over this reverse-physical-order
+  // durable log must still succeed (not reject a genuinely valid run).
+  const state = await store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-pg-8");
+  assert.equal(state?.status, "RUNNING");
+  assert.equal(state?.currentAttempt, 1);
 });
 
 test("P6 (Rev145 F2, adversarial): a row whose event_id column does not match the canonical derivation from its own tuple fails closed", async () => {
