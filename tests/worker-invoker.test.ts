@@ -87,3 +87,46 @@ test("E10: a retry after a temporary failure succeeds independently and does not
   assert.equal("resolution" in retry, false);
   assert.equal("decision" in retry, false);
 });
+
+test("OS-V0-05 Package Contract G: an ordinary ENG-ORCH invocation with no outcomeJobExecution field behaves exactly as before - the extension is purely additive", async () => {
+  let capturedInput: unknown;
+  const invoker: WorkerInvoker = {
+    role: "CLAUDE_PRIMARY_ENGINEER",
+    invoke: async (input) => {
+      capturedInput = input;
+      return { accepted: true };
+    },
+  };
+  const outcome = await invokeSafely(invoker, invokeInput);
+  assert.equal(outcome.status, "ACCEPTED");
+  assert.equal((capturedInput as { outcomeJobExecution?: unknown }).outcomeJobExecution, undefined);
+});
+
+test("OS-V0-05 Package Contract G: an OutcomeJob-execution invocation carries its own run identity alongside, never reinterpreting, taskId/branch/checkpointSha", async () => {
+  let capturedInput: unknown;
+  const invoker: WorkerInvoker = {
+    role: "CLAUDE_PRIMARY_ENGINEER",
+    invoke: async (input) => {
+      capturedInput = input;
+      return { accepted: true };
+    },
+  };
+  const outcome = await invokeSafely(invoker, {
+    ...invokeInput,
+    outcomeJobExecution: {
+      tenantId: "tenant-1",
+      customerId: "customer-1",
+      projectId: "project-1",
+      jobId: "job-1",
+      runId: "run-1",
+      correlationId: "corr-1",
+      attempt: 1,
+    },
+  });
+  assert.equal(outcome.status, "ACCEPTED");
+  const seen = capturedInput as { taskId: string; branch: string; checkpointSha: string; outcomeJobExecution: { jobId: string } };
+  assert.equal(seen.taskId, invokeInput.taskId);
+  assert.equal(seen.branch, invokeInput.branch);
+  assert.equal(seen.checkpointSha, invokeInput.checkpointSha);
+  assert.equal(seen.outcomeJobExecution.jobId, "job-1");
+});
