@@ -17,12 +17,32 @@ export class ReviewerPolicyError extends Error {
 export type WorkerRole = "CLAUDE_PRIMARY_ENGINEER";
 export type ReviewerRole = "BRAIN_CHATGPT" | "CODEX";
 
+/**
+ * OS-V0-05 Package Contract G: the smallest additive extension of this
+ * boundary that lets a caller carry exact OutcomeJob execution-run identity
+ * through an invocation, without touching or reinterpreting
+ * `taskId`/`branch`/`checkpointSha` - those remain exclusively ENG-ORCH's
+ * own engineering-invocation identity, untouched by this optional field.
+ * `WorkerInvoker` implementations (and every existing ENG-ORCH caller, none
+ * of which supply this field) are unaffected.
+ */
+export interface OutcomeJobExecutionInvocationContext {
+  readonly tenantId: string;
+  readonly customerId: string;
+  readonly projectId: string;
+  readonly jobId: string;
+  readonly runId: string;
+  readonly correlationId: string;
+  readonly attempt: number;
+}
+
 export interface WorkerInvoker {
   readonly role: WorkerRole;
   invoke(input: {
     readonly taskId: string;
     readonly branch: string;
     readonly checkpointSha: string;
+    readonly outcomeJobExecution?: OutcomeJobExecutionInvocationContext;
   }): Promise<{ readonly accepted: boolean }>;
 }
 
@@ -79,7 +99,12 @@ export type InvokeOutcome =
  */
 export async function invokeSafely(
   invoker: WorkerInvoker,
-  input: { readonly taskId: string; readonly branch: string; readonly checkpointSha: string },
+  input: {
+    readonly taskId: string;
+    readonly branch: string;
+    readonly checkpointSha: string;
+    readonly outcomeJobExecution?: OutcomeJobExecutionInvocationContext;
+  },
 ): Promise<InvokeOutcome> {
   try {
     const result = await invoker.invoke(input);
