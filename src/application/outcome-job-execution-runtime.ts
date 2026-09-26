@@ -10,7 +10,7 @@ import {
 } from "../domain/outcome-job-execution-event.js";
 import type { OutcomeJobExecutionRunState } from "../domain/outcome-job-execution-run-state.js";
 import type { AuthorityContext } from "../domain/authority.js";
-import { requireSameTenant, requireProtectedActionAuthorization } from "../domain/authority.js";
+import { requireSameTenant, requirePermission, requireProtectedActionAuthorization } from "../domain/authority.js";
 import { invokeSafely, type WorkerInvoker, type InvokeOutcome } from "../domain/worker-invoker.js";
 
 export class InvalidOutcomeJobExecutionRuntimeError extends Error {
@@ -85,7 +85,13 @@ function assertActivatedExecutorKind(executorKind: unknown): asserts executorKin
  * return, so this runtime is usable with either store without an adapter.
  */
 export interface ExecutionEventStore {
-  appendEvent(event: OutcomeJobExecutionEvent): void | Promise<void>;
+  /**
+   * Rev145 F1: resolves/returns `true` only when THIS call durably created
+   * the event (an atomic single-authority claim), `false` when it already
+   * existed. Callers gate any side effect that must happen exactly once per
+   * event (invoking the worker) on this return value.
+   */
+  appendEvent(event: OutcomeJobExecutionEvent): boolean | Promise<boolean>;
   getState(
     tenantId: TenantScope["tenantId"],
     customerId: Customer["customerId"],
@@ -122,13 +128,56 @@ interface ScopeInput {
 async function appendAndGetState(
   store: ExecutionEventStore,
   event: OutcomeJobExecutionEvent,
-): Promise<OutcomeJobExecutionRunState> {
-  await store.appendEvent(event);
+): Promise<{ state: OutcomeJobExecutionRunState; created: boolean }> {
+  const created = await store.appendEvent(event);
   const state = await store.getState(event.tenantId, event.customerId, event.projectId, event.jobId, event.runId);
   if (state === undefined) {
     throw new InvalidOutcomeJobExecutionRuntimeError("internal error: state missing immediately after appendEvent");
   }
-  return state;
+  return { state, created };
+}
+
+/**
+ * Rev145 F4: "retry/progress/result/cancel/checkpoint consume currentState
+ * runId/correlationId/attempt/sequence without first proving currentState
+ * belongs to the exact target tenant/customer/project/job." Every function
+ * below that accepts a caller-constructed `currentState` calls this first:
+ * it (1) fails closed if `currentState`'s own identity does not exactly
+ * match the given `tenantScope`/`customer`/`project`/`job` (a
+ * foreign/substituted state can never be used to derive an event for a
+ * different target job), and (2) re-fetches the actual current durable
+ * state from `store` rather than trusting the caller-supplied object for
+ * anything beyond its `runId` - closing both the cross-job-substitution
+ * attack and the stale-caller-copy problem in one place.
+ */
+async function verifyAndRefreshExecutionState(
+  store: ExecutionEventStore,
+  scope: ScopeInput,
+  currentState: OutcomeJobExecutionRunState,
+): Promise<OutcomeJobExecutionRunState> {
+  if (
+    currentState.tenantId !== scope.tenantScope.tenantId ||
+    currentState.customerId !== scope.customer.customerId ||
+    currentState.projectId !== scope.project.projectId ||
+    currentState.jobId !== scope.job.jobId
+  ) {
+    throw new InvalidOutcomeJobExecutionRuntimeError(
+      "currentState does not belong to the given tenantScope/customer/project/job - cross-scope substitution",
+    );
+  }
+  const fresh = await store.getState(
+    scope.tenantScope.tenantId,
+    scope.customer.customerId,
+    scope.project.projectId,
+    scope.job.jobId,
+    currentState.runId,
+  );
+  if (fresh === undefined) {
+    throw new InvalidOutcomeJobExecutionRuntimeError(
+      `no durable execution run exists for runId "${currentState.runId}" under the given tenant/customer/project/job`,
+    );
+  }
+  return fresh;
 }
 
 export interface DispatchOutcomeJobExecutionResult {
@@ -164,6 +213,7 @@ export async function dispatchOutcomeJobExecutionRun(
   },
 ): Promise<DispatchOutcomeJobExecutionResult> {
   requireSameTenant(input.authority, input.tenantScope.tenantId);
+  requirePermission(input.authority, "EXECUTE");
   assertActivatedExecutorKind(input.executorKind);
 
   const runId = typeof input.runId === "string" ? input.runId : "";
@@ -195,7 +245,7 @@ export async function dispatchOutcomeJobExecutionRun(
     type: "ACCEPTED",
     occurredAt: input.now,
   });
-  let state = await appendAndGetState(input.store, acceptedEvent);
+  let { state } = await appendAndGetState(input.store, acceptedEvent);
 
   const startedEvent = createOutcomeJobExecutionEvent({
     tenantScope: input.tenantScope,
@@ -209,7 +259,17 @@ export async function dispatchOutcomeJobExecutionRun(
     type: "ATTEMPT_STARTED",
     occurredAt: input.now,
   });
-  state = await appendAndGetState(input.store, startedEvent);
+  const started = await appendAndGetState(input.store, startedEvent);
+  state = started.state;
+
+  // Rev145 F1: only the caller who actually WON the durable claim on this
+  // exact ATTEMPT_STARTED event may invoke the worker - a concurrent caller
+  // that observed no prior state (a stale read) but lost the durable append
+  // race must not also invoke, even though the final durable state looks
+  // identical to both callers.
+  if (!started.created) {
+    return { state, invoked: false };
+  }
 
   const invocationOutcome = await invokeSafely(input.invoker, {
     taskId: input.taskId,
@@ -240,7 +300,7 @@ export async function dispatchOutcomeJobExecutionRun(
       occurredAt: input.now,
       reason: invocationOutcome.reason,
     });
-    state = await appendAndGetState(input.store, failedEvent);
+    ({ state } = await appendAndGetState(input.store, failedEvent));
   }
 
   return { state, invoked: true, invocationOutcome };
@@ -280,12 +340,14 @@ export async function retryOutcomeJobExecutionAttempt(
   },
 ): Promise<DispatchOutcomeJobExecutionResult> {
   requireSameTenant(input.authority, input.tenantScope.tenantId);
+  requirePermission(input.authority, "EXECUTE");
   assertActivatedExecutorKind(input.executorKind);
 
-  const currentAttemptState = input.currentState.attempts.get(input.currentState.currentAttempt);
+  const freshState = await verifyAndRefreshExecutionState(input.store, input, input.currentState);
+  const currentAttemptState = freshState.attempts.get(freshState.currentAttempt);
   if (currentAttemptState === undefined || !RETRYABLE_ATTEMPT_STATUSES.has(currentAttemptState.status)) {
     throw new InvalidOutcomeJobExecutionRuntimeError(
-      `attempt ${input.currentState.currentAttempt} with status "${currentAttemptState?.status}" is not retryable`,
+      `attempt ${freshState.currentAttempt} with status "${currentAttemptState?.status}" is not retryable`,
     );
   }
   if (currentAttemptState.status === "UNKNOWN" && !input.authority.canPerformProtectedActions) {
@@ -297,25 +359,28 @@ export async function retryOutcomeJobExecutionAttempt(
 
   assertCurrentActivation(input.expectedFingerprint, input.currentFingerprint);
 
-  const nextAttempt = input.currentState.currentAttempt + 1;
+  const nextAttempt = freshState.currentAttempt + 1;
   const startedEvent = createOutcomeJobExecutionEvent({
     tenantScope: input.tenantScope,
     customer: input.customer,
     project: input.project,
     job: input.job,
-    runId: input.currentState.runId,
-    correlationId: input.currentState.correlationId,
+    runId: freshState.runId,
+    correlationId: freshState.correlationId,
     attempt: nextAttempt,
     sequence: 1,
     type: "ATTEMPT_STARTED",
     occurredAt: input.now,
   });
-  let state = await appendAndGetState(input.store, startedEvent);
+  const started = await appendAndGetState(input.store, startedEvent);
+  let state = started.state;
 
-  if (state.currentAttempt !== nextAttempt) {
-    // The store's real current attempt had already advanced past
-    // `nextAttempt` (a concurrent/duplicate retry won) - this call's own
-    // ATTEMPT_STARTED was a stale no-op; do not invoke the worker again.
+  // Rev145 F1: only the caller who actually won the durable claim on this
+  // exact next-attempt's ATTEMPT_STARTED may invoke the worker. The prior
+  // heuristic ("does state.currentAttempt still equal nextAttempt") could
+  // not distinguish "I won the race" from "someone else won it but the
+  // final state happens to look the same" - the atomic `created` flag can.
+  if (!started.created) {
     return { state, invoked: false };
   }
 
@@ -348,7 +413,7 @@ export async function retryOutcomeJobExecutionAttempt(
       occurredAt: input.now,
       reason: invocationOutcome.reason,
     });
-    state = await appendAndGetState(input.store, failedEvent);
+    ({ state } = await appendAndGetState(input.store, failedEvent));
   }
 
   return { state, invoked: true, invocationOutcome };
@@ -367,20 +432,22 @@ export async function recordExecutionProgress(
     readonly progressRef?: unknown;
   },
 ): Promise<OutcomeJobExecutionRunState> {
+  const freshState = await verifyAndRefreshExecutionState(input.store, input, input.currentState);
   const event = createOutcomeJobExecutionEvent({
     tenantScope: input.tenantScope,
     customer: input.customer,
     project: input.project,
     job: input.job,
-    runId: input.currentState.runId,
-    correlationId: input.currentState.correlationId,
-    attempt: input.currentState.currentAttempt,
-    sequence: nextSequenceForAttempt(input.currentState, input.currentState.currentAttempt),
+    runId: freshState.runId,
+    correlationId: freshState.correlationId,
+    attempt: freshState.currentAttempt,
+    sequence: nextSequenceForAttempt(freshState, freshState.currentAttempt),
     type: "PROGRESS",
     occurredAt: input.now,
     ...(input.progressRef !== undefined ? { progressRef: input.progressRef } : {}),
   });
-  return appendAndGetState(input.store, event);
+  const { state } = await appendAndGetState(input.store, event);
+  return state;
 }
 
 const RESULT_EVENT_TYPES: ReadonlySet<OutcomeJobExecutionEventType> = new Set([
@@ -416,20 +483,22 @@ export async function recordExecutionResult(
       `type must be one of ${Array.from(RESULT_EVENT_TYPES).join(", ")}`,
     );
   }
+  const freshState = await verifyAndRefreshExecutionState(input.store, input, input.currentState);
   const event = createOutcomeJobExecutionEvent({
     tenantScope: input.tenantScope,
     customer: input.customer,
     project: input.project,
     job: input.job,
-    runId: input.currentState.runId,
-    correlationId: input.currentState.correlationId,
-    attempt: input.currentState.currentAttempt,
-    sequence: nextSequenceForAttempt(input.currentState, input.currentState.currentAttempt),
+    runId: freshState.runId,
+    correlationId: freshState.correlationId,
+    attempt: freshState.currentAttempt,
+    sequence: nextSequenceForAttempt(freshState, freshState.currentAttempt),
     type: input.type as OutcomeJobExecutionEventType,
     occurredAt: input.now,
     ...(input.reason !== undefined ? { reason: input.reason } : {}),
   });
-  return appendAndGetState(input.store, event);
+  const { state } = await appendAndGetState(input.store, event);
+  return state;
 }
 
 /**
@@ -492,23 +561,25 @@ export async function requestExecutionCancellation(
     readonly store: ExecutionEventStore;
   },
 ): Promise<OutcomeJobExecutionRunState> {
+  const freshState = await verifyAndRefreshExecutionState(input.store, input, input.currentState);
   const type: OutcomeJobExecutionEventType = input.capabilities.supportsCancel ? "CANCELLED" : "UNSUPPORTED";
   const event = createOutcomeJobExecutionEvent({
     tenantScope: input.tenantScope,
     customer: input.customer,
     project: input.project,
     job: input.job,
-    runId: input.currentState.runId,
-    correlationId: input.currentState.correlationId,
-    attempt: input.currentState.currentAttempt,
-    sequence: nextSequenceForAttempt(input.currentState, input.currentState.currentAttempt),
+    runId: freshState.runId,
+    correlationId: freshState.correlationId,
+    attempt: freshState.currentAttempt,
+    sequence: nextSequenceForAttempt(freshState, freshState.currentAttempt),
     type,
     occurredAt: input.now,
     reason: input.capabilities.supportsCancel
       ? input.reason
       : "executor does not support cancellation for this run",
   });
-  return appendAndGetState(input.store, event);
+  const { state } = await appendAndGetState(input.store, event);
+  return state;
 }
 
 /**
@@ -524,34 +595,37 @@ export async function requestExecutionCheckpoint(
     readonly store: ExecutionEventStore;
   },
 ): Promise<OutcomeJobExecutionRunState> {
+  const freshState = await verifyAndRefreshExecutionState(input.store, input, input.currentState);
   if (input.capabilities.supportsCheckpoint) {
     const event = createOutcomeJobExecutionEvent({
       tenantScope: input.tenantScope,
       customer: input.customer,
       project: input.project,
       job: input.job,
-      runId: input.currentState.runId,
-      correlationId: input.currentState.correlationId,
-      attempt: input.currentState.currentAttempt,
-      sequence: nextSequenceForAttempt(input.currentState, input.currentState.currentAttempt),
+      runId: freshState.runId,
+      correlationId: freshState.correlationId,
+      attempt: freshState.currentAttempt,
+      sequence: nextSequenceForAttempt(freshState, freshState.currentAttempt),
       type: "CHECKPOINT",
       occurredAt: input.now,
       checkpointRef: input.checkpointRef ?? "checkpoint",
     });
-    return appendAndGetState(input.store, event);
+    const { state } = await appendAndGetState(input.store, event);
+    return state;
   }
   const event = createOutcomeJobExecutionEvent({
     tenantScope: input.tenantScope,
     customer: input.customer,
     project: input.project,
     job: input.job,
-    runId: input.currentState.runId,
-    correlationId: input.currentState.correlationId,
-    attempt: input.currentState.currentAttempt,
-    sequence: nextSequenceForAttempt(input.currentState, input.currentState.currentAttempt),
+    runId: freshState.runId,
+    correlationId: freshState.correlationId,
+    attempt: freshState.currentAttempt,
+    sequence: nextSequenceForAttempt(freshState, freshState.currentAttempt),
     type: "UNSUPPORTED",
     occurredAt: input.now,
     reason: "executor does not support checkpointing for this run",
   });
-  return appendAndGetState(input.store, event);
+  const { state } = await appendAndGetState(input.store, event);
+  return state;
 }

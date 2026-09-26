@@ -168,6 +168,76 @@ function requireValidTimestamp(value: unknown, field: string): string {
 }
 
 /**
+ * Rev145 F2: the single source of truth for every non-identity field's
+ * validation rule (positive attempt/sequence, recognized type, valid
+ * timestamp, type-scoped reason/progressRef/checkpointRef). Both fresh
+ * construction (`createOutcomeJobExecutionEvent`) and persisted-replay
+ * revalidation (`validatePersistedOutcomeJobExecutionEventRecord`, consumed
+ * by both durable stores) call this exact function, so a persisted record
+ * can never satisfy a weaker contract than a freshly constructed one.
+ */
+function parseOutcomeJobExecutionEventCoreFields(input: Record<string, unknown>): {
+  runId: string;
+  correlationId: string;
+  attempt: number;
+  sequence: number;
+  type: OutcomeJobExecutionEventType;
+  occurredAt: string;
+  reason?: string;
+  progressRef?: string;
+  checkpointRef?: string;
+  executorRef?: string;
+} {
+  const runId = requireNonEmptyString(input.runId, "runId");
+  const correlationId = requireNonEmptyString(input.correlationId, "correlationId");
+  const attempt = requirePositiveInteger(input.attempt, "attempt");
+  const sequence = requirePositiveInteger(input.sequence, "sequence");
+  if (!isRecognizedOutcomeJobExecutionEventType(input.type)) {
+    throw new InvalidOutcomeJobExecutionEventError(
+      `type must be one of ${Array.from(RECOGNIZED_OUTCOME_JOB_EXECUTION_EVENT_TYPES).join(", ")}`,
+    );
+  }
+  const type = input.type;
+  const occurredAt = requireValidTimestamp(input.occurredAt, "occurredAt");
+
+  let reason: string | undefined;
+  if (REASON_REQUIRED_TYPES.has(type)) {
+    reason = requireNonEmptyString(input.reason, "reason");
+  } else if (input.reason !== undefined) {
+    throw new InvalidOutcomeJobExecutionEventError(`reason must not be supplied for event type ${type}`);
+  }
+
+  let progressRef: string | undefined;
+  if (type === "PROGRESS") {
+    progressRef = requireOptionalNonEmptyString(input.progressRef, "progressRef");
+  } else if (input.progressRef !== undefined) {
+    throw new InvalidOutcomeJobExecutionEventError(`progressRef must not be supplied for event type ${type}`);
+  }
+
+  let checkpointRef: string | undefined;
+  if (type === "CHECKPOINT") {
+    checkpointRef = requireNonEmptyString(input.checkpointRef, "checkpointRef");
+  } else if (input.checkpointRef !== undefined) {
+    throw new InvalidOutcomeJobExecutionEventError(`checkpointRef must not be supplied for event type ${type}`);
+  }
+
+  const executorRef = requireOptionalNonEmptyString(input.executorRef, "executorRef");
+
+  return {
+    runId,
+    correlationId,
+    attempt,
+    sequence,
+    type,
+    occurredAt,
+    ...(reason !== undefined ? { reason } : {}),
+    ...(progressRef !== undefined ? { progressRef } : {}),
+    ...(checkpointRef !== undefined ? { checkpointRef } : {}),
+    ...(executorRef !== undefined ? { executorRef } : {}),
+  };
+}
+
+/**
  * Constructs and fully validates one execution event. `job` must belong to
  * the given `tenantScope`/`customer`/`project` (same structural check
  * `createOutcomeJob` itself already applies) - this function never trusts a
@@ -207,50 +277,17 @@ export function createOutcomeJobExecutionEvent(input: {
     throw new InvalidOutcomeJobExecutionEventError("job does not belong to the given tenantScope/customer/project");
   }
 
-  const runId = requireNonEmptyString(input.runId, "runId");
-  const correlationId = requireNonEmptyString(input.correlationId, "correlationId");
-  const attempt = requirePositiveInteger(input.attempt, "attempt");
-  const sequence = requirePositiveInteger(input.sequence, "sequence");
-  if (!isRecognizedOutcomeJobExecutionEventType(input.type)) {
-    throw new InvalidOutcomeJobExecutionEventError(
-      `type must be one of ${Array.from(RECOGNIZED_OUTCOME_JOB_EXECUTION_EVENT_TYPES).join(", ")}`,
-    );
-  }
-  const type = input.type;
-  const occurredAt = requireValidTimestamp(input.occurredAt, "occurredAt");
-
-  let reason: string | undefined;
-  if (REASON_REQUIRED_TYPES.has(type)) {
-    reason = requireNonEmptyString(input.reason, "reason");
-  } else if (input.reason !== undefined) {
-    throw new InvalidOutcomeJobExecutionEventError(`reason must not be supplied for event type ${type}`);
-  }
-
-  let progressRef: string | undefined;
-  if (type === "PROGRESS") {
-    progressRef = requireOptionalNonEmptyString(input.progressRef, "progressRef");
-  } else if (input.progressRef !== undefined) {
-    throw new InvalidOutcomeJobExecutionEventError(`progressRef must not be supplied for event type ${type}`);
-  }
-
-  let checkpointRef: string | undefined;
-  if (type === "CHECKPOINT") {
-    checkpointRef = requireNonEmptyString(input.checkpointRef, "checkpointRef");
-  } else if (input.checkpointRef !== undefined) {
-    throw new InvalidOutcomeJobExecutionEventError(`checkpointRef must not be supplied for event type ${type}`);
-  }
-
-  const executorRef = requireOptionalNonEmptyString(input.executorRef, "executorRef");
+  const core = parseOutcomeJobExecutionEventCoreFields(input);
 
   const eventId = deriveOutcomeJobExecutionEventId({
     tenantId: input.tenantScope.tenantId,
     customerId: input.customer.customerId,
     projectId: input.project.projectId,
     jobId: input.job.jobId,
-    runId,
-    attempt,
-    sequence,
-    type,
+    runId: core.runId,
+    attempt: core.attempt,
+    sequence: core.sequence,
+    type: core.type,
   });
 
   return {
@@ -259,15 +296,92 @@ export function createOutcomeJobExecutionEvent(input: {
     customerId: input.customer.customerId,
     projectId: input.project.projectId,
     jobId: input.job.jobId,
-    runId,
-    correlationId,
-    attempt,
-    sequence,
-    type,
-    occurredAt,
-    ...(reason !== undefined ? { reason } : {}),
-    ...(progressRef !== undefined ? { progressRef } : {}),
-    ...(checkpointRef !== undefined ? { checkpointRef } : {}),
-    ...(executorRef !== undefined ? { executorRef } : {}),
+    ...core,
+  };
+}
+
+/**
+ * Rev145 F2: the sole persisted-replay revalidation boundary, consumed by
+ * BOTH `FileDurableOutcomeJobExecutionStore` and
+ * `PostgresOutcomeJobExecutionStore` - a persisted record is untrusted input
+ * exactly like every other durable store in this repository, and must never
+ * be trusted for less than the full construction-time contract. This
+ * function:
+ *
+ * 1. Requires `raw` to be a JSON object carrying non-empty
+ *    tenantId/customerId/projectId/jobId/runId/eventId strings.
+ * 2. Requires those five identity fields to exactly equal the caller's own
+ *    `expected` scope (never merely `tenantId` - a record misfiled under
+ *    the right tenant but the wrong customer/project/job/run is just as
+ *    much a contamination as a wrong tenant).
+ * 3. Fully revalidates every remaining field via the exact same
+ *    `parseOutcomeJobExecutionEventCoreFields` rules construction uses.
+ * 4. Recomputes the canonical `eventId` from the record's OWN parsed
+ *    identity tuple and requires it to exactly equal the persisted
+ *    `eventId` field - closing the forged-eventId swallow attack (a
+ *    corrupted/forged `ATTEMPT_STARTED` line carrying its preceding
+ *    `ACCEPTED` event's `eventId` would otherwise be silently absorbed by
+ *    the reducer's own duplicate-eventId dedup, recreating the exact
+ *    collision/swallow class this package exists to prevent).
+ */
+export function validatePersistedOutcomeJobExecutionEventRecord(
+  raw: unknown,
+  expected: {
+    tenantId: TenantScope["tenantId"];
+    customerId: Customer["customerId"];
+    projectId: Project["projectId"];
+    jobId: OutcomeJob["jobId"];
+    runId: string;
+  },
+): OutcomeJobExecutionEvent {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new InvalidOutcomeJobExecutionEventError("persisted event must be a JSON object, not an array or primitive");
+  }
+  const candidate = raw as Record<string, unknown>;
+
+  const tenantId = requireNonEmptyString(candidate.tenantId, "tenantId");
+  const customerId = requireNonEmptyString(candidate.customerId, "customerId");
+  const projectId = requireNonEmptyString(candidate.projectId, "projectId");
+  const jobId = requireNonEmptyString(candidate.jobId, "jobId");
+  const runId = requireNonEmptyString(candidate.runId, "runId");
+  const eventId = requireNonEmptyString(candidate.eventId, "eventId");
+
+  if (
+    tenantId !== expected.tenantId ||
+    customerId !== expected.customerId ||
+    projectId !== expected.projectId ||
+    jobId !== expected.jobId ||
+    runId !== expected.runId
+  ) {
+    throw new InvalidOutcomeJobExecutionEventError(
+      "persisted event tenant/customer/project/job/run does not match the requested scope - cross-scope contamination",
+    );
+  }
+
+  const core = parseOutcomeJobExecutionEventCoreFields(candidate);
+
+  const canonicalEventId = deriveOutcomeJobExecutionEventId({
+    tenantId: tenantId as TenantScope["tenantId"],
+    customerId: customerId as unknown as Customer["customerId"],
+    projectId: projectId as unknown as Project["projectId"],
+    jobId: jobId as unknown as OutcomeJob["jobId"],
+    runId: core.runId,
+    attempt: core.attempt,
+    sequence: core.sequence,
+    type: core.type,
+  });
+  if (canonicalEventId !== eventId) {
+    throw new InvalidOutcomeJobExecutionEventError(
+      "persisted eventId does not match the canonical derivation from its own identity tuple - forged or corrupted eventId",
+    );
+  }
+
+  return {
+    eventId,
+    tenantId: tenantId as TenantScope["tenantId"],
+    customerId: customerId as unknown as Customer["customerId"],
+    projectId: projectId as unknown as Project["projectId"],
+    jobId: jobId as unknown as OutcomeJob["jobId"],
+    ...core,
   };
 }

@@ -67,7 +67,7 @@ test("S1: appendEvent + getState durably reconstruct ACCEPTED -> ATTEMPT_STARTED
   }
 });
 
-test("S2 (#9): appending the identical event twice is durably idempotent - restart reconstructs the same state either way", () => {
+test("S2 (#9, Rev145 F1): appending the identical event twice is durably idempotent - the second call is a single-authority no-op (returns false, writes nothing), not merely reducer-deduped", () => {
   const dir = freshStoreDir();
   try {
     const store = new FileDurableOutcomeJobExecutionStore(dir);
@@ -75,10 +75,12 @@ test("S2 (#9): appending the identical event twice is durably idempotent - resta
       tenantScope, customer, project, job, runId: "run-s2", correlationId: "corr-s2",
       attempt: 1, sequence: 1, type: "ACCEPTED", occurredAt: "2026-09-26T00:00:00.000Z",
     });
-    appendOutcomeJobExecutionEventIdempotently(store, accepted);
-    appendOutcomeJobExecutionEventIdempotently(store, accepted);
+    const first = store.appendEvent(accepted);
+    const second = store.appendEvent(accepted);
+    assert.equal(first, true, "the first append must report it durably created the event");
+    assert.equal(second, false, "the second, identical append must report it did NOT create a new event - single-authority claim");
     const events = store.getEvents(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-s2");
-    assert.equal(events.length, 2, "the durable log itself may contain the literal duplicate line");
+    assert.equal(events.length, 1, "the atomic claim must prevent a literal duplicate line from ever being written");
     const state = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-s2");
     assert.equal(state?.status, "ACCEPTED");
   } finally {
@@ -189,6 +191,95 @@ test("S7: two distinct runs for the same job remain independently addressable an
     const stateB = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-b");
     assert.equal(stateA?.runId, "run-a");
     assert.equal(stateB?.runId, "run-b");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("S8 (Rev145 F2, adversarial): a forged ATTEMPT_STARTED line carrying its preceding ACCEPTED event's eventId is rejected, not silently swallowed by reducer dedupe", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableOutcomeJobExecutionStore(dir);
+    const accepted = createOutcomeJobExecutionEvent({
+      tenantScope, customer, project, job, runId: "run-s8", correlationId: "corr-s8",
+      attempt: 1, sequence: 1, type: "ACCEPTED", occurredAt: "2026-09-26T00:00:00.000Z",
+    });
+    store.appendEvent(accepted);
+    const filePath = singleFilePathIn(dir);
+    // Forge a second line: real ATTEMPT_STARTED content, but with the
+    // ACCEPTED event's own eventId spliced in - exactly the attack Rev145
+    // F2 named: before the fix, this would be silently absorbed by the
+    // reducer's own duplicate-eventId dedup rather than rejected, and the
+    // run would appear to have no ATTEMPT_STARTED at all.
+    const forgedAttemptStarted = {
+      eventId: accepted.eventId,
+      tenantId: accepted.tenantId, customerId: accepted.customerId, projectId: accepted.projectId,
+      jobId: accepted.jobId, runId: accepted.runId, correlationId: accepted.correlationId,
+      attempt: 1, sequence: 1, type: "ATTEMPT_STARTED", occurredAt: "2026-09-26T00:00:01.000Z",
+    };
+    const existing = readFileSync(filePath, "utf8");
+    writeFileSync(filePath, `${existing}${JSON.stringify(forgedAttemptStarted)}\n`, "utf8");
+    assert.throws(
+      () => store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-s8"),
+      CorruptedOutcomeJobExecutionEventError,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("S9 (Rev145 F2): a persisted closing-type event missing its required reason fails closed - full canonical event-contract enforcement on replay", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableOutcomeJobExecutionStore(dir);
+    const accepted = createOutcomeJobExecutionEvent({
+      tenantScope, customer, project, job, runId: "run-s9", correlationId: "corr-s9",
+      attempt: 1, sequence: 1, type: "ACCEPTED", occurredAt: "2026-09-26T00:00:00.000Z",
+    });
+    store.appendEvent(accepted);
+    const started = createOutcomeJobExecutionEvent({
+      tenantScope, customer, project, job, runId: "run-s9", correlationId: "corr-s9",
+      attempt: 1, sequence: 1, type: "ATTEMPT_STARTED", occurredAt: "2026-09-26T00:00:01.000Z",
+    });
+    store.appendEvent(started);
+    const filePath = singleFilePathIn(dir);
+    // Forge a FAILED line (a closing type that requires `reason`) with no
+    // `reason` field at all, but with an eventId that matches its own
+    // (otherwise-canonical) tuple - proving the field-contract check fires
+    // independently of the eventId-integrity check.
+    const forgedFailed = {
+      eventId: JSON.stringify([accepted.tenantId, accepted.customerId, accepted.projectId, accepted.jobId, accepted.runId, 1, 2, "FAILED"]),
+      tenantId: accepted.tenantId, customerId: accepted.customerId, projectId: accepted.projectId,
+      jobId: accepted.jobId, runId: accepted.runId, correlationId: accepted.correlationId,
+      attempt: 1, sequence: 2, type: "FAILED", occurredAt: "2026-09-26T00:00:02.000Z",
+    };
+    const existing = readFileSync(filePath, "utf8");
+    writeFileSync(filePath, `${existing}${JSON.stringify(forgedFailed)}\n`, "utf8");
+    assert.throws(
+      () => store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-s9"),
+      CorruptedOutcomeJobExecutionEventError,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("S10 (Rev145 F2, adversarial): a persisted eventId that does not match the canonical derivation from its own identity tuple fails closed", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableOutcomeJobExecutionStore(dir);
+    const accepted = createOutcomeJobExecutionEvent({
+      tenantScope, customer, project, job, runId: "run-s10", correlationId: "corr-s10",
+      attempt: 1, sequence: 1, type: "ACCEPTED", occurredAt: "2026-09-26T00:00:00.000Z",
+    });
+    store.appendEvent(accepted);
+    const filePath = singleFilePathIn(dir);
+    const legit = JSON.parse(readFileSync(filePath, "utf8").trim());
+    writeFileSync(filePath, `${JSON.stringify({ ...legit, eventId: "completely-made-up-event-id" })}\n`, "utf8");
+    assert.throws(
+      () => store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-s10"),
+      CorruptedOutcomeJobExecutionEventError,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

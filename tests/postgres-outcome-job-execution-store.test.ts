@@ -164,3 +164,45 @@ test("P5: getEvents orders rows by attempt then sequence regardless of insertion
   const events = await store.getEvents(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-pg-5");
   assert.deepEqual(events.map((e) => e.type), ["ACCEPTED", "ATTEMPT_STARTED", "PROGRESS"]);
 });
+
+test("P6 (Rev145 F2, adversarial): a row whose event_id column does not match the canonical derivation from its own tuple fails closed", async () => {
+  const client = new FakeSqlClient();
+  const store = new PostgresOutcomeJobExecutionStore(client);
+  client.rows.push({
+    tenant_id: tenantScope.tenantId, customer_id: customer.customerId, project_id: project.projectId,
+    job_id: job.jobId, run_id: "run-pg-6", correlation_id: "corr-pg-6",
+    attempt: 1, sequence: 1, event_id: "forged-event-id-does-not-match-tuple", type: "ACCEPTED",
+    occurred_at: "2026-09-26T00:00:00.000Z", reason: null, progress_ref: null, checkpoint_ref: null, executor_ref: null,
+  });
+  await assert.rejects(
+    () => store.getEvents(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-pg-6"),
+    CorruptedOutcomeJobExecutionRowError,
+  );
+});
+
+test("P7 (Rev145 F2): getEvents fails closed if a returned row's customer/project/job/run does not match the exact requested scope, not merely the tenant", async () => {
+  const client = new FakeSqlClient();
+  const store = new PostgresOutcomeJobExecutionStore(client);
+  const legit = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-pg-7", correlationId: "corr-pg-7",
+    attempt: 1, sequence: 1, type: "ACCEPTED", occurredAt: "2026-09-26T00:00:00.000Z",
+  });
+  client.rows.push({
+    tenant_id: legit.tenantId, customer_id: "cust-pg-different", project_id: legit.projectId,
+    job_id: legit.jobId, run_id: legit.runId, correlation_id: legit.correlationId,
+    attempt: legit.attempt, sequence: legit.sequence, event_id: legit.eventId, type: legit.type,
+    occurred_at: legit.occurredAt, reason: null, progress_ref: null, checkpoint_ref: null, executor_ref: null,
+  });
+  const originalQuery = client.query.bind(client);
+  client.query = async (text: string, params: ReadonlyArray<unknown>) => {
+    if (text.includes("SELECT")) {
+      return { rows: [client.rows[0]] } as never;
+    }
+    return originalQuery(text, params);
+  };
+  await assert.rejects(
+    () => store.getEvents(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-pg-7"),
+    CorruptedOutcomeJobExecutionRowError,
+    "a row scoped to a different customer must fail closed even though tenant_id matches",
+  );
+});

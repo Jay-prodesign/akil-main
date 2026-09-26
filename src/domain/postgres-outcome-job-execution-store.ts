@@ -3,7 +3,8 @@ import type { Customer } from "./customer.js";
 import type { Project } from "./project.js";
 import type { OutcomeJob } from "./outcome-job.js";
 import {
-  isRecognizedOutcomeJobExecutionEventType,
+  validatePersistedOutcomeJobExecutionEventRecord,
+  InvalidOutcomeJobExecutionEventError,
   type OutcomeJobExecutionEvent,
 } from "./outcome-job-execution-event.js";
 import { applyOutcomeJobExecutionEvent, type OutcomeJobExecutionRunState } from "./outcome-job-execution-run-state.js";
@@ -35,79 +36,56 @@ interface RawOutcomeJobExecutionRow {
   readonly executor_ref: unknown;
 }
 
-function requireNonEmptyString(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new CorruptedOutcomeJobExecutionRowError(`${field} must be a non-empty string, got: ${JSON.stringify(value)}`);
-  }
-  return value;
-}
-
-function requirePositiveInteger(value: unknown, field: string): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
-    throw new CorruptedOutcomeJobExecutionRowError(`${field} must be a positive integer, got: ${JSON.stringify(value)}`);
-  }
-  return value;
-}
-
-function optionalNonEmptyString(value: unknown, field: string): string | undefined {
-  if (value === null || value === undefined) {
-    return undefined;
-  }
-  return requireNonEmptyString(value, field);
-}
-
 /**
- * Fail-closed replay validation, matching this codebase's own established
- * convention (`validatePersistedOutcomeJobRow`,
- * `validatePersistedOutcomeJobExecutionEvent`): a driver-returned row is
- * never blindly cast as `OutcomeJobExecutionEvent` - every field is
- * revalidated, including tenant correspondence with the caller's own
- * expected tenant, before reconstructing the record.
+ * Rev145 F2: delegates entirely to the shared
+ * `validatePersistedOutcomeJobExecutionEventRecord` (same module
+ * `durable-outcome-job-execution-store.ts` uses) rather than a parallel,
+ * postgres-specific field-by-field re-implementation - full canonical
+ * event-contract enforcement, exact five-field requested-scope correlation
+ * (tenant AND customer AND project AND job AND run, not tenant alone), and
+ * eventId-forgery detection (the record's own persisted `event_id` column
+ * must exactly equal the canonical derivation from its own tuple - a
+ * silently-recomputed eventId can never mask a raw column mismatch) all
+ * live in exactly one place. The row's snake_case columns are transformed
+ * into the shared validator's camelCase record shape first; its
+ * `InvalidOutcomeJobExecutionEventError` is rewrapped as this store's own
+ * `CorruptedOutcomeJobExecutionRowError` for API consistency.
  */
 export function validatePersistedOutcomeJobExecutionRow(
   raw: RawOutcomeJobExecutionRow,
-  expectedTenantId: TenantScope["tenantId"],
+  expected: {
+    tenantId: TenantScope["tenantId"];
+    customerId: Customer["customerId"];
+    projectId: Project["projectId"];
+    jobId: OutcomeJob["jobId"];
+    runId: string;
+  },
 ): OutcomeJobExecutionEvent {
-  const tenantId = requireNonEmptyString(raw.tenant_id, "tenant_id");
-  if (tenantId !== expectedTenantId) {
-    throw new CorruptedOutcomeJobExecutionRowError(
-      `row tenant_id "${tenantId}" does not match the expected tenant "${expectedTenantId}"`,
-    );
-  }
-  const customerId = requireNonEmptyString(raw.customer_id, "customer_id");
-  const projectId = requireNonEmptyString(raw.project_id, "project_id");
-  const jobId = requireNonEmptyString(raw.job_id, "job_id");
-  const runId = requireNonEmptyString(raw.run_id, "run_id");
-  const correlationId = requireNonEmptyString(raw.correlation_id, "correlation_id");
-  const attempt = requirePositiveInteger(raw.attempt, "attempt");
-  const sequence = requirePositiveInteger(raw.sequence, "sequence");
-  requireNonEmptyString(raw.event_id, "event_id");
-  if (!isRecognizedOutcomeJobExecutionEventType(raw.type)) {
-    throw new CorruptedOutcomeJobExecutionRowError(`unrecognized type: ${JSON.stringify(raw.type)}`);
-  }
-  const occurredAt = requireNonEmptyString(raw.occurred_at, "occurred_at");
-  const reason = optionalNonEmptyString(raw.reason, "reason");
-  const progressRef = optionalNonEmptyString(raw.progress_ref, "progress_ref");
-  const checkpointRef = optionalNonEmptyString(raw.checkpoint_ref, "checkpoint_ref");
-  const executorRef = optionalNonEmptyString(raw.executor_ref, "executor_ref");
-
-  return {
-    eventId: JSON.stringify([tenantId, customerId, projectId, jobId, runId, attempt, sequence, raw.type]),
-    tenantId: tenantId as unknown as TenantScope["tenantId"],
-    customerId: customerId as unknown as Customer["customerId"],
-    projectId: projectId as unknown as Project["projectId"],
-    jobId: jobId as unknown as OutcomeJob["jobId"],
-    runId,
-    correlationId,
-    attempt,
-    sequence,
+  const record = {
+    eventId: raw.event_id,
+    tenantId: raw.tenant_id,
+    customerId: raw.customer_id,
+    projectId: raw.project_id,
+    jobId: raw.job_id,
+    runId: raw.run_id,
+    correlationId: raw.correlation_id,
+    attempt: raw.attempt,
+    sequence: raw.sequence,
     type: raw.type,
-    occurredAt,
-    ...(reason !== undefined ? { reason } : {}),
-    ...(progressRef !== undefined ? { progressRef } : {}),
-    ...(checkpointRef !== undefined ? { checkpointRef } : {}),
-    ...(executorRef !== undefined ? { executorRef } : {}),
+    occurredAt: raw.occurred_at,
+    reason: raw.reason ?? undefined,
+    progressRef: raw.progress_ref ?? undefined,
+    checkpointRef: raw.checkpoint_ref ?? undefined,
+    executorRef: raw.executor_ref ?? undefined,
   };
+  try {
+    return validatePersistedOutcomeJobExecutionEventRecord(record, expected);
+  } catch (cause) {
+    if (cause instanceof InvalidOutcomeJobExecutionEventError) {
+      throw new CorruptedOutcomeJobExecutionRowError(cause.message);
+    }
+    throw cause;
+  }
 }
 
 /**
@@ -133,12 +111,20 @@ export class PostgresOutcomeJobExecutionStore implements AsyncOutcomeJobExecutio
     this.client = client;
   }
 
-  async appendEvent(event: OutcomeJobExecutionEvent): Promise<void> {
-    await this.client.query(
+  /**
+   * Rev145 F1: returns `true` only when THIS call durably created the row
+   * (the `RETURNING` clause reports a row precisely when the `INSERT` was
+   * not suppressed by the `ON CONFLICT ... DO NOTHING` unique-constraint
+   * check) - a real atomic database-level claim, correct even under two
+   * genuinely concurrent writers, not a read-then-write race in this class.
+   */
+  async appendEvent(event: OutcomeJobExecutionEvent): Promise<boolean> {
+    const result = await this.client.query(
       `INSERT INTO outcome_job_execution_events
          (tenant_id, customer_id, project_id, job_id, run_id, correlation_id, attempt, sequence, event_id, type, occurred_at, reason, progress_ref, checkpoint_ref, executor_ref)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-       ON CONFLICT (tenant_id, event_id) DO NOTHING`,
+       ON CONFLICT (tenant_id, event_id) DO NOTHING
+       RETURNING event_id`,
       [
         event.tenantId,
         event.customerId,
@@ -157,6 +143,7 @@ export class PostgresOutcomeJobExecutionStore implements AsyncOutcomeJobExecutio
         event.executorRef ?? null,
       ],
     );
+    return result.rows.length > 0;
   }
 
   async getEvents(
@@ -173,7 +160,9 @@ export class PostgresOutcomeJobExecutionStore implements AsyncOutcomeJobExecutio
        ORDER BY attempt ASC, sequence ASC`,
       [tenantId, customerId, projectId, jobId, runId],
     );
-    return result.rows.map((row) => validatePersistedOutcomeJobExecutionRow(row, tenantId));
+    return result.rows.map((row) =>
+      validatePersistedOutcomeJobExecutionRow(row, { tenantId, customerId, projectId, jobId, runId }),
+    );
   }
 
   async getState(

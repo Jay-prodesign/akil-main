@@ -5,7 +5,8 @@ import type { Customer } from "./customer.js";
 import type { Project } from "./project.js";
 import type { OutcomeJob } from "./outcome-job.js";
 import {
-  isRecognizedOutcomeJobExecutionEventType,
+  validatePersistedOutcomeJobExecutionEventRecord,
+  InvalidOutcomeJobExecutionEventError,
   type OutcomeJobExecutionEvent,
 } from "./outcome-job-execution-event.js";
 import {
@@ -20,45 +21,21 @@ export class CorruptedOutcomeJobExecutionEventError extends Error {
   }
 }
 
-function requireNonEmptyStringField(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.trim().length === 0 || value.trim() !== value) {
-    throw new CorruptedOutcomeJobExecutionEventError(
-      `${field} must be a non-empty string with no leading/trailing whitespace, got: ${JSON.stringify(value)}`,
-    );
-  }
-  return value;
-}
-
-function requirePositiveIntegerField(value: unknown, field: string): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
-    throw new CorruptedOutcomeJobExecutionEventError(
-      `${field} must be a positive integer, got: ${JSON.stringify(value)}`,
-    );
-  }
-  return value;
-}
-
-function requireOptionalNonEmptyStringField(value: unknown, field: string): string | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  return requireNonEmptyStringField(value, field);
-}
-
 /**
- * Untrusted-replay-boundary validator, matching this repository's own
- * established convention (`validatePersistedPlanAdmissionEvent`,
- * `validatePersistedOutcomeJobRow`): every persisted line is revalidated
- * against the exact scope the caller asked for before it is ever handed to
- * the reducer. Structural/shape corruption is caught here
- * (`CorruptedOutcomeJobExecutionEventError`); logical corruption that is
- * shape-valid but semantically illegal (an out-of-sequence attempt, a
- * result before acceptance) is caught by `applyOutcomeJobExecutionEvent`
- * itself, which this store's `getState` always replays through - so
- * corrupted persisted logic fails exactly the same way a corrupted live
- * event stream would (Package Contract C).
+ * Rev145 F2: untrusted-replay-boundary validation is delegated entirely to
+ * the shared `validatePersistedOutcomeJobExecutionEventRecord` (same module
+ * `postgres-outcome-job-execution-store.ts` uses) - full canonical
+ * event-contract enforcement (type-scoped field rules, valid timestamp),
+ * exact five-field requested-scope correlation, and eventId-forgery
+ * detection all live in exactly one place, never duplicated/drifted per
+ * store. Its `InvalidOutcomeJobExecutionEventError` is rewrapped as this
+ * store's own `CorruptedOutcomeJobExecutionEventError` for API consistency.
+ * Logical corruption that is shape-valid but semantically illegal (an
+ * out-of-sequence attempt, a result before acceptance) is caught separately
+ * by `applyOutcomeJobExecutionEvent` itself, which this store's `getState`
+ * always replays through (Package Contract C).
  */
-function validatePersistedOutcomeJobExecutionEvent(
+function validatePersistedLine(
   raw: unknown,
   expected: {
     tenantId: TenantScope["tenantId"];
@@ -68,62 +45,14 @@ function validatePersistedOutcomeJobExecutionEvent(
     runId: string;
   },
 ): OutcomeJobExecutionEvent {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    throw new CorruptedOutcomeJobExecutionEventError("persisted event must be a JSON object, not an array or primitive");
+  try {
+    return validatePersistedOutcomeJobExecutionEventRecord(raw, expected);
+  } catch (cause) {
+    if (cause instanceof InvalidOutcomeJobExecutionEventError) {
+      throw new CorruptedOutcomeJobExecutionEventError(cause.message);
+    }
+    throw cause;
   }
-  const candidate = raw as Record<string, unknown>;
-
-  const eventId = requireNonEmptyStringField(candidate.eventId, "eventId");
-  const tenantId = requireNonEmptyStringField(candidate.tenantId, "tenantId");
-  const customerId = requireNonEmptyStringField(candidate.customerId, "customerId");
-  const projectId = requireNonEmptyStringField(candidate.projectId, "projectId");
-  const jobId = requireNonEmptyStringField(candidate.jobId, "jobId");
-  const runId = requireNonEmptyStringField(candidate.runId, "runId");
-  const correlationId = requireNonEmptyStringField(candidate.correlationId, "correlationId");
-  const attempt = requirePositiveIntegerField(candidate.attempt, "attempt");
-  const sequence = requirePositiveIntegerField(candidate.sequence, "sequence");
-  requireNonEmptyStringField(candidate.occurredAt, "occurredAt");
-
-  const scopeMismatch =
-    tenantId !== expected.tenantId ||
-    customerId !== expected.customerId ||
-    projectId !== expected.projectId ||
-    jobId !== expected.jobId ||
-    runId !== expected.runId;
-  if (scopeMismatch) {
-    throw new CorruptedOutcomeJobExecutionEventError(
-      `persisted event tenant/customer/project/job/run does not match the requested scope - cross-scope contamination`,
-    );
-  }
-
-  if (!isRecognizedOutcomeJobExecutionEventType(candidate.type)) {
-    throw new CorruptedOutcomeJobExecutionEventError(
-      `unrecognized persisted event type: ${JSON.stringify(candidate.type)}`,
-    );
-  }
-
-  const reason = requireOptionalNonEmptyStringField(candidate.reason, "reason");
-  const progressRef = requireOptionalNonEmptyStringField(candidate.progressRef, "progressRef");
-  const checkpointRef = requireOptionalNonEmptyStringField(candidate.checkpointRef, "checkpointRef");
-  const executorRef = requireOptionalNonEmptyStringField(candidate.executorRef, "executorRef");
-
-  return {
-    eventId,
-    tenantId: tenantId as TenantScope["tenantId"],
-    customerId: customerId as unknown as Customer["customerId"],
-    projectId: projectId as unknown as Project["projectId"],
-    jobId: jobId as unknown as OutcomeJob["jobId"],
-    runId,
-    correlationId,
-    attempt,
-    sequence,
-    type: candidate.type,
-    occurredAt: candidate.occurredAt as string,
-    ...(reason !== undefined ? { reason } : {}),
-    ...(progressRef !== undefined ? { progressRef } : {}),
-    ...(checkpointRef !== undefined ? { checkpointRef } : {}),
-    ...(executorRef !== undefined ? { executorRef } : {}),
-  };
 }
 
 /**
@@ -142,7 +71,15 @@ function executionRunKey(
 }
 
 export interface DurableOutcomeJobExecutionStore {
-  appendEvent(event: OutcomeJobExecutionEvent): void;
+  /**
+   * Rev145 F1: returns `true` only when THIS call durably created the event
+   * (first writer for this exact `eventId`); `false` when an identical event
+   * already existed. Callers that must ensure single-authority side effects
+   * (e.g. "invoke the worker for this attempt") gate that effect on this
+   * return value, not merely on "no prior state existed" from an earlier,
+   * possibly-stale read.
+   */
+  appendEvent(event: OutcomeJobExecutionEvent): boolean;
   getEvents(
     tenantId: TenantScope["tenantId"],
     customerId: Customer["customerId"],
@@ -189,7 +126,17 @@ export class FileDurableOutcomeJobExecutionStore implements DurableOutcomeJobExe
     return join(this.baseDir, `${safeKey}.jsonl`);
   }
 
-  appendEvent(event: OutcomeJobExecutionEvent): void {
+  appendEvent(event: OutcomeJobExecutionEvent): boolean {
+    const existingEvents = this.getEvents(
+      event.tenantId,
+      event.customerId,
+      event.projectId,
+      event.jobId,
+      event.runId,
+    );
+    if (existingEvents.some((existing) => existing.eventId === event.eventId)) {
+      return false;
+    }
     const filePath = this.filePathFor(event.tenantId, event.customerId, event.projectId, event.jobId, event.runId);
     const line = `${JSON.stringify(event)}\n`;
     if (existsSync(filePath)) {
@@ -198,6 +145,7 @@ export class FileDurableOutcomeJobExecutionStore implements DurableOutcomeJobExe
     } else {
       writeFileSync(filePath, line, "utf8");
     }
+    return true;
   }
 
   getEvents(
@@ -222,7 +170,7 @@ export class FileDurableOutcomeJobExecutionStore implements DurableOutcomeJobExe
         } catch (cause) {
           throw new CorruptedOutcomeJobExecutionEventError(`line is not valid JSON (${(cause as Error).message})`);
         }
-        return validatePersistedOutcomeJobExecutionEvent(parsed, { tenantId, customerId, projectId, jobId, runId });
+        return validatePersistedLine(parsed, { tenantId, customerId, projectId, jobId, runId });
       });
   }
 

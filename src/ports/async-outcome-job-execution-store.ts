@@ -15,7 +15,12 @@ import type { OutcomeJobExecutionRunState } from "../domain/outcome-job-executio
  * blocking the event loop.
  */
 export interface AsyncOutcomeJobExecutionStore {
-  appendEvent(event: OutcomeJobExecutionEvent): Promise<void>;
+  /**
+   * Rev145 F1: resolves `true` only when THIS call durably created the
+   * event (an atomic database-constraint claim), `false` when it already
+   * existed - see `PostgresOutcomeJobExecutionStore.appendEvent`.
+   */
+  appendEvent(event: OutcomeJobExecutionEvent): Promise<boolean>;
   getEvents(
     tenantId: TenantScope["tenantId"],
     customerId: Customer["customerId"],

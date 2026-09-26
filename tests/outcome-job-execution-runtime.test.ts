@@ -4,7 +4,7 @@ import { createTenantScope } from "../src/domain/tenant-scope.js";
 import { createCustomer } from "../src/domain/customer.js";
 import { createProject } from "../src/domain/project.js";
 import { createOutcomeJob, transitionOutcomeJob, type OutcomeJob } from "../src/domain/outcome-job.js";
-import { createAuthorityContext, type AuthorityContext } from "../src/domain/authority.js";
+import { createAuthorityContext, InsufficientAuthorityError, type AuthorityContext } from "../src/domain/authority.js";
 import type { WorkerInvoker } from "../src/domain/worker-invoker.js";
 import type { OutcomeJobExecutionEvent } from "../src/domain/outcome-job-execution-event.js";
 import { applyOutcomeJobExecutionEvent, type OutcomeJobExecutionRunState } from "../src/domain/outcome-job-execution-run-state.js";
@@ -25,12 +25,24 @@ import {
 
 class InMemoryExecutionEventStore implements ExecutionEventStore {
   private readonly byRun = new Map<string, OutcomeJobExecutionRunState>();
+  private readonly seenEventIds = new Set<string>();
 
-  appendEvent(event: OutcomeJobExecutionEvent): void {
+  // Synchronous, no internal await - matches the real stores' own atomicity
+  // discipline (a fully synchronous check-then-write cannot interleave with
+  // another call in JS's single-threaded run-to-completion model), so a
+  // Promise.all([store.appendEvent(e), store.appendEvent(e)]) test here
+  // genuinely exercises the same single-authority guarantee the real file
+  // and Postgres stores provide (Rev145 F1).
+  appendEvent(event: OutcomeJobExecutionEvent): boolean {
+    if (this.seenEventIds.has(event.eventId)) {
+      return false;
+    }
+    this.seenEventIds.add(event.eventId);
     const key = JSON.stringify([event.tenantId, event.customerId, event.projectId, event.jobId, event.runId]);
     const current = this.byRun.get(key);
     const next = applyOutcomeJobExecutionEvent(current, event);
     this.byRun.set(key, next);
+    return true;
   }
 
   getState(
@@ -309,4 +321,151 @@ test("D13: dispatch requires the caller's authority to belong to the same tenant
       ...baseDispatch, job, authority: foreignAuthority, runId: "run-d13", correlationId: "corr-d13", store, invoker: acceptingInvoker(),
     }),
   );
+});
+
+test("D14 (Rev145 F1): two concurrent dispatch calls for the same run only invoke the worker once - the loser is a durable no-op", async () => {
+  const job = freshJob("job-d14");
+  const store = new InMemoryExecutionEventStore();
+  let invokeCount = 0;
+  const invoker: WorkerInvoker = {
+    role: "CLAUDE_PRIMARY_ENGINEER",
+    invoke: async () => {
+      invokeCount += 1;
+      return { accepted: true };
+    },
+  };
+  const callOnce = () =>
+    dispatchOutcomeJobExecutionRun({
+      ...baseDispatch, job, authority, runId: "run-d14", correlationId: "corr-d14", store, invoker,
+    });
+  const [resultA, resultB] = await Promise.all([callOnce(), callOnce()]);
+  assert.equal(invokeCount, 1, "exactly one concurrent dispatch caller must actually invoke the worker");
+  assert.deepEqual([resultA.invoked, resultB.invoked].sort(), [false, true]);
+  assert.equal(resultA.state.currentAttempt, 1);
+  assert.equal(resultB.state.currentAttempt, 1);
+});
+
+test("D15 (Rev145 F1): two concurrent retry calls against the same failed attempt only invoke the worker once", async () => {
+  const job = freshJob("job-d15");
+  const store = new InMemoryExecutionEventStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d15", correlationId: "corr-d15", store, invoker: rejectingInvoker(),
+  });
+  assert.equal(dispatched.state.status, "FAILED");
+
+  let invokeCount = 0;
+  const invoker: WorkerInvoker = {
+    role: "CLAUDE_PRIMARY_ENGINEER",
+    invoke: async () => {
+      invokeCount += 1;
+      return { accepted: true };
+    },
+  };
+  const callOnce = () =>
+    retryOutcomeJobExecutionAttempt({
+      tenantScope, customer, project, job, authority, currentState: dispatched.state,
+      now: "2026-09-26T00:01:00.000Z", executorKind: "INJECTED",
+      expectedFingerprint: "fp-1", currentFingerprint: "fp-1",
+      store, invoker, taskId: "task-1", branch: "b", checkpointSha: "sha-2",
+    });
+  const [resultA, resultB] = await Promise.all([callOnce(), callOnce()]);
+  assert.equal(invokeCount, 1, "exactly one concurrent retry caller must actually invoke the worker");
+  assert.deepEqual([resultA.invoked, resultB.invoked].sort(), [false, true]);
+  assert.equal(resultA.state.currentAttempt, 2);
+  assert.equal(resultB.state.currentAttempt, 2);
+});
+
+test("D16 (Rev145 F3): a same-tenant authority without EXECUTE permission is rejected for both dispatch and retry", async () => {
+  const job = freshJob("job-d16");
+  const store = new InMemoryExecutionEventStore();
+  const readOnlyAuthority = createAuthorityContext({ tenantScope, permissions: ["READ"], canPerformProtectedActions: false });
+
+  await assert.rejects(
+    () => dispatchOutcomeJobExecutionRun({
+      ...baseDispatch, job, authority: readOnlyAuthority, runId: "run-d16", correlationId: "corr-d16", store, invoker: acceptingInvoker(),
+    }),
+    InsufficientAuthorityError,
+  );
+
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d16b", correlationId: "corr-d16b", store, invoker: rejectingInvoker(),
+  });
+  await assert.rejects(
+    () => retryOutcomeJobExecutionAttempt({
+      tenantScope, customer, project, job, authority: readOnlyAuthority, currentState: dispatched.state,
+      now: "2026-09-26T00:01:00.000Z", executorKind: "INJECTED",
+      expectedFingerprint: "fp-1", currentFingerprint: "fp-1",
+      store, invoker: acceptingInvoker(), taskId: "task-1", branch: "b", checkpointSha: "sha-2",
+    }),
+    InsufficientAuthorityError,
+  );
+});
+
+test("D17 (Rev145 F4): a currentState forged to carry a foreign job's identity is rejected by retry/progress/result/cancel/checkpoint - cross-job substitution fails closed", async () => {
+  const jobA = freshJob("job-d17-a");
+  const jobB = freshJob("job-d17-b");
+  const store = new InMemoryExecutionEventStore();
+  const dispatchedA = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job: jobA, authority, runId: "run-d17-a", correlationId: "corr-d17-a", store, invoker: acceptingInvoker(),
+  });
+  // A structurally valid OutcomeJobExecutionRunState, but forged to claim
+  // jobB's identity while every operation below is asked to act on jobA -
+  // exactly the caller-constructible substitution Rev145 F4 flags, since
+  // this interface is a plain exported type, not a branded/opaque value.
+  const forgedState = { ...dispatchedA.state, jobId: jobB.jobId };
+
+  await assert.rejects(
+    () => recordExecutionProgress({ tenantScope, customer, project, job: jobA, currentState: forgedState, now: "2026-09-26T00:01:00.000Z", store }),
+    InvalidOutcomeJobExecutionRuntimeError,
+  );
+  await assert.rejects(
+    () => recordExecutionResult({ tenantScope, customer, project, job: jobA, currentState: forgedState, now: "2026-09-26T00:01:00.000Z", type: "SUCCEEDED", store }),
+    InvalidOutcomeJobExecutionRuntimeError,
+  );
+  await assert.rejects(
+    () => requestExecutionCancellation({
+      tenantScope, customer, project, job: jobA, currentState: forgedState, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "x", store,
+    }),
+    InvalidOutcomeJobExecutionRuntimeError,
+  );
+  await assert.rejects(
+    () => requestExecutionCheckpoint({
+      tenantScope, customer, project, job: jobA, currentState: forgedState, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: false, supportsCheckpoint: true }, store,
+    }),
+    InvalidOutcomeJobExecutionRuntimeError,
+  );
+  await assert.rejects(
+    () => retryOutcomeJobExecutionAttempt({
+      tenantScope, customer, project, job: jobA, authority, currentState: forgedState,
+      now: "2026-09-26T00:01:00.000Z", executorKind: "INJECTED",
+      expectedFingerprint: "fp-1", currentFingerprint: "fp-1",
+      store, invoker: acceptingInvoker(), taskId: "task-1", branch: "b", checkpointSha: "sha-2",
+    }),
+    InvalidOutcomeJobExecutionRuntimeError,
+  );
+});
+
+test("D18 (Rev145 F4): retry/progress/result/cancel/checkpoint consume freshly re-fetched durable state, not a stale caller-supplied copy", async () => {
+  const job = freshJob("job-d18");
+  const store = new InMemoryExecutionEventStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d18", correlationId: "corr-d18", store, invoker: acceptingInvoker(),
+  });
+  const staleState = dispatched.state;
+  // Advance the real durable state past what the caller's stale copy knows
+  // about (a second PROGRESS event applied only to the store, not to the
+  // caller's own in-memory `staleState` reference).
+  await recordExecutionProgress({ tenantScope, customer, project, job, currentState: staleState, now: "2026-09-26T00:01:00.000Z", store, progressRef: "p1" });
+  const afterSecondProgress = await recordExecutionProgress({
+    tenantScope, customer, project, job, currentState: staleState, now: "2026-09-26T00:02:00.000Z", store, progressRef: "p2",
+  });
+  // Both calls used the SAME stale `staleState` object, yet the durable
+  // sequence still advanced correctly (2, not a collision on sequence 2
+  // computed twice from the same stale lastSequence) - proof the function
+  // consumed freshly re-fetched state internally rather than the caller's
+  // stale copy.
+  assert.equal(afterSecondProgress.attempts.get(1)?.lastProgressRef, "p2");
+  assert.equal(afterSecondProgress.attempts.get(1)?.lastSequence, 3);
 });
