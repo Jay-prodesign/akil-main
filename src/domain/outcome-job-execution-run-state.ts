@@ -46,6 +46,22 @@ export const ATTEMPT_TERMINAL_STATUSES: ReadonlySet<OutcomeJobExecutionAttemptSt
   "UNSUPPORTED",
 ]);
 
+/**
+ * Rev158 F17: a durably-reconstructible "this attempt has an outstanding
+ * control request whose outcome is not yet durably confirmed" marker - set
+ * when a `CANCEL_REQUESTED`/`CHECKPOINT_REQUESTED` event applies, cleared
+ * only when that same kind's resolving event (`CANCELLED`/`CHECKPOINT`, or
+ * any terminal outcome) applies. Because this is derived purely from the
+ * reducer folding the durable event log, restart/replay always reconstructs
+ * the exact same pending disposition - there is no separate in-memory
+ * tracking that could diverge from durable truth (mirrors this module's own
+ * restart-safety discipline for run state as a whole).
+ */
+export interface PendingControlRequest {
+  readonly kind: "CANCEL_REQUESTED" | "CHECKPOINT_REQUESTED";
+  readonly controlRequestId: string;
+}
+
 export interface OutcomeJobExecutionAttemptState {
   readonly attempt: number;
   readonly status: OutcomeJobExecutionAttemptStatus;
@@ -56,6 +72,7 @@ export interface OutcomeJobExecutionAttemptState {
   readonly lastCheckpointRef?: string;
   readonly reason?: string;
   readonly executorRef?: string;
+  readonly pendingControlRequest?: PendingControlRequest;
 }
 
 /**
@@ -224,11 +241,21 @@ export function applyOutcomeJobExecutionEvent(
     return state;
   }
 
+  // Rev158 F17: `attemptState` without its own `pendingControlRequest` key -
+  // used as the spread base whenever a branch below must CLEAR that field,
+  // since `exactOptionalPropertyTypes` forbids assigning it the literal
+  // value `undefined`; omitting the key entirely is the correct way to
+  // clear an optional field under that setting.
+  const { pendingControlRequest: existingPendingControlRequest, ...attemptStateWithoutPending } = attemptState;
+
   const terminal = terminalStatusForEventType(event.type);
   let updatedAttempt: OutcomeJobExecutionAttemptState;
   if (terminal !== undefined) {
     updatedAttempt = {
-      ...attemptState,
+      // Rev158 F17: any terminal outcome moots an outstanding pending
+      // control request entirely - nothing further can happen to this
+      // attempt, so there is nothing left to reconcile.
+      ...attemptStateWithoutPending,
       status: terminal,
       lastSequence: event.sequence,
       updatedAt: event.occurredAt,
@@ -245,7 +272,10 @@ export function applyOutcomeJobExecutionEvent(
     };
   } else if (event.type === "CHECKPOINT") {
     updatedAttempt = {
-      ...attemptState,
+      // Rev158 F17: a successful CHECKPOINT resolves a pending checkpoint
+      // request - but never an unrelated pending cancel request, which
+      // stays outstanding.
+      ...(existingPendingControlRequest?.kind === "CHECKPOINT_REQUESTED" ? attemptStateWithoutPending : attemptState),
       lastSequence: event.sequence,
       updatedAt: event.occurredAt,
       ...(event.checkpointRef !== undefined ? { lastCheckpointRef: event.checkpointRef } : {}),
@@ -256,12 +286,16 @@ export function applyOutcomeJobExecutionEvent(
     // changes attempt status (a management REQUEST is not execution terminal
     // truth, per Rev149 F10's own separation), just advances lastSequence so
     // a later legitimate retry after an unacknowledged attempt can claim a
-    // fresh coordinate.
+    // fresh coordinate. Rev158 F17: it also durably records itself as the
+    // attempt's own outstanding pending control request - restart/replay
+    // reconstructs this disposition purely from folding the log, with no
+    // separate tracking that could diverge from it.
     updatedAttempt = {
       ...attemptState,
       lastSequence: event.sequence,
       updatedAt: event.occurredAt,
       ...(event.executorRef !== undefined ? { executorRef: event.executorRef } : {}),
+      pendingControlRequest: { kind: event.type, controlRequestId: event.eventId },
     };
   } else {
     throw new InvalidOutcomeJobExecutionTransitionError(`unhandled event type: ${event.type}`);

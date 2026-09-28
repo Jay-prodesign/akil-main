@@ -24,6 +24,7 @@ import {
   InvalidOutcomeJobExecutionRuntimeError,
   StaleActivationFingerprintError,
   UnauthorizedUnknownRetryError,
+  PendingControlOperationReconciliationRequiredError,
   type ExecutionEventStore,
   type ControlOperationInvoker,
 } from "../src/application/outcome-job-execution-runtime.js";
@@ -91,10 +92,12 @@ function rejectingInvoker(): WorkerInvoker {
 function countingAcknowledgingControlInvoker(checkpointRef = "checkpoint-ref-1"): ControlOperationInvoker & {
   cancelCalls: number;
   checkpointCalls: number;
+  reconcileCalls: number;
 } {
   return {
     cancelCalls: 0,
     checkpointCalls: 0,
+    reconcileCalls: 0,
     async requestCancel() {
       this.cancelCalls += 1;
       return { acknowledged: true };
@@ -102,6 +105,10 @@ function countingAcknowledgingControlInvoker(checkpointRef = "checkpoint-ref-1")
     async requestCheckpoint() {
       this.checkpointCalls += 1;
       return { acknowledged: true, checkpointRef };
+    },
+    async reconcileControlRequest(input) {
+      this.reconcileCalls += 1;
+      return input.kind === "CHECKPOINT" ? { acknowledged: true, checkpointRef } : { acknowledged: true };
     },
   };
 }
@@ -117,12 +124,18 @@ function unacknowledgingControlInvoker(): ControlOperationInvoker & { cancelCall
       this.checkpointCalls += 1;
       return { acknowledged: false, reason: "not confirmed" };
     },
+    async reconcileControlRequest() {
+      return { acknowledged: false, reason: "not confirmed" };
+    },
   };
 }
 function neverCallControlInvoker(): ControlOperationInvoker {
   return {
     requestCancel: async () => {
       throw new Error("requestCancel must never be invoked for this scenario");
+    },
+    reconcileControlRequest: async () => {
+      throw new Error("reconcileControlRequest must never be invoked for this scenario");
     },
     requestCheckpoint: async () => {
       throw new Error("requestCheckpoint must never be invoked for this scenario");
@@ -399,6 +412,9 @@ test("D24 (Rev149 F9, mandatory witness 2): supportsCheckpoint=true with an ackn
   const invoker: ControlOperationInvoker = {
     requestCancel: async () => ({ acknowledged: true }),
     requestCheckpoint: async () => ({ acknowledged: true }), // acknowledged, but NO checkpointRef - an adversarial/buggy invoker
+    reconcileControlRequest: async () => {
+      throw new Error("reconcileControlRequest must never be invoked for this scenario");
+    },
   };
   await assert.rejects(
     () => requestExecutionCheckpoint({
@@ -551,6 +567,9 @@ test("D31 (Rev158 F13, mandatory witness): a malformed/non-boolean-true acknowle
   const truthyStringInvoker: ControlOperationInvoker = {
     requestCancel: async () => ({ acknowledged: "yes" as unknown as boolean }),
     requestCheckpoint: async () => ({ acknowledged: 1 as unknown as boolean, checkpointRef: "ref" }),
+    reconcileControlRequest: async () => {
+      throw new Error("reconcileControlRequest must never be invoked for this scenario");
+    },
   };
   const afterCancel = await requestExecutionCancellation({
     tenantScope, customer, project, job, authority, currentState: dispatched.state, now: "2026-09-26T00:01:00.000Z",
@@ -565,6 +584,9 @@ test("D31 (Rev158 F13, mandatory witness): a malformed/non-boolean-true acknowle
   const nonObjectInvoker: ControlOperationInvoker = {
     requestCancel: async () => undefined as unknown as { acknowledged: boolean },
     requestCheckpoint: async () => undefined as unknown as { acknowledged: boolean },
+    reconcileControlRequest: async () => {
+      throw new Error("reconcileControlRequest must never be invoked for this scenario");
+    },
   };
   const afterCheckpoint = await requestExecutionCheckpoint({
     tenantScope, customer, project, job: job2, authority, currentState: dispatched2.state, now: "2026-09-26T00:01:00.000Z",
@@ -612,6 +634,170 @@ test("D32 (Rev158 F14, mandatory witness): invalid cancel reason/timestamp and i
     }),
     InvalidOutcomeJobExecutionEventError,
     "an invalid checkpoint occurredAt must fail before the control invoker is ever called",
+  );
+});
+
+test("D33 (Rev158 F16, mandatory witness): concurrent PROGRESS and a terminal result racing for the same sequence slot cannot both durably occupy it", async () => {
+  const job = freshJob("job-d33");
+  const store = new InMemoryExecutionEventStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d33", correlationId: "corr-d33", store, invoker: acceptingInvoker(),
+  });
+  const preRaceSequence = dispatched.state.attempts.get(1)?.lastSequence ?? 0;
+  await Promise.all([
+    recordExecutionProgress({
+      tenantScope, customer, project, job, currentState: dispatched.state, now: "2026-09-26T00:01:00.000Z", store, progressRef: "concurrent-progress",
+    }),
+    recordExecutionResult({
+      tenantScope, customer, project, job, currentState: dispatched.state, now: "2026-09-26T00:01:00.000Z", type: "SUCCEEDED", store,
+    }),
+  ]);
+  const finalAttempt = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d33")?.attempts.get(1);
+  assert.equal(finalAttempt?.lastSequence, preRaceSequence + 1, "exactly one of the two racing events may durably occupy the next sequence slot");
+  const progressWon = finalAttempt?.status === "RUNNING" && finalAttempt?.lastProgressRef === "concurrent-progress";
+  const resultWon = finalAttempt?.status === "SUCCEEDED" && finalAttempt?.lastProgressRef === undefined;
+  assert.equal(progressWon || resultWon, true, "final state must reflect exactly one winner, never a corrupted mix of both");
+});
+
+test("D34 (Rev158 F16, mandatory witness): a concurrent cancel and checkpoint request racing for the same sequence slot invoke at most one control effect total", async () => {
+  const job = freshJob("job-d34");
+  const store = new InMemoryExecutionEventStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d34", correlationId: "corr-d34", store, invoker: acceptingInvoker(),
+  });
+  const invoker = countingAcknowledgingControlInvoker("d34-checkpoint-ref");
+  await Promise.all([
+    requestExecutionCancellation({
+      tenantScope, customer, project, job, authority, currentState: dispatched.state, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: true, supportsCheckpoint: true }, reason: "x", store, controlInvoker: invoker,
+    }),
+    requestExecutionCheckpoint({
+      tenantScope, customer, project, job, authority, currentState: dispatched.state, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: true, supportsCheckpoint: true }, store, controlInvoker: invoker,
+    }),
+  ]);
+  assert.equal(invoker.cancelCalls + invoker.checkpointCalls, 1, "only one control effect total may be invoked when cancel and checkpoint race for the same sequence slot");
+});
+
+test("D35 (Rev158 F17, mandatory witness): a pending cancel request left over from a crash before the control effect was ever invoked is safely recoverable via reconciliation", async () => {
+  const job = freshJob("job-d35");
+  const store = new InMemoryExecutionEventStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d35", correlationId: "corr-d35", store, invoker: acceptingInvoker(),
+  });
+  // Simulate a crash: a CANCEL_REQUESTED was durably claimed, but the
+  // process died before ever calling the control invoker.
+  const staleRequest = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-d35", correlationId: "corr-d35",
+    attempt: 1, sequence: 2, type: "CANCEL_REQUESTED", occurredAt: "2026-09-26T00:00:30.000Z", reason: "first attempt",
+  });
+  store.appendEvent(staleRequest);
+  const stateAfterCrash = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d35");
+  assert.equal(stateAfterCrash?.attempts.get(1)?.pendingControlRequest?.controlRequestId, staleRequest.eventId);
+
+  let reconcileCalledWith: unknown;
+  const invoker: ControlOperationInvoker & { cancelCalls: number } = {
+    cancelCalls: 0,
+    async requestCancel() { this.cancelCalls += 1; return { acknowledged: true }; },
+    async requestCheckpoint() { throw new Error("requestCheckpoint must never be invoked for this scenario"); },
+    async reconcileControlRequest(input) {
+      reconcileCalledWith = input.controlRequestId;
+      return { acknowledged: false }; // definitively: the prior request never took effect
+    },
+  };
+  const result = await requestExecutionCancellation({
+    tenantScope, customer, project, job, authority, currentState: stateAfterCrash!, now: "2026-09-26T00:01:00.000Z",
+    capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "retry", store, controlInvoker: invoker,
+  });
+  assert.equal(reconcileCalledWith, staleRequest.eventId, "reconciliation must target the exact prior pending request");
+  assert.equal(invoker.cancelCalls, 1, "a definitively-not-happened prior request must allow exactly one fresh control invocation");
+  assert.equal(result.attempts.get(1)?.status, "CANCELLED");
+});
+
+test("D36 (Rev158 F17, mandatory witness): a pending cancel request whose control effect may already have happened is completed via reconciliation without ever re-invoking the control operation", async () => {
+  const job = freshJob("job-d36");
+  const store = new InMemoryExecutionEventStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d36", correlationId: "corr-d36", store, invoker: acceptingInvoker(),
+  });
+  const staleRequest = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-d36", correlationId: "corr-d36",
+    attempt: 1, sequence: 2, type: "CANCEL_REQUESTED", occurredAt: "2026-09-26T00:00:30.000Z", reason: "first attempt",
+  });
+  store.appendEvent(staleRequest);
+  const stateAfterCrash = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d36");
+
+  const invoker: ControlOperationInvoker & { cancelCalls: number } = {
+    cancelCalls: 0,
+    async requestCancel() {
+      this.cancelCalls += 1;
+      throw new Error("requestCancel must never be invoked - the prior effect may already have happened");
+    },
+    async requestCheckpoint() { throw new Error("requestCheckpoint must never be invoked for this scenario"); },
+    async reconcileControlRequest() {
+      return { acknowledged: true }; // definitively: the prior control effect DID already happen
+    },
+  };
+  const result = await requestExecutionCancellation({
+    tenantScope, customer, project, job, authority, currentState: stateAfterCrash!, now: "2026-09-26T00:01:00.000Z",
+    capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "retry", store, controlInvoker: invoker,
+  });
+  assert.equal(invoker.cancelCalls, 0, "a confirmed-already-happened prior request must never re-invoke the control operation");
+  assert.equal(result.attempts.get(1)?.status, "CANCELLED");
+});
+
+test("D37 (Rev158 F17, mandatory witness): a pending control request that cannot be reconciled fails closed rather than fabricating a result or re-invoking", async () => {
+  const job = freshJob("job-d37");
+  const store = new InMemoryExecutionEventStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d37", correlationId: "corr-d37", store, invoker: acceptingInvoker(),
+  });
+  const staleRequest = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-d37", correlationId: "corr-d37",
+    attempt: 1, sequence: 2, type: "CHECKPOINT_REQUESTED", occurredAt: "2026-09-26T00:00:30.000Z",
+  });
+  store.appendEvent(staleRequest);
+  const stateAfterCrash = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d37");
+  const invoker: ControlOperationInvoker = {
+    requestCancel: async () => { throw new Error("requestCancel must never be invoked for this scenario"); },
+    requestCheckpoint: async () => { throw new Error("requestCheckpoint must never be invoked for this scenario"); },
+    reconcileControlRequest: async () => undefined,
+  };
+  await assert.rejects(
+    () => requestExecutionCheckpoint({
+      tenantScope, customer, project, job, authority, currentState: stateAfterCrash!, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: false, supportsCheckpoint: true }, store, controlInvoker: invoker,
+    }),
+    PendingControlOperationReconciliationRequiredError,
+  );
+  const finalState = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d37");
+  assert.equal(finalState?.attempts.get(1)?.lastCheckpointRef, undefined, "no CHECKPOINT may have been durably recorded when reconciliation cannot determine the prior outcome");
+});
+
+test("D38 (Rev158 F17, mandatory witness): a malformed (non-boolean acknowledged) reconciliation result also fails closed, never treated as a determinate false", async () => {
+  const job = freshJob("job-d38");
+  const store = new InMemoryExecutionEventStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d38", correlationId: "corr-d38", store, invoker: acceptingInvoker(),
+  });
+  const staleRequest = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-d38", correlationId: "corr-d38",
+    attempt: 1, sequence: 2, type: "CANCEL_REQUESTED", occurredAt: "2026-09-26T00:00:30.000Z", reason: "first",
+  });
+  store.appendEvent(staleRequest);
+  const stateAfterCrash = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d38");
+  const invoker: ControlOperationInvoker = {
+    requestCancel: async () => { throw new Error("requestCancel must never be invoked for this scenario"); },
+    requestCheckpoint: async () => { throw new Error("requestCheckpoint must never be invoked for this scenario"); },
+    reconcileControlRequest: async () => ({ acknowledged: "yes" as unknown as boolean }),
+  };
+  await assert.rejects(
+    () => requestExecutionCancellation({
+      tenantScope, customer, project, job, authority, currentState: stateAfterCrash!, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "retry", store, controlInvoker: invoker,
+    }),
+    PendingControlOperationReconciliationRequiredError,
+    "a malformed (non-boolean) acknowledged field must fail closed, never be treated as a determinate 'did not happen'",
   );
 });
 

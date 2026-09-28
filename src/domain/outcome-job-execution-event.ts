@@ -102,16 +102,28 @@ export function isRecognizedOutcomeJobExecutionEventType(value: unknown): value 
  * caller-supplied string. It is derived deterministically from the exact
  * identity tuple that must uniquely address one event slot -
  * (tenantId, customerId, projectId, jobId, runId, correlationId, attempt,
- * sequence, type) - using `JSON.stringify` of the tuple as an array, which
- * is injective (JSON string escaping means two distinct tuples can never
- * serialize to the same string).
+ * sequence, slotTag) - using `JSON.stringify` of the tuple as an array,
+ * which is injective (JSON string escaping means two distinct tuples can
+ * never serialize to the same string).
  *
- * `type` is included because `ACCEPTED` (run-level) and an attempt's own
+ * Rev158 F16: `slotTag` is NOT the raw `type` string - it is `"ACCEPTED"`
+ * for an `ACCEPTED` event and one single shared constant for every OTHER
+ * type. The pre-Rev158 formula included the literal `type`, which - beyond
+ * the one deliberate exception below - accidentally gave every distinct
+ * event type its own independent claim at a shared (attempt, sequence)
+ * coordinate: two different non-ACCEPTED types racing for the same next
+ * sequence number (e.g. a concurrent `CANCEL_REQUESTED` and
+ * `CHECKPOINT_REQUESTED`, or `PROGRESS` racing a terminal result) could
+ * BOTH durably win their atomic `appendEvent` claim, since their eventIds
+ * differed even though they targeted the same slot. Folding every type
+ * other than `ACCEPTED` onto one shared tag restores true
+ * one-event-per-(attempt,sequence) exclusivity everywhere except the one
+ * deliberate exception: `ACCEPTED` (run-level) and an attempt's own first
  * `ATTEMPT_STARTED` deliberately share the same (attempt: 1, sequence: 1)
- * coordinate by convention - without `type` in the tuple those two
- * structurally distinct events would collide onto one eventId and the
- * second would be silently deduped away as a false "duplicate" of the
- * first.
+ * coordinate by convention, so `ACCEPTED` alone keeps its own distinct,
+ * always-addressable tag - without it, those two structurally distinct
+ * events would collide onto one eventId and the second would be silently
+ * deduped away as a false "duplicate" of the first.
  *
  * Rev146 F5: `correlationId` is likewise included. Package semantics bind
  * a run's identity to tenantId+customerId+projectId+jobId+runId+
@@ -121,14 +133,17 @@ export function isRecognizedOutcomeJobExecutionEventType(value: unknown): value 
  * DIFFERENT correlationIds would derive the identical eventId, letting the
  * store's own eventId-based dedupe (Rev145 F1's atomic claim) silently
  * swallow the mismatch before the reducer's identity check ever runs.
- * Including it here closes that gap structurally, the same way including
- * `type` closed the ACCEPTED/ATTEMPT_STARTED collision.
+ * Including it here closes that gap structurally, the same way the slot
+ * tag closes the cross-type slot-exclusivity gap.
  *
  * This makes retrying "record this event" structurally idempotent: the
  * same logical event always derives the same eventId, with no caller-side
  * idempotency-key bookkeeping required (Minimum Adversarial Evidence #1,
  * #3, #9).
  */
+const ACCEPTED_EVENT_SLOT_TAG = "ACCEPTED";
+const SHARED_EVENT_SLOT_TAG = "__SLOT__";
+
 export function deriveOutcomeJobExecutionEventId(input: {
   tenantId: TenantScope["tenantId"];
   customerId: Customer["customerId"];
@@ -149,7 +164,7 @@ export function deriveOutcomeJobExecutionEventId(input: {
     input.correlationId,
     input.attempt,
     input.sequence,
-    input.type,
+    input.type === "ACCEPTED" ? ACCEPTED_EVENT_SLOT_TAG : SHARED_EVENT_SLOT_TAG,
   ]);
 }
 

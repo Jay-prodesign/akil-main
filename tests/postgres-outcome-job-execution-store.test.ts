@@ -30,14 +30,47 @@ interface RawRow {
 }
 
 /**
+ * Rev158 F15: the exact type list `migrations/0002_outcome_job_execution_events.sql`
+ * currently admits via its `outcome_job_execution_events_type_recognized`
+ * CHECK constraint - kept as a literal mirror of that migration's own SQL
+ * text (not imported from the TS domain set) so a drift between the two
+ * would show up as a real, independently-verified test failure, never
+ * silently pass because both sides happened to import the same source.
+ */
+const CURRENT_MIGRATION_RECOGNIZED_TYPES: ReadonlySet<string> = new Set([
+  "ACCEPTED", "ATTEMPT_STARTED", "PROGRESS", "CHECKPOINT",
+  "CANCEL_REQUESTED", "CHECKPOINT_REQUESTED",
+  "SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT", "STALLED",
+  "DEGRADED", "BLOCKED", "UNKNOWN", "UNSUPPORTED",
+]);
+
+/**
+ * Rev158 F15: the OLD (pre-Rev158) migration type list, before
+ * CANCEL_REQUESTED/CHECKPOINT_REQUESTED were added - used only to prove
+ * `P9` would genuinely have failed against the schema as it stood before
+ * this correction, not merely against a hypothetical.
+ */
+const PRE_REV158_MIGRATION_RECOGNIZED_TYPES: ReadonlySet<string> = new Set([
+  "ACCEPTED", "ATTEMPT_STARTED", "PROGRESS", "CHECKPOINT",
+  "SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT", "STALLED",
+  "DEGRADED", "BLOCKED", "UNKNOWN", "UNSUPPORTED",
+]);
+
+/**
  * In-memory `SqlClient` stand-in mirroring `postgres-outcome-job-store.test.ts`'s
  * own `FakeSqlClient` discipline - no live database anywhere in this file.
  * `ON CONFLICT (tenant_id, event_id) DO NOTHING` is modeled directly: a
  * duplicate event_id silently inserts nothing, exactly like a real
- * unique-constraint conflict.
+ * unique-constraint conflict. Rev158 F15: this fake now also enforces the
+ * real migration's `type_recognized` CHECK constraint (configurable via
+ * `recognizedTypes`, defaulting to the current migration's own list) rather
+ * than blindly accepting any type string - a genuine adapter-level witness,
+ * not only the in-memory reducer/store's own TS-level type checking.
  */
 class FakeSqlClient implements SqlClient {
   readonly rows: RawRow[] = [];
+
+  constructor(private readonly recognizedTypes: ReadonlySet<string> = CURRENT_MIGRATION_RECOGNIZED_TYPES) {}
 
   async query<Row>(text: string, params: ReadonlyArray<unknown>): Promise<{ rows: ReadonlyArray<Row> }> {
     if (text.includes("INSERT INTO outcome_job_execution_events")) {
@@ -45,6 +78,11 @@ class FakeSqlClient implements SqlClient {
         tenantId, customerId, projectId, jobId, runId, correlationId, attempt, sequence,
         eventId, type, occurredAt, reason, progressRef, checkpointRef, executorRef,
       ] = params as [string, string, string, string, string, string, number, number, string, string, string, string | null, string | null, string | null, string | null];
+      if (!this.recognizedTypes.has(type)) {
+        throw new Error(
+          `FakeSqlClient: CHECK constraint "outcome_job_execution_events_type_recognized" violated for type "${type}"`,
+        );
+      }
       const conflict = this.rows.some((row) => row.tenant_id === tenantId && row.event_id === eventId);
       if (conflict) {
         // Rev146 F7: `ON CONFLICT ... DO NOTHING RETURNING event_id` returns
@@ -228,6 +266,49 @@ test("P8 (Rev147 F8, adversarial): ACCEPTED always replays before ATTEMPT_STARTE
   const state = await store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-pg-8");
   assert.equal(state?.status, "RUNNING");
   assert.equal(state?.currentAttempt, 1);
+});
+
+test("P9 (Rev158 F15, adversarial): CANCEL_REQUESTED/CHECKPOINT_REQUESTED are admitted by the current migration's type CHECK constraint, would have been rejected under the pre-Rev158 constraint, and an unrecognized type still fails closed under either", async () => {
+  const cancelRequested = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-pg-9", correlationId: "corr-pg-9",
+    attempt: 1, sequence: 2, type: "CANCEL_REQUESTED", occurredAt: "2026-09-26T00:00:01.000Z", reason: "user requested",
+  });
+  const checkpointRequested = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-pg-9b", correlationId: "corr-pg-9b",
+    attempt: 1, sequence: 2, type: "CHECKPOINT_REQUESTED", occurredAt: "2026-09-26T00:00:01.000Z",
+  });
+
+  // The current (fixed) migration's own CHECK constraint list admits both
+  // new request-marker types.
+  const currentStore = new PostgresOutcomeJobExecutionStore(new FakeSqlClient(CURRENT_MIGRATION_RECOGNIZED_TYPES));
+  await currentStore.appendEvent(cancelRequested);
+  await currentStore.appendEvent(checkpointRequested);
+
+  // A real adapter/schema witness, not only the in-memory fake: against the
+  // OLD (pre-Rev158) migration's CHECK constraint list, appending either new
+  // type must genuinely fail - proving the schema fix is real and load-
+  // bearing, not merely assumed.
+  const preRev158Store = new PostgresOutcomeJobExecutionStore(new FakeSqlClient(PRE_REV158_MIGRATION_RECOGNIZED_TYPES));
+  await assert.rejects(
+    () => preRev158Store.appendEvent(cancelRequested),
+    /CHECK constraint/,
+    "CANCEL_REQUESTED must be rejected by the pre-Rev158 migration's own CHECK constraint list",
+  );
+  await assert.rejects(
+    () => preRev158Store.appendEvent(checkpointRequested),
+    /CHECK constraint/,
+    "CHECKPOINT_REQUESTED must be rejected by the pre-Rev158 migration's own CHECK constraint list",
+  );
+
+  // An unrecognized type must still fail closed under the CURRENT (fixed)
+  // constraint list too - the fix admits the two new real types, it does not
+  // loosen the constraint into accepting anything.
+  const bogusEvent = { ...cancelRequested, type: "BOGUS_TYPE" as never };
+  await assert.rejects(
+    () => currentStore.appendEvent(bogusEvent),
+    /CHECK constraint/,
+    "an unrecognized type must still fail closed under the current migration's constraint",
+  );
 });
 
 test("P6 (Rev145 F2, adversarial): a row whose event_id column does not match the canonical derivation from its own tuple fails closed", async () => {

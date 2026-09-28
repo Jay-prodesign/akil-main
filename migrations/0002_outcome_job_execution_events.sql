@@ -9,13 +9,24 @@
 -- genuinely concurrent writers, since Postgres itself enforces it
 -- (Persistence Contract: "must rely on database uniqueness/ordering
 -- constraints rather than read-then-write races for duplicate
--- protection"). event_id (derived from the full identity tuple INCLUDING
--- type - see deriveOutcomeJobExecutionEventId) is the uniqueness key
--- rather than the bare (attempt, sequence) pair, because the run-level
--- ACCEPTED event and its first attempt's ATTEMPT_STARTED event
--- deliberately share the same (attempt: 1, sequence: 1) coordinate by
--- convention - a bare (attempt, sequence) constraint would incorrectly
--- collide those two structurally distinct events into one row.
+-- protection").
+--
+-- Rev158 F16: event_id (see deriveOutcomeJobExecutionEventId) is derived
+-- from the full identity tuple, but its final slot-tag component is NOT
+-- the raw `type` string - it is a single shared tag for every type except
+-- ACCEPTED. This single UNIQUE (tenant_id, event_id) constraint is
+-- therefore ALSO the cross-type slot-exclusivity guarantee: two DIFFERENT
+-- non-ACCEPTED event types racing for the same (attempt, sequence)
+-- coordinate (e.g. a concurrent CANCEL_REQUESTED and CHECKPOINT_REQUESTED,
+-- or PROGRESS racing a terminal result) derive the identical event_id and
+-- so cannot both durably win an INSERT - no second constraint is needed.
+-- event_id is the uniqueness key rather than the bare (attempt, sequence)
+-- pair only because of the one deliberate exception: the run-level
+-- ACCEPTED event and its first attempt's ATTEMPT_STARTED event share the
+-- same (attempt: 1, sequence: 1) coordinate by convention - a bare
+-- (attempt, sequence) constraint would incorrectly collide those two
+-- structurally distinct events into one row, which is why ACCEPTED alone
+-- keeps its own distinct slot-tag in event_id's derivation.
 --
 -- This migration is additive scaffolding only: it is not applied against
 -- any live database by this checkpoint (no DATABASE_URL is configured or
@@ -44,6 +55,7 @@ CREATE TABLE IF NOT EXISTS outcome_job_execution_events (
     CONSTRAINT outcome_job_execution_events_type_recognized CHECK (
         type IN (
             'ACCEPTED', 'ATTEMPT_STARTED', 'PROGRESS', 'CHECKPOINT',
+            'CANCEL_REQUESTED', 'CHECKPOINT_REQUESTED',
             'SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'STALLED',
             'DEGRADED', 'BLOCKED', 'UNKNOWN', 'UNSUPPORTED'
         )

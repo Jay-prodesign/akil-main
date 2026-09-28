@@ -308,6 +308,53 @@ test("R11 (#13): reconstructOutcomeJobExecutionRunState from the full event log 
   assert.equal(reconstructed?.currentAttempt, 2);
 });
 
+test("R12 (Rev158 F17, mandatory witness): restart/replay reconstructs the exact same pending-control-request disposition a live fold produces - set on CANCEL_REQUESTED/CHECKPOINT_REQUESTED, cleared by their own resolving event or any terminal outcome, never by an unrelated kind", () => {
+  const accepted = ev();
+  const started = ev({ type: "ATTEMPT_STARTED" });
+  const checkpointRequested = ev({ type: "CHECKPOINT_REQUESTED", sequence: 2 });
+  const checkpoint = ev({ type: "CHECKPOINT", sequence: 3, checkpointRef: "ref-1" });
+  const cancelRequested = ev({ type: "CANCEL_REQUESTED", sequence: 4, reason: "user requested" });
+  const cancelled = ev({ type: "CANCELLED", sequence: 5, reason: "user requested" });
+
+  const eventsAfterCheckpointRequested = [accepted, started, checkpointRequested];
+  let live: ReturnType<typeof applyOutcomeJobExecutionEvent> | undefined;
+  for (const event of eventsAfterCheckpointRequested) {
+    live = applyOutcomeJobExecutionEvent(live, event);
+  }
+  let reconstructed = reconstructOutcomeJobExecutionRunState(eventsAfterCheckpointRequested);
+  assert.deepEqual(reconstructed, live);
+  assert.deepEqual(reconstructed?.attempts.get(1)?.pendingControlRequest, {
+    kind: "CHECKPOINT_REQUESTED",
+    controlRequestId: checkpointRequested.eventId,
+  });
+
+  // A resolving CHECKPOINT clears its own kind's pending marker.
+  const eventsAfterCheckpoint = [...eventsAfterCheckpointRequested, checkpoint];
+  live = applyOutcomeJobExecutionEvent(live, checkpoint);
+  reconstructed = reconstructOutcomeJobExecutionRunState(eventsAfterCheckpoint);
+  assert.deepEqual(reconstructed, live);
+  assert.equal(reconstructed?.attempts.get(1)?.pendingControlRequest, undefined);
+
+  // A fresh CANCEL_REQUESTED after that sets its own pending marker.
+  const eventsAfterCancelRequested = [...eventsAfterCheckpoint, cancelRequested];
+  live = applyOutcomeJobExecutionEvent(live, cancelRequested);
+  reconstructed = reconstructOutcomeJobExecutionRunState(eventsAfterCancelRequested);
+  assert.deepEqual(reconstructed, live);
+  assert.deepEqual(reconstructed?.attempts.get(1)?.pendingControlRequest, {
+    kind: "CANCEL_REQUESTED",
+    controlRequestId: cancelRequested.eventId,
+  });
+
+  // Any terminal outcome (here CANCELLED) clears a pending request entirely,
+  // regardless of kind - nothing further can happen to a terminal attempt.
+  const eventsAfterCancelled = [...eventsAfterCancelRequested, cancelled];
+  live = applyOutcomeJobExecutionEvent(live, cancelled);
+  reconstructed = reconstructOutcomeJobExecutionRunState(eventsAfterCancelled);
+  assert.deepEqual(reconstructed, live);
+  assert.equal(reconstructed?.attempts.get(1)?.status, "CANCELLED");
+  assert.equal(reconstructed?.attempts.get(1)?.pendingControlRequest, undefined);
+});
+
 test("terminal reason/checkpoint/progress fields are recorded and mutually exclusive per event type at construction time", () => {
   assert.throws(() => ev({ type: "FAILED", reason: undefined }), Error, "FAILED requires a reason");
   assert.throws(
