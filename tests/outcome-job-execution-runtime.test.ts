@@ -21,6 +21,7 @@ import {
   StaleActivationFingerprintError,
   UnauthorizedUnknownRetryError,
   type ExecutionEventStore,
+  type ControlOperationInvoker,
 } from "../src/application/outcome-job-execution-runtime.js";
 
 class InMemoryExecutionEventStore implements ExecutionEventStore {
@@ -81,6 +82,48 @@ function acceptingInvoker(): WorkerInvoker {
 }
 function rejectingInvoker(): WorkerInvoker {
   return { role: "CLAUDE_PRIMARY_ENGINEER", invoke: async () => ({ accepted: false }) };
+}
+
+function countingAcknowledgingControlInvoker(checkpointRef = "checkpoint-ref-1"): ControlOperationInvoker & {
+  cancelCalls: number;
+  checkpointCalls: number;
+} {
+  return {
+    cancelCalls: 0,
+    checkpointCalls: 0,
+    async requestCancel() {
+      this.cancelCalls += 1;
+      return { acknowledged: true };
+    },
+    async requestCheckpoint() {
+      this.checkpointCalls += 1;
+      return { acknowledged: true, checkpointRef };
+    },
+  };
+}
+function unacknowledgingControlInvoker(): ControlOperationInvoker & { cancelCalls: number; checkpointCalls: number } {
+  return {
+    cancelCalls: 0,
+    checkpointCalls: 0,
+    async requestCancel() {
+      this.cancelCalls += 1;
+      return { acknowledged: false, reason: "not confirmed" };
+    },
+    async requestCheckpoint() {
+      this.checkpointCalls += 1;
+      return { acknowledged: false, reason: "not confirmed" };
+    },
+  };
+}
+function neverCallControlInvoker(): ControlOperationInvoker {
+  return {
+    requestCancel: async () => {
+      throw new Error("requestCancel must never be invoked for this scenario");
+    },
+    requestCheckpoint: async () => {
+      throw new Error("requestCheckpoint must never be invoked for this scenario");
+    },
+  };
 }
 
 const baseDispatch = {
@@ -277,38 +320,188 @@ test("D11 (#11): retry is also blocked by a stale activation fingerprint before 
   assert.equal(state?.currentAttempt, 1, "a stale retry must not advance the attempt");
 });
 
-test("D12 (#12): cancel/checkpoint capability that the executor does not declare returns UNSUPPORTED rather than a fabricated success", async () => {
+test("D12 (Rev149 F9/F10): an unsupported capability leaves the attempt RUNNING (no terminal event); a supported AND acknowledged control operation follows the truthful CANCELLED/CHECKPOINT path", async () => {
   const job = freshJob("job-d12");
   const store = new InMemoryExecutionEventStore();
   const dispatched = await dispatchOutcomeJobExecutionRun({
     ...baseDispatch, job, authority, runId: "run-d12", correlationId: "corr-d12", store, invoker: acceptingInvoker(),
   });
 
-  const afterCancelAttempt = await requestExecutionCancellation({
-    tenantScope, customer, project, job, currentState: dispatched.state, now: "2026-09-26T00:01:00.000Z",
+  const afterUnsupportedCancel = await requestExecutionCancellation({
+    tenantScope, customer, project, job, authority, currentState: dispatched.state, now: "2026-09-26T00:01:00.000Z",
     capabilities: { supportsCancel: false, supportsCheckpoint: false }, reason: "user requested", store,
+    controlInvoker: neverCallControlInvoker(),
   });
-  assert.equal(afterCancelAttempt.attempts.get(1)?.status, "UNSUPPORTED");
+  assert.equal(afterUnsupportedCancel.attempts.get(1)?.status, "RUNNING", "an unsupported capability must never terminalize the attempt");
 
   const job2 = freshJob("job-d12b");
   const dispatched2 = await dispatchOutcomeJobExecutionRun({
     ...baseDispatch, job: job2, authority, runId: "run-d12b", correlationId: "corr-d12b", store, invoker: acceptingInvoker(),
   });
+  const realCancelInvoker = countingAcknowledgingControlInvoker();
   const afterRealCancel = await requestExecutionCancellation({
-    tenantScope, customer, project, job: job2, currentState: dispatched2.state, now: "2026-09-26T00:01:00.000Z",
+    tenantScope, customer, project, job: job2, authority, currentState: dispatched2.state, now: "2026-09-26T00:01:00.000Z",
     capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "user requested", store,
+    controlInvoker: realCancelInvoker,
   });
   assert.equal(afterRealCancel.attempts.get(1)?.status, "CANCELLED");
+  assert.equal(realCancelInvoker.cancelCalls, 1);
 
   const job3 = freshJob("job-d12c");
   const dispatched3 = await dispatchOutcomeJobExecutionRun({
     ...baseDispatch, job: job3, authority, runId: "run-d12c", correlationId: "corr-d12c", store, invoker: acceptingInvoker(),
   });
-  const afterCheckpointAttempt = await requestExecutionCheckpoint({
-    tenantScope, customer, project, job: job3, currentState: dispatched3.state, now: "2026-09-26T00:01:00.000Z",
-    capabilities: { supportsCancel: false, supportsCheckpoint: false }, store,
+  const afterUnsupportedCheckpoint = await requestExecutionCheckpoint({
+    tenantScope, customer, project, job: job3, authority, currentState: dispatched3.state, now: "2026-09-26T00:01:00.000Z",
+    capabilities: { supportsCancel: false, supportsCheckpoint: false }, store, controlInvoker: neverCallControlInvoker(),
   });
-  assert.equal(afterCheckpointAttempt.attempts.get(1)?.status, "UNSUPPORTED");
+  assert.equal(afterUnsupportedCheckpoint.attempts.get(1)?.status, "RUNNING", "an unsupported capability must never terminalize the attempt");
+
+  const job4 = freshJob("job-d12d");
+  const dispatched4 = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job: job4, authority, runId: "run-d12d", correlationId: "corr-d12d", store, invoker: acceptingInvoker(),
+  });
+  const realCheckpointInvoker = countingAcknowledgingControlInvoker("real-checkpoint-ref");
+  const afterRealCheckpoint = await requestExecutionCheckpoint({
+    tenantScope, customer, project, job: job4, authority, currentState: dispatched4.state, now: "2026-09-26T00:01:00.000Z",
+    capabilities: { supportsCancel: false, supportsCheckpoint: true }, store, controlInvoker: realCheckpointInvoker,
+  });
+  assert.equal(afterRealCheckpoint.attempts.get(1)?.status, "RUNNING", "CHECKPOINT does not terminalize the attempt");
+  assert.equal(afterRealCheckpoint.attempts.get(1)?.lastCheckpointRef, "real-checkpoint-ref");
+  assert.equal(realCheckpointInvoker.checkpointCalls, 1);
+});
+
+test("D23 (Rev149 F9, mandatory witness 1): supportsCancel=true but the control invoker does not acknowledge cannot become CANCELLED", async () => {
+  const job = freshJob("job-d23");
+  const store = new InMemoryExecutionEventStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d23", correlationId: "corr-d23", store, invoker: acceptingInvoker(),
+  });
+  const invoker = unacknowledgingControlInvoker();
+  const result = await requestExecutionCancellation({
+    tenantScope, customer, project, job, authority, currentState: dispatched.state, now: "2026-09-26T00:01:00.000Z",
+    capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "user requested", store, controlInvoker: invoker,
+  });
+  assert.equal(result.attempts.get(1)?.status, "RUNNING", "capability without acknowledgement must never become CANCELLED");
+  assert.equal(invoker.cancelCalls, 1, "the control invoker must actually have been called - this is not the unsupported path");
+});
+
+test("D24 (Rev149 F9, mandatory witness 2): supportsCheckpoint=true with an acknowledgement carrying no real checkpointRef cannot create CHECKPOINT or placeholder evidence", async () => {
+  const job = freshJob("job-d24");
+  const store = new InMemoryExecutionEventStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d24", correlationId: "corr-d24", store, invoker: acceptingInvoker(),
+  });
+  const invoker: ControlOperationInvoker = {
+    requestCancel: async () => ({ acknowledged: true }),
+    requestCheckpoint: async () => ({ acknowledged: true }), // acknowledged, but NO checkpointRef - an adversarial/buggy invoker
+  };
+  await assert.rejects(
+    () => requestExecutionCheckpoint({
+      tenantScope, customer, project, job, authority, currentState: dispatched.state, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: false, supportsCheckpoint: true }, store, controlInvoker: invoker,
+    }),
+    "an acknowledged checkpoint with no real checkpointRef must fail closed, never fabricate a placeholder",
+  );
+  const state = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d24");
+  assert.equal(state?.attempts.get(1)?.lastCheckpointRef, undefined, "no CHECKPOINT event may have been durably recorded");
+});
+
+test("D25 (Rev149 F10, mandatory witness 3): unsupported cancel/checkpoint leave the attempt RUNNING and a later valid progress/result remains admissible", async () => {
+  const job = freshJob("job-d25");
+  const store = new InMemoryExecutionEventStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d25", correlationId: "corr-d25", store, invoker: acceptingInvoker(),
+  });
+  await requestExecutionCancellation({
+    tenantScope, customer, project, job, authority, currentState: dispatched.state, now: "2026-09-26T00:01:00.000Z",
+    capabilities: { supportsCancel: false, supportsCheckpoint: false }, reason: "x", store, controlInvoker: neverCallControlInvoker(),
+  });
+  await requestExecutionCheckpoint({
+    tenantScope, customer, project, job, authority, currentState: dispatched.state, now: "2026-09-26T00:01:30.000Z",
+    capabilities: { supportsCancel: false, supportsCheckpoint: false }, store, controlInvoker: neverCallControlInvoker(),
+  });
+  // A later valid progress AND result must still be accepted - the run was
+  // never terminalized by the two unsupported control requests.
+  const afterProgress = await recordExecutionProgress({
+    tenantScope, customer, project, job, currentState: dispatched.state, now: "2026-09-26T00:02:00.000Z", store, progressRef: "still-going",
+  });
+  assert.equal(afterProgress.attempts.get(1)?.lastProgressRef, "still-going");
+  const afterResult = await recordExecutionResult({
+    tenantScope, customer, project, job, currentState: afterProgress, now: "2026-09-26T00:03:00.000Z", type: "SUCCEEDED", store,
+  });
+  assert.equal(afterResult.attempts.get(1)?.status, "SUCCEEDED");
+});
+
+test("D26 (Rev149 F11, mandatory witness 4): cross-tenant and same-tenant non-EXECUTE control requests fail closed with zero durable mutation/effect invocation", async () => {
+  const job = freshJob("job-d26");
+  const store = new InMemoryExecutionEventStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d26", correlationId: "corr-d26", store, invoker: acceptingInvoker(),
+  });
+
+  const foreignTenantScope = createTenantScope("tenant-runtime-foreign-d26");
+  const foreignAuthority = createAuthorityContext({ tenantScope: foreignTenantScope, permissions: ["EXECUTE"], canPerformProtectedActions: false });
+  await assert.rejects(
+    () => requestExecutionCancellation({
+      tenantScope, customer, project, job, authority: foreignAuthority, currentState: dispatched.state, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "x", store, controlInvoker: neverCallControlInvoker(),
+    }),
+  );
+
+  const readOnlyAuthority = createAuthorityContext({ tenantScope, permissions: ["READ"], canPerformProtectedActions: false });
+  await assert.rejects(
+    () => requestExecutionCheckpoint({
+      tenantScope, customer, project, job, authority: readOnlyAuthority, currentState: dispatched.state, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: false, supportsCheckpoint: true }, store, controlInvoker: neverCallControlInvoker(),
+    }),
+    InsufficientAuthorityError,
+  );
+
+  const state = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d26");
+  assert.equal(state?.attempts.get(1)?.status, "RUNNING", "neither rejected call may have mutated the run at all");
+});
+
+test("D27 (Rev149 F11, mandatory witness 5): malformed non-boolean capability descriptors fail closed before any effect", async () => {
+  const job = freshJob("job-d27");
+  const store = new InMemoryExecutionEventStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d27", correlationId: "corr-d27", store, invoker: acceptingInvoker(),
+  });
+  await assert.rejects(
+    () => requestExecutionCancellation({
+      tenantScope, customer, project, job, authority, currentState: dispatched.state, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: "yes", supportsCheckpoint: false } as never, reason: "x", store, controlInvoker: neverCallControlInvoker(),
+    }),
+    InvalidOutcomeJobExecutionRuntimeError,
+  );
+  await assert.rejects(
+    () => requestExecutionCheckpoint({
+      tenantScope, customer, project, job, authority, currentState: dispatched.state, now: "2026-09-26T00:01:00.000Z",
+      capabilities: null as never, store, controlInvoker: neverCallControlInvoker(),
+    }),
+    InvalidOutcomeJobExecutionRuntimeError,
+  );
+});
+
+test("D28 (Rev149 F9, mandatory witness 7): a duplicate/replayed cancel request against an already-CANCELLED attempt is idempotent and never re-invokes the control operation", async () => {
+  const job = freshJob("job-d28");
+  const store = new InMemoryExecutionEventStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d28", correlationId: "corr-d28", store, invoker: acceptingInvoker(),
+  });
+  const invoker = countingAcknowledgingControlInvoker();
+  const first = await requestExecutionCancellation({
+    tenantScope, customer, project, job, authority, currentState: dispatched.state, now: "2026-09-26T00:01:00.000Z",
+    capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "x", store, controlInvoker: invoker,
+  });
+  assert.equal(first.attempts.get(1)?.status, "CANCELLED");
+  const second = await requestExecutionCancellation({
+    tenantScope, customer, project, job, authority, currentState: first, now: "2026-09-26T00:02:00.000Z",
+    capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "x again", store, controlInvoker: invoker,
+  });
+  assert.equal(second.attempts.get(1)?.status, "CANCELLED");
+  assert.equal(invoker.cancelCalls, 1, "a replayed cancel request against an already-terminal attempt must not re-invoke the control operation");
 });
 
 test("D13: dispatch requires the caller's authority to belong to the same tenant as the job", async () => {
@@ -424,15 +617,15 @@ test("D17 (Rev145 F4): a currentState forged to carry a foreign job's identity i
   );
   await assert.rejects(
     () => requestExecutionCancellation({
-      tenantScope, customer, project, job: jobA, currentState: forgedState, now: "2026-09-26T00:01:00.000Z",
-      capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "x", store,
+      tenantScope, customer, project, job: jobA, authority, currentState: forgedState, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "x", store, controlInvoker: neverCallControlInvoker(),
     }),
     InvalidOutcomeJobExecutionRuntimeError,
   );
   await assert.rejects(
     () => requestExecutionCheckpoint({
-      tenantScope, customer, project, job: jobA, currentState: forgedState, now: "2026-09-26T00:01:00.000Z",
-      capabilities: { supportsCancel: false, supportsCheckpoint: true }, store,
+      tenantScope, customer, project, job: jobA, authority, currentState: forgedState, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: false, supportsCheckpoint: true }, store, controlInvoker: neverCallControlInvoker(),
     }),
     InvalidOutcomeJobExecutionRuntimeError,
   );

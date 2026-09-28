@@ -8,7 +8,7 @@ import {
   type OutcomeJobExecutionEvent,
   type OutcomeJobExecutionEventType,
 } from "../domain/outcome-job-execution-event.js";
-import type { OutcomeJobExecutionRunState } from "../domain/outcome-job-execution-run-state.js";
+import { ATTEMPT_TERMINAL_STATUSES, type OutcomeJobExecutionRunState } from "../domain/outcome-job-execution-run-state.js";
 import type { AuthorityContext } from "../domain/authority.js";
 import { requireSameTenant, requirePermission, requireProtectedActionAuthorization } from "../domain/authority.js";
 import { invokeSafely, type WorkerInvoker, type InvokeOutcome } from "../domain/worker-invoker.js";
@@ -570,22 +570,127 @@ export interface ExecutorCapabilities {
 }
 
 /**
- * Minimum Adversarial Evidence #12: "unsupported cancel/checkpoint
- * capability returns UNSUPPORTED rather than fabricated success." Never
- * records CANCELLED unless the caller-supplied executor descriptor actually
- * declares `supportsCancel`.
+ * Rev149 F11: capability descriptors are caller-constructible plain data,
+ * not proven by any factory - fails closed on anything that is not
+ * actually a boolean rather than trusting the static `ExecutorCapabilities`
+ * type.
+ */
+function validateExecutorCapabilities(raw: unknown): ExecutorCapabilities {
+  if (typeof raw !== "object" || raw === null) {
+    throw new InvalidOutcomeJobExecutionRuntimeError("capabilities must be an object");
+  }
+  const candidate = raw as Record<string, unknown>;
+  if (typeof candidate.supportsCancel !== "boolean" || typeof candidate.supportsCheckpoint !== "boolean") {
+    throw new InvalidOutcomeJobExecutionRuntimeError(
+      "capabilities.supportsCancel and capabilities.supportsCheckpoint must be boolean",
+    );
+  }
+  return { supportsCancel: candidate.supportsCancel, supportsCheckpoint: candidate.supportsCheckpoint };
+}
+
+/**
+ * Rev149 F9/Package Contract: capability ("can attempt") is not evidence of
+ * effect ("did succeed"). `acknowledged: true` is this boundary's ONLY
+ * proof that a real control operation actually took hold - the same
+ * discipline `invokeSafely`/`ExternalEffectAttempt` already establish
+ * elsewhere in this codebase for "a claimed success requires independent
+ * confirmation, never a bare capability flag." Provider-neutral
+ * injected/mock implementations are authorized and expected (Activation
+ * Boundary); this module never performs a real control operation itself.
+ */
+export interface ControlOperationAcknowledgement {
+  readonly acknowledged: boolean;
+  readonly checkpointRef?: string;
+  readonly reason?: string;
+}
+
+export interface ControlOperationInvoker {
+  requestCancel(input: {
+    readonly tenantId: TenantScope["tenantId"];
+    readonly customerId: Customer["customerId"];
+    readonly projectId: Project["projectId"];
+    readonly jobId: OutcomeJob["jobId"];
+    readonly runId: string;
+    readonly correlationId: string;
+    readonly attempt: number;
+    readonly reason: string;
+  }): Promise<ControlOperationAcknowledgement>;
+  requestCheckpoint(input: {
+    readonly tenantId: TenantScope["tenantId"];
+    readonly customerId: Customer["customerId"];
+    readonly projectId: Project["projectId"];
+    readonly jobId: OutcomeJob["jobId"];
+    readonly runId: string;
+    readonly correlationId: string;
+    readonly attempt: number;
+  }): Promise<ControlOperationAcknowledgement>;
+}
+
+/**
+ * Rev149 F9/F10/F11 (supersedes the prior Minimum Adversarial Evidence #12
+ * "unsupported -> UNSUPPORTED" behavior, which itself terminalized the
+ * attempt merely from an unsupported *request* - see F10):
+ *
+ * - F11: requires current same-tenant EXECUTE authority and a genuinely
+ *   boolean capability descriptor, checked before any state access or
+ *   effect - a cross-tenant, non-EXECUTE, or malformed call causes zero
+ *   durable mutation and zero control-operation invocation.
+ * - F10: an unsupported capability leaves the attempt exactly as it was -
+ *   no event is appended at all, so the run remains eligible for later
+ *   valid progress/result. A management/control request's own disposition
+ *   is never conflated with execution-attempt terminal truth.
+ * - F9: even when cancellation IS supported, CANCELLED is recorded only
+ *   after `controlInvoker.requestCancel` returns `acknowledged: true` -
+ *   never from `supportsCancel` alone. An attempt already in a terminal
+ *   state is never asked to cancel again (idempotent - no duplicate
+ *   control-operation invocation on replay).
  */
 export async function requestExecutionCancellation(
   input: ScopeInput & {
+    readonly authority: AuthorityContext;
     readonly currentState: OutcomeJobExecutionRunState;
     readonly now: unknown;
-    readonly capabilities: ExecutorCapabilities;
+    readonly capabilities: unknown;
     readonly reason: unknown;
     readonly store: ExecutionEventStore;
+    readonly controlInvoker: ControlOperationInvoker;
   },
 ): Promise<OutcomeJobExecutionRunState> {
+  requireSameTenant(input.authority, input.tenantScope.tenantId);
+  requirePermission(input.authority, "EXECUTE");
+  const capabilities = validateExecutorCapabilities(input.capabilities);
+
   const freshState = await verifyAndRefreshExecutionState(input.store, input, input.currentState);
-  const type: OutcomeJobExecutionEventType = input.capabilities.supportsCancel ? "CANCELLED" : "UNSUPPORTED";
+
+  if (!capabilities.supportsCancel) {
+    return freshState;
+  }
+
+  const currentAttemptState = freshState.attempts.get(freshState.currentAttempt);
+  if (currentAttemptState !== undefined && ATTEMPT_TERMINAL_STATUSES.has(currentAttemptState.status)) {
+    // Already terminal (including an earlier successful CANCELLED) - never
+    // re-invoke the real control operation for a request that can no
+    // longer change anything.
+    return freshState;
+  }
+
+  const reason = typeof input.reason === "string" ? input.reason : String(input.reason);
+  const acknowledgement = await input.controlInvoker.requestCancel({
+    tenantId: freshState.tenantId,
+    customerId: freshState.customerId,
+    projectId: freshState.projectId,
+    jobId: freshState.jobId,
+    runId: freshState.runId,
+    correlationId: freshState.correlationId,
+    attempt: freshState.currentAttempt,
+    reason,
+  });
+  if (!acknowledgement.acknowledged) {
+    // Capability without confirmed effect: leave the attempt exactly as it
+    // was rather than fabricating CANCELLED.
+    return freshState;
+  }
+
   const event = createOutcomeJobExecutionEvent({
     tenantScope: input.tenantScope,
     customer: input.customer,
@@ -595,47 +700,61 @@ export async function requestExecutionCancellation(
     correlationId: freshState.correlationId,
     attempt: freshState.currentAttempt,
     sequence: nextSequenceForAttempt(freshState, freshState.currentAttempt),
-    type,
+    type: "CANCELLED",
     occurredAt: input.now,
-    reason: input.capabilities.supportsCancel
-      ? input.reason
-      : "executor does not support cancellation for this run",
+    reason: input.reason,
   });
   const { state } = await appendAndGetState(input.store, event);
   return state;
 }
 
 /**
- * Symmetric UNSUPPORTED behavior for checkpoints (Minimum Adversarial
- * Evidence #12).
+ * Rev149 F9/F10/F11 symmetric correction for checkpoints. `checkpointRef`
+ * is never fabricated as a placeholder default - it can only ever be the
+ * real reference `controlInvoker.requestCheckpoint` itself reports on
+ * acknowledgement, and `createOutcomeJobExecutionEvent`'s own existing
+ * non-empty-string validation (unchanged) fails closed if an adversarial
+ * invoker acknowledges without a usable reference.
  */
 export async function requestExecutionCheckpoint(
   input: ScopeInput & {
+    readonly authority: AuthorityContext;
     readonly currentState: OutcomeJobExecutionRunState;
     readonly now: unknown;
-    readonly capabilities: ExecutorCapabilities;
-    readonly checkpointRef?: unknown;
+    readonly capabilities: unknown;
     readonly store: ExecutionEventStore;
+    readonly controlInvoker: ControlOperationInvoker;
   },
 ): Promise<OutcomeJobExecutionRunState> {
+  requireSameTenant(input.authority, input.tenantScope.tenantId);
+  requirePermission(input.authority, "EXECUTE");
+  const capabilities = validateExecutorCapabilities(input.capabilities);
+
   const freshState = await verifyAndRefreshExecutionState(input.store, input, input.currentState);
-  if (input.capabilities.supportsCheckpoint) {
-    const event = createOutcomeJobExecutionEvent({
-      tenantScope: input.tenantScope,
-      customer: input.customer,
-      project: input.project,
-      job: input.job,
-      runId: freshState.runId,
-      correlationId: freshState.correlationId,
-      attempt: freshState.currentAttempt,
-      sequence: nextSequenceForAttempt(freshState, freshState.currentAttempt),
-      type: "CHECKPOINT",
-      occurredAt: input.now,
-      checkpointRef: input.checkpointRef ?? "checkpoint",
-    });
-    const { state } = await appendAndGetState(input.store, event);
-    return state;
+
+  if (!capabilities.supportsCheckpoint) {
+    return freshState;
   }
+
+  const currentAttemptState = freshState.attempts.get(freshState.currentAttempt);
+  if (currentAttemptState !== undefined && ATTEMPT_TERMINAL_STATUSES.has(currentAttemptState.status)) {
+    // A finished attempt cannot be checkpointed again - no re-invocation.
+    return freshState;
+  }
+
+  const acknowledgement = await input.controlInvoker.requestCheckpoint({
+    tenantId: freshState.tenantId,
+    customerId: freshState.customerId,
+    projectId: freshState.projectId,
+    jobId: freshState.jobId,
+    runId: freshState.runId,
+    correlationId: freshState.correlationId,
+    attempt: freshState.currentAttempt,
+  });
+  if (!acknowledgement.acknowledged) {
+    return freshState;
+  }
+
   const event = createOutcomeJobExecutionEvent({
     tenantScope: input.tenantScope,
     customer: input.customer,
@@ -645,9 +764,9 @@ export async function requestExecutionCheckpoint(
     correlationId: freshState.correlationId,
     attempt: freshState.currentAttempt,
     sequence: nextSequenceForAttempt(freshState, freshState.currentAttempt),
-    type: "UNSUPPORTED",
+    type: "CHECKPOINT",
     occurredAt: input.now,
-    reason: "executor does not support checkpointing for this run",
+    checkpointRef: acknowledgement.checkpointRef,
   });
   const { state } = await appendAndGetState(input.store, event);
   return state;

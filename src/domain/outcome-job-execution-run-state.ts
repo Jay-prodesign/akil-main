@@ -34,7 +34,7 @@ export type OutcomeJobExecutionAttemptStatus =
   | "UNKNOWN"
   | "UNSUPPORTED";
 
-const ATTEMPT_TERMINAL_STATUSES: ReadonlySet<OutcomeJobExecutionAttemptStatus> = new Set([
+export const ATTEMPT_TERMINAL_STATUSES: ReadonlySet<OutcomeJobExecutionAttemptStatus> = new Set([
   "SUCCEEDED",
   "FAILED",
   "CANCELLED",
