@@ -6,7 +6,11 @@ import { createProject } from "../src/domain/project.js";
 import { createOutcomeJob, transitionOutcomeJob, type OutcomeJob } from "../src/domain/outcome-job.js";
 import { createAuthorityContext, InsufficientAuthorityError, type AuthorityContext } from "../src/domain/authority.js";
 import type { WorkerInvoker } from "../src/domain/worker-invoker.js";
-import { createOutcomeJobExecutionEvent, type OutcomeJobExecutionEvent } from "../src/domain/outcome-job-execution-event.js";
+import {
+  createOutcomeJobExecutionEvent,
+  InvalidOutcomeJobExecutionEventError,
+  type OutcomeJobExecutionEvent,
+} from "../src/domain/outcome-job-execution-event.js";
 import { applyOutcomeJobExecutionEvent, type OutcomeJobExecutionRunState } from "../src/domain/outcome-job-execution-run-state.js";
 import {
   dispatchOutcomeJobExecutionRun,
@@ -502,6 +506,113 @@ test("D28 (Rev149 F9, mandatory witness 7): a duplicate/replayed cancel request 
   });
   assert.equal(second.attempts.get(1)?.status, "CANCELLED");
   assert.equal(invoker.cancelCalls, 1, "a replayed cancel request against an already-terminal attempt must not re-invoke the control operation");
+});
+
+test("D29 (Rev158 F12, mandatory witness): two concurrent cancel requests against the same attempt invoke the control operation at most once", async () => {
+  const job = freshJob("job-d29");
+  const store = new InMemoryExecutionEventStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d29", correlationId: "corr-d29", store, invoker: acceptingInvoker(),
+  });
+  const invoker = countingAcknowledgingControlInvoker();
+  const call = () => requestExecutionCancellation({
+    tenantScope, customer, project, job, authority, currentState: dispatched.state, now: "2026-09-26T00:01:00.000Z",
+    capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "x", store, controlInvoker: invoker,
+  });
+  await Promise.all([call(), call()]);
+  assert.equal(invoker.cancelCalls, 1, "concurrent duplicate cancel requests must invoke the control operation at most once");
+  const state = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d29");
+  assert.equal(state?.attempts.get(1)?.status, "CANCELLED");
+});
+
+test("D30 (Rev158 F12, mandatory witness): two concurrent checkpoint requests against the same attempt invoke the control operation at most once", async () => {
+  const job = freshJob("job-d30");
+  const store = new InMemoryExecutionEventStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d30", correlationId: "corr-d30", store, invoker: acceptingInvoker(),
+  });
+  const invoker = countingAcknowledgingControlInvoker("concurrent-ref");
+  const call = () => requestExecutionCheckpoint({
+    tenantScope, customer, project, job, authority, currentState: dispatched.state, now: "2026-09-26T00:01:00.000Z",
+    capabilities: { supportsCancel: false, supportsCheckpoint: true }, store, controlInvoker: invoker,
+  });
+  await Promise.all([call(), call()]);
+  assert.equal(invoker.checkpointCalls, 1, "concurrent duplicate checkpoint requests must invoke the control operation at most once");
+  const state = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d30");
+  assert.equal(state?.attempts.get(1)?.lastCheckpointRef, "concurrent-ref");
+});
+
+test("D31 (Rev158 F13, mandatory witness): a malformed/non-boolean-true acknowledgement cannot become CANCELLED or CHECKPOINT", async () => {
+  const job = freshJob("job-d31");
+  const store = new InMemoryExecutionEventStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d31", correlationId: "corr-d31", store, invoker: acceptingInvoker(),
+  });
+  const truthyStringInvoker: ControlOperationInvoker = {
+    requestCancel: async () => ({ acknowledged: "yes" as unknown as boolean }),
+    requestCheckpoint: async () => ({ acknowledged: 1 as unknown as boolean, checkpointRef: "ref" }),
+  };
+  const afterCancel = await requestExecutionCancellation({
+    tenantScope, customer, project, job, authority, currentState: dispatched.state, now: "2026-09-26T00:01:00.000Z",
+    capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "x", store, controlInvoker: truthyStringInvoker,
+  });
+  assert.equal(afterCancel.attempts.get(1)?.status, "RUNNING", "a truthy-but-not-strictly-true acknowledged value must never produce CANCELLED");
+
+  const job2 = freshJob("job-d31b");
+  const dispatched2 = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job: job2, authority, runId: "run-d31b", correlationId: "corr-d31b", store, invoker: acceptingInvoker(),
+  });
+  const nonObjectInvoker: ControlOperationInvoker = {
+    requestCancel: async () => undefined as unknown as { acknowledged: boolean },
+    requestCheckpoint: async () => undefined as unknown as { acknowledged: boolean },
+  };
+  const afterCheckpoint = await requestExecutionCheckpoint({
+    tenantScope, customer, project, job: job2, authority, currentState: dispatched2.state, now: "2026-09-26T00:01:00.000Z",
+    capabilities: { supportsCancel: false, supportsCheckpoint: true }, store, controlInvoker: nonObjectInvoker,
+  });
+  assert.equal(afterCheckpoint.attempts.get(1)?.lastCheckpointRef, undefined, "a non-object acknowledgement must never produce CHECKPOINT");
+});
+
+test("D32 (Rev158 F14, mandatory witness): invalid cancel reason/timestamp and invalid checkpoint timestamp fail before the control operation is ever invoked", async () => {
+  const job = freshJob("job-d32");
+  const store = new InMemoryExecutionEventStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d32", correlationId: "corr-d32", store, invoker: acceptingInvoker(),
+  });
+  await assert.rejects(
+    () => requestExecutionCancellation({
+      tenantScope, customer, project, job, authority, currentState: dispatched.state, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "   ", store, controlInvoker: neverCallControlInvoker(),
+    }),
+    InvalidOutcomeJobExecutionEventError,
+    "an invalid (whitespace-only) cancel reason must fail before the control invoker is ever called",
+  );
+
+  const job2 = freshJob("job-d32b");
+  const dispatched2 = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job: job2, authority, runId: "run-d32b", correlationId: "corr-d32b", store, invoker: acceptingInvoker(),
+  });
+  await assert.rejects(
+    () => requestExecutionCancellation({
+      tenantScope, customer, project, job: job2, authority, currentState: dispatched2.state, now: "not-a-real-timestamp",
+      capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "x", store, controlInvoker: neverCallControlInvoker(),
+    }),
+    InvalidOutcomeJobExecutionEventError,
+    "an invalid cancel occurredAt must fail before the control invoker is ever called",
+  );
+
+  const job3 = freshJob("job-d32c");
+  const dispatched3 = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job: job3, authority, runId: "run-d32c", correlationId: "corr-d32c", store, invoker: acceptingInvoker(),
+  });
+  await assert.rejects(
+    () => requestExecutionCheckpoint({
+      tenantScope, customer, project, job: job3, authority, currentState: dispatched3.state, now: "also-not-a-timestamp",
+      capabilities: { supportsCancel: false, supportsCheckpoint: true }, store, controlInvoker: neverCallControlInvoker(),
+    }),
+    InvalidOutcomeJobExecutionEventError,
+    "an invalid checkpoint occurredAt must fail before the control invoker is ever called",
+  );
 });
 
 test("D13: dispatch requires the caller's authority to belong to the same tenant as the job", async () => {

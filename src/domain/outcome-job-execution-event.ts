@@ -26,6 +26,8 @@ export type OutcomeJobExecutionEventType =
   | "ATTEMPT_STARTED"
   | "PROGRESS"
   | "CHECKPOINT"
+  | "CANCEL_REQUESTED"
+  | "CHECKPOINT_REQUESTED"
   | "SUCCEEDED"
   | "FAILED"
   | "CANCELLED"
@@ -41,6 +43,8 @@ export const RECOGNIZED_OUTCOME_JOB_EXECUTION_EVENT_TYPES: ReadonlySet<OutcomeJo
   "ATTEMPT_STARTED",
   "PROGRESS",
   "CHECKPOINT",
+  "CANCEL_REQUESTED",
+  "CHECKPOINT_REQUESTED",
   "SUCCEEDED",
   "FAILED",
   "CANCELLED",
@@ -53,12 +57,30 @@ export const RECOGNIZED_OUTCOME_JOB_EXECUTION_EVENT_TYPES: ReadonlySet<OutcomeJo
 ]);
 
 /**
+ * Rev158 F12/F14: `CANCEL_REQUESTED`/`CHECKPOINT_REQUESTED` are non-terminal,
+ * per-attempt durable markers the runtime appends and atomically claims (the
+ * same `appendEvent`-returns-`created` single-authority pattern Rev145 F1
+ * established for `ATTEMPT_STARTED`) BEFORE ever invoking a real
+ * `ControlOperationInvoker` effect - this closes both the concurrent-
+ * duplicate-invocation gap (only the claim's winner may invoke the effect)
+ * and the effect-before-validation gap (constructing this event, via the
+ * exact same field-validation `createOutcomeJobExecutionEvent` uses for
+ * every event, forces `reason`/`occurredAt` to be valid before any control
+ * effect is ever attempted).
+ */
+
+/**
  * Attempt-closing types that describe *why* rather than merely *that* -
  * `reason` is mandatory on these (never on ACCEPTED/ATTEMPT_STARTED/
- * PROGRESS/CHECKPOINT/SUCCEEDED, which need no explanatory text).
+ * PROGRESS/CHECKPOINT/CHECKPOINT_REQUESTED/SUCCEEDED, which need no
+ * explanatory text). `CANCEL_REQUESTED` also requires `reason`: it carries
+ * the exact same caller-supplied cancellation reason the eventual `CANCELLED`
+ * event will require, validated up front (Rev158 F14) rather than only at
+ * durable-record time after the control effect has already been invoked.
  */
 const REASON_REQUIRED_TYPES: ReadonlySet<OutcomeJobExecutionEventType> = new Set([
   "FAILED",
+  "CANCEL_REQUESTED",
   "CANCELLED",
   "TIMED_OUT",
   "STALLED",

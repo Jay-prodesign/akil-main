@@ -645,6 +645,23 @@ export interface ControlOperationInvoker {
  *   state is never asked to cancel again (idempotent - no duplicate
  *   control-operation invocation on replay).
  */
+/**
+ * Rev158: verifies a `ControlOperationInvoker` acknowledgement is genuinely
+ * the object shape this boundary requires and that `acknowledged` is
+ * strictly `=== true` - not merely truthy. F13: a malformed adapter result
+ * (a non-object response, or `acknowledged: "yes"`/`1`) must never be
+ * treated as proof of a real control effect.
+ */
+function isGenuineControlAcknowledgement(
+  value: unknown,
+): value is ControlOperationAcknowledgement & { readonly acknowledged: true } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { acknowledged?: unknown }).acknowledged === true
+  );
+}
+
 export async function requestExecutionCancellation(
   input: ScopeInput & {
     readonly authority: AuthorityContext;
@@ -674,7 +691,38 @@ export async function requestExecutionCancellation(
     return freshState;
   }
 
-  const reason = typeof input.reason === "string" ? input.reason : String(input.reason);
+  // Rev158 F12/F14: a durable, atomically-claimed pre-effect marker -
+  // mirrors Rev145 F1's ATTEMPT_STARTED single-authority claim exactly.
+  // Constructing this event via `createOutcomeJobExecutionEvent` also fully
+  // validates `reason`/`occurredAt` (the exact fields the eventual CANCELLED
+  // event will need) BEFORE the control effect is ever invoked - an invalid
+  // caller-supplied reason/timestamp now throws here, never after a real
+  // effect has already happened. Only the caller who durably wins this exact
+  // claim may invoke the control operation; a concurrent duplicate loses the
+  // claim and returns the (already-claimed) current state without invoking.
+  const requestEvent = createOutcomeJobExecutionEvent({
+    tenantScope: input.tenantScope,
+    customer: input.customer,
+    project: input.project,
+    job: input.job,
+    runId: freshState.runId,
+    correlationId: freshState.correlationId,
+    attempt: freshState.currentAttempt,
+    sequence: nextSequenceForAttempt(freshState, freshState.currentAttempt),
+    type: "CANCEL_REQUESTED",
+    occurredAt: input.now,
+    reason: input.reason,
+  });
+  const claim = await appendAndGetState(input.store, requestEvent);
+  if (!claim.created) {
+    return claim.state;
+  }
+  if (requestEvent.reason === undefined) {
+    throw new InvalidOutcomeJobExecutionRuntimeError(
+      "internal error: CANCEL_REQUESTED event missing its own validated reason",
+    );
+  }
+
   const acknowledgement = await input.controlInvoker.requestCancel({
     tenantId: freshState.tenantId,
     customerId: freshState.customerId,
@@ -683,12 +731,13 @@ export async function requestExecutionCancellation(
     runId: freshState.runId,
     correlationId: freshState.correlationId,
     attempt: freshState.currentAttempt,
-    reason,
+    reason: requestEvent.reason,
   });
-  if (!acknowledgement.acknowledged) {
-    // Capability without confirmed effect: leave the attempt exactly as it
-    // was rather than fabricating CANCELLED.
-    return freshState;
+  if (!isGenuineControlAcknowledgement(acknowledgement)) {
+    // Capability without confirmed effect (or a malformed/untrustworthy
+    // acknowledgement shape - F13): leave the attempt exactly as it was
+    // rather than fabricating CANCELLED.
+    return claim.state;
   }
 
   const event = createOutcomeJobExecutionEvent({
@@ -699,7 +748,7 @@ export async function requestExecutionCancellation(
     runId: freshState.runId,
     correlationId: freshState.correlationId,
     attempt: freshState.currentAttempt,
-    sequence: nextSequenceForAttempt(freshState, freshState.currentAttempt),
+    sequence: nextSequenceForAttempt(claim.state, freshState.currentAttempt),
     type: "CANCELLED",
     occurredAt: input.now,
     reason: input.reason,
@@ -742,6 +791,26 @@ export async function requestExecutionCheckpoint(
     return freshState;
   }
 
+  // Rev158 F12/F14: same durable atomic pre-effect claim as cancellation -
+  // validates `occurredAt` before the control effect is ever invoked, and
+  // guarantees only the claim's winner may invoke it.
+  const requestEvent = createOutcomeJobExecutionEvent({
+    tenantScope: input.tenantScope,
+    customer: input.customer,
+    project: input.project,
+    job: input.job,
+    runId: freshState.runId,
+    correlationId: freshState.correlationId,
+    attempt: freshState.currentAttempt,
+    sequence: nextSequenceForAttempt(freshState, freshState.currentAttempt),
+    type: "CHECKPOINT_REQUESTED",
+    occurredAt: input.now,
+  });
+  const claim = await appendAndGetState(input.store, requestEvent);
+  if (!claim.created) {
+    return claim.state;
+  }
+
   const acknowledgement = await input.controlInvoker.requestCheckpoint({
     tenantId: freshState.tenantId,
     customerId: freshState.customerId,
@@ -751,8 +820,8 @@ export async function requestExecutionCheckpoint(
     correlationId: freshState.correlationId,
     attempt: freshState.currentAttempt,
   });
-  if (!acknowledgement.acknowledged) {
-    return freshState;
+  if (!isGenuineControlAcknowledgement(acknowledgement)) {
+    return claim.state;
   }
 
   const event = createOutcomeJobExecutionEvent({
@@ -763,7 +832,7 @@ export async function requestExecutionCheckpoint(
     runId: freshState.runId,
     correlationId: freshState.correlationId,
     attempt: freshState.currentAttempt,
-    sequence: nextSequenceForAttempt(freshState, freshState.currentAttempt),
+    sequence: nextSequenceForAttempt(claim.state, freshState.currentAttempt),
     type: "CHECKPOINT",
     occurredAt: input.now,
     checkpointRef: acknowledgement.checkpointRef,

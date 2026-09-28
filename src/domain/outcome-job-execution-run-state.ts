@@ -251,6 +251,18 @@ export function applyOutcomeJobExecutionEvent(
       ...(event.checkpointRef !== undefined ? { lastCheckpointRef: event.checkpointRef } : {}),
       ...(event.executorRef !== undefined ? { executorRef: event.executorRef } : {}),
     };
+  } else if (event.type === "CANCEL_REQUESTED" || event.type === "CHECKPOINT_REQUESTED") {
+    // Rev158 F12: a durable pre-effect claim marker only - it never itself
+    // changes attempt status (a management REQUEST is not execution terminal
+    // truth, per Rev149 F10's own separation), just advances lastSequence so
+    // a later legitimate retry after an unacknowledged attempt can claim a
+    // fresh coordinate.
+    updatedAttempt = {
+      ...attemptState,
+      lastSequence: event.sequence,
+      updatedAt: event.occurredAt,
+      ...(event.executorRef !== undefined ? { executorRef: event.executorRef } : {}),
+    };
   } else {
     throw new InvalidOutcomeJobExecutionTransitionError(`unhandled event type: ${event.type}`);
   }
