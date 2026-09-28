@@ -394,6 +394,48 @@ test("R13 (Rev161 F18, mandatory witness): restart/replay after a blocked cross-
   assert.equal(reconstructed?.attempts.get(1)?.status, "RUNNING", "a blocked reconciliation must never terminalize or otherwise mutate the attempt");
 });
 
+test("R14 (Rev166 F19, mandatory witness): restart/replay after a reconciliation resolving event loses its sequence slot reconstructs exactly the same pending/terminal truth as a live fold - never a fabricated resolution", () => {
+  // Models D44/D45/D46 at the domain layer. The runtime's resolving
+  // CANCELLED/CHECKPOINT event is never actually durably appended in these
+  // scenarios (it loses the atomic slot race), so the raw event log a
+  // restart/replay folds only ever contains the events that genuinely won:
+  // the original CANCEL_REQUESTED plus whatever raced it.
+  const accepted = ev();
+  const started = ev({ type: "ATTEMPT_STARTED" });
+  const cancelRequested = ev({ type: "CANCEL_REQUESTED", sequence: 2, reason: "founder requested" });
+
+  // Case 1: a non-terminal PROGRESS event wins the race - the pending
+  // cancel must remain exactly, reconstructed identically to a live fold.
+  const racingProgress = ev({ type: "PROGRESS", sequence: 3 });
+  const eventsAfterProgressRace = [accepted, started, cancelRequested, racingProgress];
+  let live: ReturnType<typeof applyOutcomeJobExecutionEvent> | undefined;
+  for (const event of eventsAfterProgressRace) {
+    live = applyOutcomeJobExecutionEvent(live, event);
+  }
+  let reconstructed = reconstructOutcomeJobExecutionRunState(eventsAfterProgressRace);
+  assert.deepEqual(reconstructed, live);
+  assert.deepEqual(reconstructed?.attempts.get(1)?.pendingControlRequest, {
+    kind: "CANCEL_REQUESTED",
+    controlRequestId: cancelRequested.eventId,
+    reason: "founder requested",
+  }, "the original pending cancel must survive a lost resolution-slot race exactly, on both a live fold and a from-scratch replay");
+  assert.equal(reconstructed?.attempts.get(1)?.status, "RUNNING");
+
+  // Case 2: a genuine terminal event (SUCCEEDED) wins the race instead -
+  // that terminal truth stands, and it moots (clears) the pending cancel,
+  // identically on a live fold and a from-scratch replay.
+  const racingSucceeded = ev({ type: "SUCCEEDED", sequence: 3 });
+  const eventsAfterTerminalRace = [accepted, started, cancelRequested, racingSucceeded];
+  live = undefined;
+  for (const event of eventsAfterTerminalRace) {
+    live = applyOutcomeJobExecutionEvent(live, event);
+  }
+  reconstructed = reconstructOutcomeJobExecutionRunState(eventsAfterTerminalRace);
+  assert.deepEqual(reconstructed, live);
+  assert.equal(reconstructed?.attempts.get(1)?.status, "SUCCEEDED");
+  assert.equal(reconstructed?.attempts.get(1)?.pendingControlRequest, undefined, "a genuine terminal winner must moot/clear the pending cancel, never leave a stale unresolved marker behind");
+});
+
 test("terminal reason/checkpoint/progress fields are recorded and mutually exclusive per event type at construction time", () => {
   assert.throws(() => ev({ type: "FAILED", reason: undefined }), Error, "FAILED requires a reason");
   assert.throws(

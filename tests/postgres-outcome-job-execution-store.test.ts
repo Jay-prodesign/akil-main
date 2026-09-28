@@ -5,11 +5,17 @@ import { createCustomer } from "../src/domain/customer.js";
 import { createProject } from "../src/domain/project.js";
 import { createOutcomeJob } from "../src/domain/outcome-job.js";
 import { createOutcomeJobExecutionEvent } from "../src/domain/outcome-job-execution-event.js";
+import { createAuthorityContext } from "../src/domain/authority.js";
 import {
   PostgresOutcomeJobExecutionStore,
   CorruptedOutcomeJobExecutionRowError,
 } from "../src/domain/postgres-outcome-job-execution-store.js";
 import type { SqlClient } from "../src/ports/sql-client.js";
+import {
+  requestExecutionCancellation,
+  PendingControlOperationReconciliationRequiredError,
+  type ControlOperationInvoker,
+} from "../src/application/outcome-job-execution-runtime.js";
 
 interface RawRow {
   tenant_id: string;
@@ -309,6 +315,60 @@ test("P9 (Rev158 F15, adversarial): CANCEL_REQUESTED/CHECKPOINT_REQUESTED are ad
     /CHECK constraint/,
     "an unrecognized type must still fail closed under the current migration's constraint",
   );
+});
+
+const authority = createAuthorityContext({
+  tenantScope, permissions: ["EXECUTE", "WRITE", "READ"], canPerformProtectedActions: false,
+});
+
+test("P10 (Rev166 F19, adversarial): the Postgres store exposes equivalent resolution-slot-race behavior to the File/in-memory store - a positive reconciliation that loses its slot to a concurrent PROGRESS row fails closed, and current durable state is authoritative", async () => {
+  const store = new PostgresOutcomeJobExecutionStore(new FakeSqlClient());
+  const accepted = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-pg-10", correlationId: "corr-pg-10",
+    attempt: 1, sequence: 1, type: "ACCEPTED", occurredAt: "2026-09-26T00:00:00.000Z",
+  });
+  await store.appendEvent(accepted);
+  const started = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-pg-10", correlationId: "corr-pg-10",
+    attempt: 1, sequence: 1, type: "ATTEMPT_STARTED", occurredAt: "2026-09-26T00:00:01.000Z",
+  });
+  await store.appendEvent(started);
+  const staleCancelRequest = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-pg-10", correlationId: "corr-pg-10",
+    attempt: 1, sequence: 2, type: "CANCEL_REQUESTED", occurredAt: "2026-09-26T00:00:02.000Z", reason: "first attempt",
+  });
+  await store.appendEvent(staleCancelRequest);
+  const stateAfterCrash = await store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-pg-10");
+
+  const invoker: ControlOperationInvoker & { cancelCalls: number } = {
+    cancelCalls: 0,
+    async requestCancel() { this.cancelCalls += 1; return { acknowledged: true }; },
+    requestCheckpoint: async () => { throw new Error("requestCheckpoint must never be invoked for this scenario"); },
+    async reconcileControlRequest() {
+      const racingProgress = createOutcomeJobExecutionEvent({
+        tenantScope, customer, project, job, runId: "run-pg-10", correlationId: "corr-pg-10",
+        attempt: 1, sequence: 3, type: "PROGRESS", occurredAt: "2026-09-26T00:00:03.000Z",
+      });
+      await store.appendEvent(racingProgress);
+      return { acknowledged: true };
+    },
+  };
+  await assert.rejects(
+    () => requestExecutionCancellation({
+      tenantScope, customer, project, job, authority, currentState: stateAfterCrash!, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "retry", store, controlInvoker: invoker,
+    }),
+    PendingControlOperationReconciliationRequiredError,
+    "the Postgres-backed store must fail closed identically to the File/in-memory store when the resolving event loses its slot",
+  );
+  assert.equal(invoker.cancelCalls, 0, "the external cancel effect must never be re-invoked merely to obtain a durable resolution");
+  const finalState = await store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-pg-10");
+  assert.deepEqual(finalState?.attempts.get(1)?.pendingControlRequest, {
+    kind: "CANCEL_REQUESTED",
+    controlRequestId: staleCancelRequest.eventId,
+    reason: "first attempt",
+  }, "the original pending cancel must remain exactly as it was in the Postgres-backed store too");
+  assert.equal(finalState?.attempts.get(1)?.status, "RUNNING");
 });
 
 test("P6 (Rev145 F2, adversarial): a row whose event_id column does not match the canonical derivation from its own tuple fails closed", async () => {

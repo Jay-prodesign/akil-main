@@ -976,6 +976,237 @@ test("D43 (Rev161 F18, mandatory witness): a cross-kind prior request that recon
   assert.equal(finalState?.attempts.get(1)?.pendingControlRequest, undefined);
 });
 
+test("D44 (Rev166 F19, mandatory witness): a positive cancel reconciliation whose resolving event loses its sequence slot to a concurrent PROGRESS event fails closed - the original pending cancel remains exactly, and no new control effect is invoked", async () => {
+  const job = freshJob("job-d44");
+  const store = new InMemoryExecutionEventStore();
+  await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d44", correlationId: "corr-d44", store, invoker: acceptingInvoker(),
+  });
+  const staleCancelRequest = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-d44", correlationId: "corr-d44",
+    attempt: 1, sequence: 2, type: "CANCEL_REQUESTED", occurredAt: "2026-09-26T00:00:30.000Z", reason: "first attempt",
+  });
+  store.appendEvent(staleCancelRequest);
+  const stateAfterCrash = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d44");
+
+  const invoker: ControlOperationInvoker & { cancelCalls: number; checkpointCalls: number } = {
+    cancelCalls: 0,
+    checkpointCalls: 0,
+    async requestCancel() { this.cancelCalls += 1; return { acknowledged: true }; },
+    async requestCheckpoint() { this.checkpointCalls += 1; return { acknowledged: true, checkpointRef: "should-never-happen" }; },
+    async reconcileControlRequest() {
+      // Simulate a concurrent PROGRESS event winning the exact sequence slot
+      // the resolving CANCELLED event is about to claim (both derive the
+      // same eventId at this (attempt, sequence) coordinate since Rev158
+      // F16 - the store's own atomic dedupe makes only one of them durable).
+      const racingProgress = createOutcomeJobExecutionEvent({
+        tenantScope, customer, project, job, runId: "run-d44", correlationId: "corr-d44",
+        attempt: 1, sequence: 3, type: "PROGRESS", occurredAt: "2026-09-26T00:00:45.000Z",
+      });
+      store.appendEvent(racingProgress);
+      return { acknowledged: true };
+    },
+  };
+  await assert.rejects(
+    () => requestExecutionCancellation({
+      tenantScope, customer, project, job, authority, currentState: stateAfterCrash!, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "retry", store, controlInvoker: invoker,
+    }),
+    PendingControlOperationReconciliationRequiredError,
+    "a positive reconciliation whose durable resolution lost its slot must fail closed, never be treated as complete",
+  );
+  assert.equal(invoker.cancelCalls, 0, "the external cancel effect must never be re-invoked merely to obtain a durable resolution");
+  assert.equal(invoker.checkpointCalls, 0);
+  const finalState = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d44");
+  assert.deepEqual(finalState?.attempts.get(1)?.pendingControlRequest, {
+    kind: "CANCEL_REQUESTED",
+    controlRequestId: staleCancelRequest.eventId,
+    reason: "first attempt",
+  }, "the original pending cancel must remain exactly as it was - never lost or fabricated as resolved");
+  assert.equal(finalState?.attempts.get(1)?.status, "RUNNING");
+});
+
+test("D45 (Rev166 F19, mandatory witness): a positive checkpoint reconciliation whose resolving event loses its sequence slot to a concurrent PROGRESS event fails closed - the original pending checkpoint remains exactly, and no new control effect is invoked", async () => {
+  const job = freshJob("job-d45");
+  const store = new InMemoryExecutionEventStore();
+  await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d45", correlationId: "corr-d45", store, invoker: acceptingInvoker(),
+  });
+  const staleCheckpointRequest = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-d45", correlationId: "corr-d45",
+    attempt: 1, sequence: 2, type: "CHECKPOINT_REQUESTED", occurredAt: "2026-09-26T00:00:30.000Z",
+  });
+  store.appendEvent(staleCheckpointRequest);
+  const stateAfterCrash = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d45");
+
+  const invoker: ControlOperationInvoker & { cancelCalls: number; checkpointCalls: number } = {
+    cancelCalls: 0,
+    checkpointCalls: 0,
+    async requestCancel() { this.cancelCalls += 1; return { acknowledged: true }; },
+    async requestCheckpoint() { this.checkpointCalls += 1; return { acknowledged: true, checkpointRef: "should-never-happen" }; },
+    async reconcileControlRequest() {
+      const racingProgress = createOutcomeJobExecutionEvent({
+        tenantScope, customer, project, job, runId: "run-d45", correlationId: "corr-d45",
+        attempt: 1, sequence: 3, type: "PROGRESS", occurredAt: "2026-09-26T00:00:45.000Z",
+      });
+      store.appendEvent(racingProgress);
+      return { acknowledged: true, checkpointRef: "real-ref" };
+    },
+  };
+  await assert.rejects(
+    () => requestExecutionCheckpoint({
+      tenantScope, customer, project, job, authority, currentState: stateAfterCrash!, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: false, supportsCheckpoint: true }, store, controlInvoker: invoker,
+    }),
+    PendingControlOperationReconciliationRequiredError,
+  );
+  assert.equal(invoker.cancelCalls, 0);
+  assert.equal(invoker.checkpointCalls, 0, "the external checkpoint effect must never be re-invoked merely to obtain a durable resolution");
+  const finalState = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d45");
+  assert.deepEqual(finalState?.attempts.get(1)?.pendingControlRequest, {
+    kind: "CHECKPOINT_REQUESTED",
+    controlRequestId: staleCheckpointRequest.eventId,
+  }, "the original pending checkpoint must remain exactly as it was - never lost or fabricated as resolved");
+  assert.equal(finalState?.attempts.get(1)?.status, "RUNNING");
+  assert.equal(finalState?.attempts.get(1)?.lastCheckpointRef, undefined, "the racing invoker's checkpointRef must never be durably recorded when the resolving event never won its slot");
+});
+
+test("D46 (Rev166 F19, mandatory witness): a terminal event winning the same race makes the pending cancel moot - current durable state itself proves the safe terminal disposition, and no new control effect is invoked", async () => {
+  const job = freshJob("job-d46");
+  const store = new InMemoryExecutionEventStore();
+  await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d46", correlationId: "corr-d46", store, invoker: acceptingInvoker(),
+  });
+  const staleCancelRequest = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-d46", correlationId: "corr-d46",
+    attempt: 1, sequence: 2, type: "CANCEL_REQUESTED", occurredAt: "2026-09-26T00:00:30.000Z", reason: "first attempt",
+  });
+  store.appendEvent(staleCancelRequest);
+  const stateAfterCrash = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d46");
+
+  const invoker: ControlOperationInvoker & { cancelCalls: number } = {
+    cancelCalls: 0,
+    async requestCancel() { this.cancelCalls += 1; return { acknowledged: true }; },
+    requestCheckpoint: async () => { throw new Error("requestCheckpoint must never be invoked for this scenario"); },
+    async reconcileControlRequest() {
+      // A genuine, independent terminal outcome (e.g. the worker itself
+      // reporting SUCCEEDED) wins the exact same slot our resolving
+      // CANCELLED event is about to claim.
+      const racingSucceeded = createOutcomeJobExecutionEvent({
+        tenantScope, customer, project, job, runId: "run-d46", correlationId: "corr-d46",
+        attempt: 1, sequence: 3, type: "SUCCEEDED", occurredAt: "2026-09-26T00:00:45.000Z",
+      });
+      store.appendEvent(racingSucceeded);
+      return { acknowledged: true };
+    },
+  };
+  const result = await requestExecutionCancellation({
+    tenantScope, customer, project, job, authority, currentState: stateAfterCrash!, now: "2026-09-26T00:01:00.000Z",
+    capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "retry", store, controlInvoker: invoker,
+  });
+  assert.equal(invoker.cancelCalls, 0, "a genuine terminal winner must never trigger a re-invocation of the control effect");
+  assert.equal(result.attempts.get(1)?.status, "SUCCEEDED", "current durable state's own genuine terminal truth must stand - never overwritten or second-guessed");
+  assert.equal(result.attempts.get(1)?.pendingControlRequest, undefined);
+});
+
+test("D47 (Rev166 F19, bounded self-audit witness): a FRESH cancel whose confirmed control effect's resolving event loses its sequence slot to a concurrent PROGRESS event fails closed - the just-claimed pending cancel remains, and a retry never re-invokes the real control effect", async () => {
+  const job = freshJob("job-d47");
+  const store = new InMemoryExecutionEventStore();
+  await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d47", correlationId: "corr-d47", store, invoker: acceptingInvoker(),
+  });
+  const currentState = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d47");
+
+  const invoker: ControlOperationInvoker & { cancelCalls: number; reconcileCalls: number } = {
+    cancelCalls: 0,
+    reconcileCalls: 0,
+    async requestCancel() {
+      this.cancelCalls += 1;
+      // The real external cancel effect genuinely happens here - but before
+      // this resolves, a concurrent PROGRESS report wins the exact sequence
+      // slot our own resolving CANCELLED event is about to target.
+      const racingProgress = createOutcomeJobExecutionEvent({
+        tenantScope, customer, project, job, runId: "run-d47", correlationId: "corr-d47",
+        attempt: 1, sequence: 3, type: "PROGRESS", occurredAt: "2026-09-26T00:00:31.000Z",
+      });
+      store.appendEvent(racingProgress);
+      return { acknowledged: true };
+    },
+    requestCheckpoint: async () => { throw new Error("requestCheckpoint must never be invoked for this scenario"); },
+    async reconcileControlRequest(input) {
+      this.reconcileCalls += 1;
+      return input.kind === "CANCEL" ? { acknowledged: true } : { acknowledged: false };
+    },
+  };
+  await assert.rejects(
+    () => requestExecutionCancellation({
+      tenantScope, customer, project, job, authority, currentState: currentState!, now: "2026-09-26T00:00:30.000Z",
+      capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "founder requested", store, controlInvoker: invoker,
+    }),
+    PendingControlOperationReconciliationRequiredError,
+    "a genuinely-confirmed cancel effect whose durable record lost its slot must still fail closed, never be silently treated as complete",
+  );
+  assert.equal(invoker.cancelCalls, 1, "the real external cancel effect must have been invoked exactly once");
+  const stateAfterRace = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d47");
+  const pendingAfterRace = stateAfterRace?.attempts.get(1)?.pendingControlRequest;
+  assert.equal(pendingAfterRace?.kind, "CANCEL_REQUESTED");
+  assert.equal(pendingAfterRace?.reason, "founder requested");
+  assert.equal(stateAfterRace?.attempts.get(1)?.status, "RUNNING");
+
+  // A retry must reconcile the already-claimed pending request (durably
+  // confirmed via `reconcileControlRequest`, not `requestCancel` again) and
+  // this time durably record the resolution, since nothing else is racing.
+  const retryResult = await requestExecutionCancellation({
+    tenantScope, customer, project, job, authority, currentState: stateAfterRace!, now: "2026-09-26T00:00:40.000Z",
+    capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "founder requested retry", store, controlInvoker: invoker,
+  });
+  assert.equal(invoker.cancelCalls, 1, "a retry must never repeat the already-possibly-effectful external cancel operation");
+  assert.equal(invoker.reconcileCalls, 1);
+  assert.equal(retryResult.attempts.get(1)?.status, "CANCELLED");
+  assert.equal(retryResult.attempts.get(1)?.pendingControlRequest, undefined);
+});
+
+test("D48 (Rev166 F19, bounded self-audit witness): a FRESH checkpoint whose confirmed control effect's resolving event loses its sequence slot to a concurrent PROGRESS event fails closed - the just-claimed pending checkpoint remains exactly, and the racing invoker's checkpointRef is never durably recorded", async () => {
+  const job = freshJob("job-d48");
+  const store = new InMemoryExecutionEventStore();
+  await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d48", correlationId: "corr-d48", store, invoker: acceptingInvoker(),
+  });
+  const currentState = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d48");
+
+  const invoker: ControlOperationInvoker & { checkpointCalls: number } = {
+    checkpointCalls: 0,
+    requestCancel: async () => { throw new Error("requestCancel must never be invoked for this scenario"); },
+    async requestCheckpoint() {
+      this.checkpointCalls += 1;
+      // The real external checkpoint effect genuinely happens here - but
+      // before this resolves, a concurrent PROGRESS report wins the exact
+      // sequence slot our own resolving CHECKPOINT event is about to target.
+      const racingProgress = createOutcomeJobExecutionEvent({
+        tenantScope, customer, project, job, runId: "run-d48", correlationId: "corr-d48",
+        attempt: 1, sequence: 3, type: "PROGRESS", occurredAt: "2026-09-26T00:00:31.000Z",
+      });
+      store.appendEvent(racingProgress);
+      return { acknowledged: true, checkpointRef: "real-checkpoint-ref" };
+    },
+    reconcileControlRequest: async () => { throw new Error("reconcileControlRequest must never be invoked for this scenario"); },
+  };
+  await assert.rejects(
+    () => requestExecutionCheckpoint({
+      tenantScope, customer, project, job, authority, currentState: currentState!, now: "2026-09-26T00:00:30.000Z",
+      capabilities: { supportsCancel: false, supportsCheckpoint: true }, store, controlInvoker: invoker,
+    }),
+    PendingControlOperationReconciliationRequiredError,
+    "a genuinely-confirmed checkpoint effect whose durable record lost its slot must still fail closed, never be silently treated as complete",
+  );
+  assert.equal(invoker.checkpointCalls, 1, "the real external checkpoint effect must have been invoked exactly once");
+  const stateAfterRace = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d48");
+  const pendingAfterRace = stateAfterRace?.attempts.get(1)?.pendingControlRequest;
+  assert.equal(pendingAfterRace?.kind, "CHECKPOINT_REQUESTED");
+  assert.equal(stateAfterRace?.attempts.get(1)?.status, "RUNNING");
+  assert.equal(stateAfterRace?.attempts.get(1)?.lastCheckpointRef, undefined, "the racing invoker's real checkpointRef must never be durably recorded when the resolving event never won its slot");
+});
+
 test("D13: dispatch requires the caller's authority to belong to the same tenant as the job", async () => {
   const job = freshJob("job-d13");
   const store = new InMemoryExecutionEventStore();

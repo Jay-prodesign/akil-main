@@ -729,6 +729,54 @@ function isDeterminateReconciliationResult(
 }
 
 /**
+ * Rev166 F19: a positive reconciliation (`resolution.acknowledged === true`)
+ * is NOT yet complete merely because this function attempted to append the
+ * resolving `CANCELLED`/`CHECKPOINT` event - `appendEvent`'s own atomic
+ * single-authority claim (the same `created` contract Rev145 F1 established)
+ * can still lose to a concurrent event racing for the identical sequence
+ * slot (e.g. a `PROGRESS` report, which - since Rev158 F16 - shares that
+ * slot's exclusivity with every non-`ACCEPTED` type). If our append loses,
+ * durable state was never made to actually reflect this pending request's
+ * own true outcome, even though the invoker genuinely confirmed it.
+ *
+ * F19 semantics: positive reconciliation is complete only if (a) our own
+ * resolving event durably won its slot, or (b) freshly reloaded durable
+ * state independently proves a safe terminal disposition that makes the
+ * pending operation moot regardless of who caused it (a genuine terminal
+ * winner - never inferred from stale pre-race state or the failed append
+ * result alone). If neither holds - the SAME original pending operation is
+ * still durably present and non-terminal - the request path fails closed:
+ * no new cancel/checkpoint effect may be invoked, and the real external
+ * control operation is never re-invoked merely to obtain a durable
+ * resolution record (`reconcileControlRequest` itself is side-effect-free
+ * and safe for the caller's own next attempt to repeat).
+ */
+async function finalizePositiveReconciliationAppend(
+  store: ExecutionEventStore,
+  event: OutcomeJobExecutionEvent,
+  attempt: number,
+  pending: PendingControlRequest,
+): Promise<OutcomeJobExecutionRunState> {
+  const { state, created } = await appendAndGetState(store, event);
+  if (created) {
+    return state;
+  }
+  const reloadedAttemptState = state.attempts.get(attempt);
+  if (reloadedAttemptState !== undefined && ATTEMPT_TERMINAL_STATUSES.has(reloadedAttemptState.status)) {
+    // A genuine terminal winner (real durable truth, just reloaded) makes
+    // the pending operation moot regardless of what raced our own append.
+    return state;
+  }
+  if (reloadedAttemptState?.pendingControlRequest?.controlRequestId === pending.controlRequestId) {
+    throw new PendingControlOperationReconciliationRequiredError(pending.controlRequestId);
+  }
+  // The original pending operation is no longer the current durable pending
+  // truth (superseded by some other fresh claim) - nothing further for this
+  // specific resolution attempt to assert.
+  return state;
+}
+
+/**
  * Rev158 F17 / Rev161 F18: resolves a SPECIFIC prior `CANCEL_REQUESTED` that
  * is still outstanding on the current attempt. Returns the completed durable
  * state if the invoker confirms it genuinely already took effect (writing
@@ -801,8 +849,7 @@ async function resolvePendingCancelRequest(
     occurredAt: input.now,
     reason: pending.reason,
   });
-  const { state } = await appendAndGetState(input.store, event);
-  return state;
+  return finalizePositiveReconciliationAppend(input.store, event, freshState.currentAttempt, pending);
 }
 
 /**
@@ -847,8 +894,7 @@ async function resolvePendingCheckpointRequest(
     occurredAt: input.now,
     checkpointRef: resolution.checkpointRef,
   });
-  const { state } = await appendAndGetState(input.store, event);
-  return state;
+  return finalizePositiveReconciliationAppend(input.store, event, freshState.currentAttempt, pending);
 }
 
 /**
@@ -1006,8 +1052,19 @@ export async function requestExecutionCancellation(
     occurredAt: input.now,
     reason: input.reason,
   });
-  const { state } = await appendAndGetState(input.store, event);
-  return state;
+  // Rev166 F19 bounded self-audit: this fresh-invocation path has the exact
+  // same "effect confirmed but its durable record can still lose the
+  // sequence-slot race" defect as pending-request reconciliation - we just
+  // received a genuine `acknowledged: true` from `requestCancel`, but that
+  // alone does not durably record it. Route through the same fail-closed
+  // helper, resolving the pendingControlRequest OUR OWN claim (`requestEvent`)
+  // just durably created - a caller retry after a slot loss re-enters via
+  // the pending-reconciliation path above and never re-invokes `requestCancel`.
+  return finalizePositiveReconciliationAppend(input.store, event, freshState.currentAttempt, {
+    kind: "CANCEL_REQUESTED",
+    controlRequestId: requestEvent.eventId,
+    reason: requestEvent.reason,
+  });
 }
 
 /**
@@ -1111,6 +1168,10 @@ export async function requestExecutionCheckpoint(
     occurredAt: input.now,
     checkpointRef: acknowledgement.checkpointRef,
   });
-  const { state } = await appendAndGetState(input.store, event);
-  return state;
+  // Rev166 F19 bounded self-audit: symmetric fix - see requestExecutionCancellation's
+  // own comment immediately above its equivalent call.
+  return finalizePositiveReconciliationAppend(input.store, event, freshState.currentAttempt, {
+    kind: "CHECKPOINT_REQUESTED",
+    controlRequestId: requestEvent.eventId,
+  });
 }
