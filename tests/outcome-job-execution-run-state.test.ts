@@ -335,7 +335,10 @@ test("R12 (Rev158 F17, mandatory witness): restart/replay reconstructs the exact
   assert.deepEqual(reconstructed, live);
   assert.equal(reconstructed?.attempts.get(1)?.pendingControlRequest, undefined);
 
-  // A fresh CANCEL_REQUESTED after that sets its own pending marker.
+  // A fresh CANCEL_REQUESTED after that sets its own pending marker - and
+  // (Rev161 F18) durably carries its own reason forward on the marker
+  // itself, since a later cross-kind reconciliation may need to complete
+  // this exact request's true outcome without any other source of a reason.
   const eventsAfterCancelRequested = [...eventsAfterCheckpoint, cancelRequested];
   live = applyOutcomeJobExecutionEvent(live, cancelRequested);
   reconstructed = reconstructOutcomeJobExecutionRunState(eventsAfterCancelRequested);
@@ -343,6 +346,7 @@ test("R12 (Rev158 F17, mandatory witness): restart/replay reconstructs the exact
   assert.deepEqual(reconstructed?.attempts.get(1)?.pendingControlRequest, {
     kind: "CANCEL_REQUESTED",
     controlRequestId: cancelRequested.eventId,
+    reason: "user requested",
   });
 
   // Any terminal outcome (here CANCELLED) clears a pending request entirely,
@@ -353,6 +357,41 @@ test("R12 (Rev158 F17, mandatory witness): restart/replay reconstructs the exact
   assert.deepEqual(reconstructed, live);
   assert.equal(reconstructed?.attempts.get(1)?.status, "CANCELLED");
   assert.equal(reconstructed?.attempts.get(1)?.pendingControlRequest, undefined);
+});
+
+test("R13 (Rev161 F18, mandatory witness): restart/replay after a blocked cross-kind control request reconstructs exactly the original pending controlRequestId, kind, and reason - never the blocked request's own", () => {
+  // Models D39/D40 at the domain layer: an indeterminate reconciliation
+  // never durably appends any new event (the runtime fails closed before
+  // ever constructing one), so the durable event log a restart/replay folds
+  // is EXACTLY the log up to and including the original, still-unresolved
+  // CANCEL_REQUESTED - a later caller's blocked attempt to ask for the
+  // OTHER control kind (CHECKPOINT) leaves no trace in the log at all.
+  const accepted = ev();
+  const started = ev({ type: "ATTEMPT_STARTED" });
+  const cancelRequested = ev({ type: "CANCEL_REQUESTED", sequence: 2, reason: "founder requested" });
+
+  const eventsAfterCancelRequested = [accepted, started, cancelRequested];
+  let live: ReturnType<typeof applyOutcomeJobExecutionEvent> | undefined;
+  for (const event of eventsAfterCancelRequested) {
+    live = applyOutcomeJobExecutionEvent(live, event);
+  }
+  assert.deepEqual(live?.attempts.get(1)?.pendingControlRequest, {
+    kind: "CANCEL_REQUESTED",
+    controlRequestId: cancelRequested.eventId,
+    reason: "founder requested",
+  });
+
+  // A blocked cross-kind checkpoint attempt appends nothing - the log a
+  // restart replays is unchanged, so reconstruction reproduces the exact
+  // same original pending identity, never the blocked checkpoint's.
+  const reconstructed = reconstructOutcomeJobExecutionRunState(eventsAfterCancelRequested);
+  assert.deepEqual(reconstructed, live);
+  assert.deepEqual(reconstructed?.attempts.get(1)?.pendingControlRequest, {
+    kind: "CANCEL_REQUESTED",
+    controlRequestId: cancelRequested.eventId,
+    reason: "founder requested",
+  });
+  assert.equal(reconstructed?.attempts.get(1)?.status, "RUNNING", "a blocked reconciliation must never terminalize or otherwise mutate the attempt");
 });
 
 test("terminal reason/checkpoint/progress fields are recorded and mutually exclusive per event type at construction time", () => {

@@ -801,6 +801,181 @@ test("D38 (Rev158 F17, mandatory witness): a malformed (non-boolean acknowledged
   );
 });
 
+test("D39 (Rev161 F18, mandatory witness): a pending CANCEL_REQUESTED followed by a CHECKPOINT request with indeterminate reconciliation issues no checkpoint claim/effect, and the original cancel pending identity is preserved", async () => {
+  const job = freshJob("job-d39");
+  const store = new InMemoryExecutionEventStore();
+  await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d39", correlationId: "corr-d39", store, invoker: acceptingInvoker(),
+  });
+  const staleCancelRequest = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-d39", correlationId: "corr-d39",
+    attempt: 1, sequence: 2, type: "CANCEL_REQUESTED", occurredAt: "2026-09-26T00:00:30.000Z", reason: "first attempt",
+  });
+  store.appendEvent(staleCancelRequest);
+  const stateAfterCrash = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d39");
+
+  let reconcileCalledWithKind: unknown;
+  const invoker: ControlOperationInvoker = {
+    requestCancel: async () => { throw new Error("requestCancel must never be invoked for this scenario"); },
+    requestCheckpoint: async () => { throw new Error("requestCheckpoint must never be invoked - the prior cross-kind request is unresolved"); },
+    reconcileControlRequest: async (input) => {
+      reconcileCalledWithKind = input.kind;
+      return undefined; // indeterminate
+    },
+  };
+  await assert.rejects(
+    () => requestExecutionCheckpoint({
+      tenantScope, customer, project, job, authority, currentState: stateAfterCrash!, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: false, supportsCheckpoint: true }, store, controlInvoker: invoker,
+    }),
+    PendingControlOperationReconciliationRequiredError,
+  );
+  assert.equal(reconcileCalledWithKind, "CANCEL", "reconciliation must target the ORIGINAL pending request's own kind, not the newly-requested one");
+  const finalState = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d39");
+  assert.deepEqual(finalState?.attempts.get(1)?.pendingControlRequest, {
+    kind: "CANCEL_REQUESTED",
+    controlRequestId: staleCancelRequest.eventId,
+    reason: "first attempt",
+  }, "the original cancel pending identity must be preserved exactly - never overwritten or lost");
+});
+
+test("D40 (Rev161 F18, mandatory witness): a pending CHECKPOINT_REQUESTED followed by a CANCEL request with indeterminate reconciliation issues no cancel claim/effect, and the original checkpoint pending identity is preserved", async () => {
+  const job = freshJob("job-d40");
+  const store = new InMemoryExecutionEventStore();
+  await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d40", correlationId: "corr-d40", store, invoker: acceptingInvoker(),
+  });
+  const staleCheckpointRequest = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-d40", correlationId: "corr-d40",
+    attempt: 1, sequence: 2, type: "CHECKPOINT_REQUESTED", occurredAt: "2026-09-26T00:00:30.000Z",
+  });
+  store.appendEvent(staleCheckpointRequest);
+  const stateAfterCrash = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d40");
+
+  let reconcileCalledWithKind: unknown;
+  const invoker: ControlOperationInvoker = {
+    requestCancel: async () => { throw new Error("requestCancel must never be invoked - the prior cross-kind request is unresolved"); },
+    requestCheckpoint: async () => { throw new Error("requestCheckpoint must never be invoked for this scenario"); },
+    reconcileControlRequest: async (input) => {
+      reconcileCalledWithKind = input.kind;
+      return undefined; // indeterminate
+    },
+  };
+  await assert.rejects(
+    () => requestExecutionCancellation({
+      tenantScope, customer, project, job, authority, currentState: stateAfterCrash!, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "new cancel reason", store, controlInvoker: invoker,
+    }),
+    PendingControlOperationReconciliationRequiredError,
+  );
+  assert.equal(reconcileCalledWithKind, "CHECKPOINT", "reconciliation must target the ORIGINAL pending request's own kind, not the newly-requested one");
+  const finalState = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d40");
+  assert.deepEqual(finalState?.attempts.get(1)?.pendingControlRequest, {
+    kind: "CHECKPOINT_REQUESTED",
+    controlRequestId: staleCheckpointRequest.eventId,
+  }, "the original checkpoint pending identity must be preserved exactly - never overwritten or lost");
+});
+
+test("D41 (Rev161 F18, mandatory witness): a pending cancel that reconciles acknowledged=true then a checkpoint request - durable CANCELLED truth wins, checkpoint effect count remains zero", async () => {
+  const job = freshJob("job-d41");
+  const store = new InMemoryExecutionEventStore();
+  await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d41", correlationId: "corr-d41", store, invoker: acceptingInvoker(),
+  });
+  const staleCancelRequest = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-d41", correlationId: "corr-d41",
+    attempt: 1, sequence: 2, type: "CANCEL_REQUESTED", occurredAt: "2026-09-26T00:00:30.000Z", reason: "first attempt",
+  });
+  store.appendEvent(staleCancelRequest);
+  const stateAfterCrash = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d41");
+
+  const invoker: ControlOperationInvoker & { checkpointCalls: number } = {
+    checkpointCalls: 0,
+    requestCancel: async () => { throw new Error("requestCancel must never be invoked - the prior request's own outcome must be reconciled, not re-invoked"); },
+    async requestCheckpoint() { this.checkpointCalls += 1; return { acknowledged: true, checkpointRef: "should-never-be-used" }; },
+    reconcileControlRequest: async (input) => (input.kind === "CANCEL" ? { acknowledged: true } : { acknowledged: false }),
+  };
+  const result = await requestExecutionCheckpoint({
+    tenantScope, customer, project, job, authority, currentState: stateAfterCrash!, now: "2026-09-26T00:01:00.000Z",
+    capabilities: { supportsCancel: false, supportsCheckpoint: true }, store, controlInvoker: invoker,
+  });
+  assert.equal(result.attempts.get(1)?.status, "CANCELLED", "the original pending cancel's own true outcome must durably win");
+  assert.equal(invoker.checkpointCalls, 0, "a confirmed prior cancel terminalizes the attempt - no checkpoint effect may then be invoked");
+  assert.equal(result.attempts.get(1)?.pendingControlRequest, undefined);
+});
+
+test("D42 (Rev161 F18, mandatory witness): a pending checkpoint that reconciles acknowledged=true with a real checkpointRef then a cancel request - checkpoint evidence is durably recorded first, and only after fresh-state revalidation may the cancel path proceed under one-effect claim semantics", async () => {
+  const job = freshJob("job-d42");
+  const store = new InMemoryExecutionEventStore();
+  await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d42", correlationId: "corr-d42", store, invoker: acceptingInvoker(),
+  });
+  const staleCheckpointRequest = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-d42", correlationId: "corr-d42",
+    attempt: 1, sequence: 2, type: "CHECKPOINT_REQUESTED", occurredAt: "2026-09-26T00:00:30.000Z",
+  });
+  store.appendEvent(staleCheckpointRequest);
+  const stateAfterCrash = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d42");
+
+  const invoker: ControlOperationInvoker & { cancelCalls: number } = {
+    cancelCalls: 0,
+    async requestCancel() { this.cancelCalls += 1; return { acknowledged: true }; },
+    requestCheckpoint: async () => { throw new Error("requestCheckpoint must never be invoked - the prior request's own outcome must be reconciled, not re-invoked"); },
+    reconcileControlRequest: async (input) =>
+      (input.kind === "CHECKPOINT" ? { acknowledged: true, checkpointRef: "real-checkpoint-ref" } : { acknowledged: false }),
+  };
+  const result = await requestExecutionCancellation({
+    tenantScope, customer, project, job, authority, currentState: stateAfterCrash!, now: "2026-09-26T00:01:00.000Z",
+    capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "cancel after checkpoint", store, controlInvoker: invoker,
+  });
+  assert.equal(invoker.cancelCalls, 1, "exactly one fresh cancel effect may be invoked once the prior checkpoint is durably resolved and the attempt proven non-terminal");
+  assert.equal(result.attempts.get(1)?.status, "CANCELLED");
+  const finalState = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d42");
+  assert.equal(finalState?.attempts.get(1)?.lastCheckpointRef, "real-checkpoint-ref", "the prior checkpoint's real evidence must be durably recorded, never discarded");
+});
+
+test("D43 (Rev161 F18, mandatory witness): a cross-kind prior request that reconciles acknowledged=false allows exactly one fresh requested effect, and restart/replay never resurrects the definitively-resolved prior request as unresolved", async () => {
+  const job = freshJob("job-d43");
+  const store = new InMemoryExecutionEventStore();
+  await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d43", correlationId: "corr-d43", store, invoker: acceptingInvoker(),
+  });
+  const staleCancelRequest = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-d43", correlationId: "corr-d43",
+    attempt: 1, sequence: 2, type: "CANCEL_REQUESTED", occurredAt: "2026-09-26T00:00:30.000Z", reason: "first attempt",
+  });
+  store.appendEvent(staleCancelRequest);
+  const stateAfterCrash = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d43");
+
+  let reconcileCalledWithKind: unknown;
+  let reconcileCalledWithControlRequestId: unknown;
+  const invoker: ControlOperationInvoker & { checkpointCalls: number } = {
+    checkpointCalls: 0,
+    requestCancel: async () => { throw new Error("requestCancel must never be invoked for this scenario"); },
+    async requestCheckpoint() { this.checkpointCalls += 1; return { acknowledged: true, checkpointRef: "fresh-ref" }; },
+    reconcileControlRequest: async (input) => {
+      reconcileCalledWithKind = input.kind;
+      reconcileCalledWithControlRequestId = input.controlRequestId;
+      return input.kind === "CANCEL" ? { acknowledged: false } : { acknowledged: true, checkpointRef: "x" };
+    },
+  };
+  const result = await requestExecutionCheckpoint({
+    tenantScope, customer, project, job, authority, currentState: stateAfterCrash!, now: "2026-09-26T00:01:00.000Z",
+    capabilities: { supportsCancel: false, supportsCheckpoint: true }, store, controlInvoker: invoker,
+  });
+  assert.equal(reconcileCalledWithKind, "CANCEL", "the ORIGINAL cross-kind pending request must actually be reconciled, never silently skipped merely because the newly-requested kind differs");
+  assert.equal(reconcileCalledWithControlRequestId, staleCancelRequest.eventId);
+  assert.equal(invoker.checkpointCalls, 1, "a definitively-not-happened prior cross-kind request must allow exactly one fresh requested effect");
+  assert.equal(result.attempts.get(1)?.status, "RUNNING");
+  assert.equal(result.attempts.get(1)?.lastCheckpointRef, "fresh-ref");
+
+  // Restart/replay from the full durable log must not resurrect the
+  // definitively-not-happened CANCEL_REQUESTED as an unresolved pending -
+  // the fresh CHECKPOINT_REQUESTED/CHECKPOINT pair supersedes it entirely.
+  const finalState = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d43");
+  assert.equal(finalState?.attempts.get(1)?.pendingControlRequest, undefined);
+});
+
 test("D13: dispatch requires the caller's authority to belong to the same tenant as the job", async () => {
   const job = freshJob("job-d13");
   const store = new InMemoryExecutionEventStore();

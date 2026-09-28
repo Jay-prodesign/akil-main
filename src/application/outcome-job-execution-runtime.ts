@@ -729,20 +729,29 @@ function isDeterminateReconciliationResult(
 }
 
 /**
- * Rev158 F17: resolves a SPECIFIC prior `CANCEL_REQUESTED` that is still
- * outstanding on the current attempt. Returns the completed durable state if
- * the invoker confirms it genuinely already took effect (writing CANCELLED
- * evidence without ever calling `requestCancel` again - closing the "crash
- * after effect, before evidence" recovery gap), or `undefined` if the
- * invoker confirms it definitely did NOT take effect (the caller may then
- * safely proceed with a fresh attempt - closing the "crash before invoke"
- * recovery gap). Throws `PendingControlOperationReconciliationRequiredError`
+ * Rev158 F17 / Rev161 F18: resolves a SPECIFIC prior `CANCEL_REQUESTED` that
+ * is still outstanding on the current attempt. Returns the completed durable
+ * state if the invoker confirms it genuinely already took effect (writing
+ * CANCELLED evidence without ever calling `requestCancel` again - closing
+ * the "crash after effect, before evidence" recovery gap), or `undefined` if
+ * the invoker confirms it definitely did NOT take effect (the caller may
+ * then safely proceed with a fresh attempt - closing the "crash before
+ * invoke" recovery gap). Throws `PendingControlOperationReconciliationRequiredError`
  * if the invoker cannot determine either way - never fabricates a result.
+ *
+ * Rev161 F18: the eventual `CANCELLED` event's `reason` is taken from
+ * `pending.reason` - the ORIGINAL `CANCEL_REQUESTED` event's own durably
+ * recorded reason - never from whatever the CURRENT caller happens to
+ * supply. This is required once reconciliation can be reached from a
+ * DIFFERENT control kind's request (`requestExecutionCheckpoint`), whose own
+ * input carries no `reason` field at all; using the pending request's own
+ * historical reason is also simply more correct for the same-kind case,
+ * since it durably materializes the ORIGINAL request's own evidence rather
+ * than a possibly-different reason supplied on a later retry.
  */
 async function resolvePendingCancelRequest(
   input: ScopeInput & {
     readonly now: unknown;
-    readonly reason: unknown;
     readonly store: ExecutionEventStore;
     readonly controlInvoker: ControlOperationInvoker;
   },
@@ -763,13 +772,21 @@ async function resolvePendingCancelRequest(
   if (!isDeterminateReconciliationResult(resolution)) {
     // Rev158 F17: neither `undefined` nor a malformed/indeterminate result
     // is proof the prior effect did NOT happen - fail closed either way,
-    // never silently treat "we don't know" as "safe to retry."
+    // never silently treat "we don't know" as "safe to retry." No new event
+    // is appended here, so the original pending's own durable identity
+    // (kind + controlRequestId + reason) remains exactly reconstructible on
+    // restart/replay (Rev161 F18 / R13).
     throw new PendingControlOperationReconciliationRequiredError(pending.controlRequestId);
   }
   if (!resolution.acknowledged) {
     // Genuinely, determinately confirmed: the prior request never took
     // effect - safe for the caller to fall through to a fresh attempt.
     return undefined;
+  }
+  if (pending.reason === undefined) {
+    throw new InvalidOutcomeJobExecutionRuntimeError(
+      "internal error: a pending CANCEL_REQUESTED is missing its own durably-recorded reason",
+    );
   }
   const event = createOutcomeJobExecutionEvent({
     tenantScope: input.tenantScope,
@@ -782,7 +799,7 @@ async function resolvePendingCancelRequest(
     sequence: nextSequenceForAttempt(freshState, freshState.currentAttempt),
     type: "CANCELLED",
     occurredAt: input.now,
-    reason: input.reason,
+    reason: pending.reason,
   });
   const { state } = await appendAndGetState(input.store, event);
   return state;
@@ -834,6 +851,32 @@ async function resolvePendingCheckpointRequest(
   return state;
 }
 
+/**
+ * Rev161 F18: the single entry point BOTH `requestExecutionCancellation` and
+ * `requestExecutionCheckpoint` use to reconcile a pending control request
+ * REGARDLESS of which kind the CURRENT caller is asking for. Dispatches to
+ * the resolver for the pending request's OWN kind - never the newly
+ * requested kind - so a cross-kind pending request (e.g. an unresolved
+ * `CANCEL_REQUESTED` discovered while the caller now asks for a checkpoint)
+ * is completed with its own true outcome/evidence, exactly as F18 requires,
+ * rather than being silently ignored, overwritten, or resolved against the
+ * wrong kind.
+ */
+async function reconcilePendingControlRequestOfEitherKind(
+  input: ScopeInput & {
+    readonly now: unknown;
+    readonly store: ExecutionEventStore;
+    readonly controlInvoker: ControlOperationInvoker;
+  },
+  freshState: OutcomeJobExecutionRunState,
+  pending: PendingControlRequest,
+): Promise<OutcomeJobExecutionRunState | undefined> {
+  if (pending.kind === "CANCEL_REQUESTED") {
+    return resolvePendingCancelRequest(input, freshState, pending);
+  }
+  return resolvePendingCheckpointRequest(input, freshState, pending);
+}
+
 export async function requestExecutionCancellation(
   input: ScopeInput & {
     readonly authority: AuthorityContext;
@@ -863,26 +906,41 @@ export async function requestExecutionCancellation(
     return freshState;
   }
 
-  // Rev158 F17: a prior CANCEL_REQUESTED on this attempt may still be
-  // outstanding (e.g. the process died after durably claiming it but before
-  // the control effect was invoked, or after the effect but before its
-  // durable evidence was recorded). Blindly proceeding to a fresh
-  // requestCancel here could double-invoke a real effect whose outcome is
-  // unknown - the prior request's own fate must be reconciled first.
-  const pendingCancel = currentAttemptState?.pendingControlRequest?.kind === "CANCEL_REQUESTED"
-    ? currentAttemptState.pendingControlRequest
-    : undefined;
-  if (pendingCancel !== undefined) {
-    const resolvedState = await resolvePendingCancelRequest(input, freshState, pendingCancel);
+  // Rev158 F17 / Rev161 F18: ANY prior control request on this attempt may
+  // still be outstanding - not only a same-kind CANCEL_REQUESTED. A pending
+  // CHECKPOINT_REQUESTED left over from an earlier crashed/lost-ack call is
+  // exactly as dangerous to ignore here as a same-kind one would be:
+  // blindly proceeding to claim a fresh CANCEL_REQUESTED while that other
+  // request's real outcome is still unknown could double-invoke a real
+  // effect, or silently overwrite/lose the original request's identity.
+  // Reconciliation always targets the PENDING request's own kind, never the
+  // kind currently being asked for.
+  const pending = currentAttemptState?.pendingControlRequest;
+  if (pending !== undefined) {
+    const resolvedState = await reconcilePendingControlRequestOfEitherKind(input, freshState, pending);
     if (resolvedState !== undefined) {
-      return resolvedState;
-    }
-    // The prior request definitely did NOT take effect - safe to fall
-    // through to a fresh attempt below, using re-fetched current state.
-    freshState = await verifyAndRefreshExecutionState(input.store, input, freshState);
-    currentAttemptState = freshState.attempts.get(freshState.currentAttempt);
-    if (currentAttemptState !== undefined && ATTEMPT_TERMINAL_STATUSES.has(currentAttemptState.status)) {
-      return freshState;
+      // The original pending request DID already happen and its true
+      // outcome is now durable. If that durably terminalized the attempt
+      // (a confirmed prior cancel), there is nothing left for this
+      // (possibly differently-kinded) call to do. If it did NOT terminalize
+      // the attempt (a confirmed prior checkpoint), F18 requires
+      // re-fetching current durable state and proving the attempt remains
+      // non-terminal before this call's own (different) requested control
+      // operation may proceed.
+      freshState = await verifyAndRefreshExecutionState(input.store, input, resolvedState);
+      currentAttemptState = freshState.attempts.get(freshState.currentAttempt);
+      if (currentAttemptState !== undefined && ATTEMPT_TERMINAL_STATUSES.has(currentAttemptState.status)) {
+        return freshState;
+      }
+    } else {
+      // The original pending request definitively did NOT take effect -
+      // safe to fall through to a fresh attempt below, using re-fetched
+      // current state.
+      freshState = await verifyAndRefreshExecutionState(input.store, input, freshState);
+      currentAttemptState = freshState.attempts.get(freshState.currentAttempt);
+      if (currentAttemptState !== undefined && ATTEMPT_TERMINAL_STATUSES.has(currentAttemptState.status)) {
+        return freshState;
+      }
     }
   }
 
@@ -986,20 +1044,24 @@ export async function requestExecutionCheckpoint(
     return freshState;
   }
 
-  // Rev158 F17: symmetric pending-request reconciliation - see
-  // requestExecutionCancellation's own comment for the full rationale.
-  const pendingCheckpoint = currentAttemptState?.pendingControlRequest?.kind === "CHECKPOINT_REQUESTED"
-    ? currentAttemptState.pendingControlRequest
-    : undefined;
-  if (pendingCheckpoint !== undefined) {
-    const resolvedState = await resolvePendingCheckpointRequest(input, freshState, pendingCheckpoint);
+  // Rev158 F17 / Rev161 F18: symmetric ANY-kind pending-request
+  // reconciliation - see requestExecutionCancellation's own comment for the
+  // full rationale.
+  const pending = currentAttemptState?.pendingControlRequest;
+  if (pending !== undefined) {
+    const resolvedState = await reconcilePendingControlRequestOfEitherKind(input, freshState, pending);
     if (resolvedState !== undefined) {
-      return resolvedState;
-    }
-    freshState = await verifyAndRefreshExecutionState(input.store, input, freshState);
-    currentAttemptState = freshState.attempts.get(freshState.currentAttempt);
-    if (currentAttemptState !== undefined && ATTEMPT_TERMINAL_STATUSES.has(currentAttemptState.status)) {
-      return freshState;
+      freshState = await verifyAndRefreshExecutionState(input.store, input, resolvedState);
+      currentAttemptState = freshState.attempts.get(freshState.currentAttempt);
+      if (currentAttemptState !== undefined && ATTEMPT_TERMINAL_STATUSES.has(currentAttemptState.status)) {
+        return freshState;
+      }
+    } else {
+      freshState = await verifyAndRefreshExecutionState(input.store, input, freshState);
+      currentAttemptState = freshState.attempts.get(freshState.currentAttempt);
+      if (currentAttemptState !== undefined && ATTEMPT_TERMINAL_STATUSES.has(currentAttemptState.status)) {
+        return freshState;
+      }
     }
   }
 

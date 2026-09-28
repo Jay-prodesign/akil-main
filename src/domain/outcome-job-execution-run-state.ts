@@ -56,10 +56,23 @@ export const ATTEMPT_TERMINAL_STATUSES: ReadonlySet<OutcomeJobExecutionAttemptSt
  * the exact same pending disposition - there is no separate in-memory
  * tracking that could diverge from durable truth (mirrors this module's own
  * restart-safety discipline for run state as a whole).
+ *
+ * Rev161 F18: `reason` durably carries the ORIGINAL `CANCEL_REQUESTED`
+ * event's own validated reason (never present for `CHECKPOINT_REQUESTED`,
+ * which carries no reason). This is required - not merely convenient - once
+ * a pending request can be reconciled from a call of the OTHER control kind
+ * (e.g. a pending cancel discovered while the caller asked for a
+ * checkpoint): that caller's own input has no `reason` field at all, so the
+ * eventual durable `CANCELLED` event (which requires a non-empty `reason`)
+ * can only ever be constructed from the original request's own historical
+ * reason, never from an unrelated new call's input. This is a minimal,
+ * durable-replay-necessitated field addition (F18 semantics point 7) rather
+ * than a new event or subsystem.
  */
 export interface PendingControlRequest {
   readonly kind: "CANCEL_REQUESTED" | "CHECKPOINT_REQUESTED";
   readonly controlRequestId: string;
+  readonly reason?: string;
 }
 
 export interface OutcomeJobExecutionAttemptState {
@@ -295,7 +308,11 @@ export function applyOutcomeJobExecutionEvent(
       lastSequence: event.sequence,
       updatedAt: event.occurredAt,
       ...(event.executorRef !== undefined ? { executorRef: event.executorRef } : {}),
-      pendingControlRequest: { kind: event.type, controlRequestId: event.eventId },
+      pendingControlRequest: {
+        kind: event.type,
+        controlRequestId: event.eventId,
+        ...(event.reason !== undefined ? { reason: event.reason } : {}),
+      },
     };
   } else {
     throw new InvalidOutcomeJobExecutionTransitionError(`unhandled event type: ${event.type}`);
