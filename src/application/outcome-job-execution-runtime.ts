@@ -11,6 +11,7 @@ import {
 import {
   ATTEMPT_TERMINAL_STATUSES,
   type OutcomeJobExecutionRunState,
+  type OutcomeJobExecutionAttemptState,
   type PendingControlRequest,
 } from "../domain/outcome-job-execution-run-state.js";
 import type { AuthorityContext } from "../domain/authority.js";
@@ -777,6 +778,56 @@ async function finalizePositiveReconciliationAppend(
 }
 
 /**
+ * Rev167 F20: the required gate immediately before either function may
+ * proceed to a fresh cancel/checkpoint claim/effect, no matter which path
+ * got it there. F19's `finalizePositiveReconciliationAppend` correctly
+ * lets a lost resolving-event race fall through to current durable truth
+ * when the ORIGINAL pending identity is no longer present - but "no longer
+ * present" has two different causes that were being treated identically:
+ * (a) it was genuinely cleared (our own resolution won, or a genuine
+ * terminal winner mooted it) - safe to proceed; (b) it was SUPERSEDED by a
+ * DIFFERENT fresh pending claim from a concurrent caller (a brand new
+ * `CANCEL_REQUESTED`/`CHECKPOINT_REQUESTED` durably won that exact slot
+ * instead) - NOT safe to proceed, since F18's own preserved invariant is
+ * "no new control effect while ANY unresolved pending request exists,"
+ * not merely "while the SAME one does." The same gap independently exists
+ * on the determinately-false-reconciliation fallthrough (a concurrent
+ * caller's fresh claim can win a slot in the window between calling
+ * `reconcileControlRequest` and this re-fetch), so this single check
+ * covers both fallthroughs uniformly.
+ *
+ * Deliberately fails closed (reusing the existing
+ * `PendingControlOperationReconciliationRequiredError`) rather than
+ * attempting to reconcile the newly-discovered identity inline - that would
+ * require unbounded recursion in the adversarial case where the new
+ * identity is itself superseded again before it can be resolved. A caller's
+ * own next attempt re-enters at the top of the function, where the current
+ * pending (whoever's it now is) is picked up by the existing any-kind
+ * reconciliation mechanism exactly as if it had been there from the start.
+ *
+ * `previouslyKnownControlRequestId` is the `controlRequestId` this call
+ * already accounted for (`undefined` if no pending existed when this call
+ * began). A currently-present pending whose id STILL matches that one is
+ * NOT a new blocking identity - it is simply the same request this call
+ * already determined "did not happen" (F17's determinately-false path never
+ * appends anything to durably clear the marker itself; that marker is only
+ * ever overwritten once a fresh claim event is appended, which is exactly
+ * what this call is about to do). Only a DIFFERENT id - proof some other
+ * caller's fresh claim durably won a slot in the meantime - triggers the
+ * fail-closed path.
+ */
+function assertNoUnresolvedPendingControlRequest(
+  attemptState: OutcomeJobExecutionAttemptState | undefined,
+  previouslyKnownControlRequestId: string | undefined,
+): void {
+  const currentPending = attemptState?.pendingControlRequest;
+  if (currentPending === undefined || currentPending.controlRequestId === previouslyKnownControlRequestId) {
+    return;
+  }
+  throw new PendingControlOperationReconciliationRequiredError(currentPending.controlRequestId);
+}
+
+/**
  * Rev158 F17 / Rev161 F18: resolves a SPECIFIC prior `CANCEL_REQUESTED` that
  * is still outstanding on the current attempt. Returns the completed durable
  * state if the invoker confirms it genuinely already took effect (writing
@@ -990,6 +1041,16 @@ export async function requestExecutionCancellation(
     }
   }
 
+  // Rev167 F20: neither fallthrough above proves current durable state is
+  // actually free of a genuinely NEW pending control request - a concurrent
+  // caller may have durably won a fresh claim (a different identity
+  // entirely) in the exact window either branch above re-fetched state.
+  // Fail closed rather than silently proceeding while some OTHER pending
+  // request is genuinely outstanding (the ORIGINAL `pending`, if still
+  // present unchanged, is not new - our own upcoming claim below is what
+  // will supersede it, exactly as it always has).
+  assertNoUnresolvedPendingControlRequest(currentAttemptState, pending?.controlRequestId);
+
   // Rev158 F12/F14: a durable, atomically-claimed pre-effect marker -
   // mirrors Rev145 F1's ATTEMPT_STARTED single-authority claim exactly.
   // Constructing this event via `createOutcomeJobExecutionEvent` also fully
@@ -1121,6 +1182,10 @@ export async function requestExecutionCheckpoint(
       }
     }
   }
+
+  // Rev167 F20: symmetric fresh-pending recheck - see
+  // requestExecutionCancellation's own comment for the full rationale.
+  assertNoUnresolvedPendingControlRequest(currentAttemptState, pending?.controlRequestId);
 
   // Rev158 F12/F14: same durable atomic pre-effect claim as cancellation -
   // validates `occurredAt` before the control effect is ever invoked, and

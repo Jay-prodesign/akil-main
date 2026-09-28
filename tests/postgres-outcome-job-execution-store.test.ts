@@ -13,6 +13,7 @@ import {
 import type { SqlClient } from "../src/ports/sql-client.js";
 import {
   requestExecutionCancellation,
+  requestExecutionCheckpoint,
   PendingControlOperationReconciliationRequiredError,
   type ControlOperationInvoker,
 } from "../src/application/outcome-job-execution-runtime.js";
@@ -369,6 +370,55 @@ test("P10 (Rev166 F19, adversarial): the Postgres store exposes equivalent resol
     reason: "first attempt",
   }, "the original pending cancel must remain exactly as it was in the Postgres-backed store too");
   assert.equal(finalState?.attempts.get(1)?.status, "RUNNING");
+});
+
+test("P11 (Rev167 F20, adversarial): the Postgres store exposes equivalent fresh-pending-supersession behavior to the File/in-memory store - a determinately-false reconciliation whose slot is instead won by a DIFFERENT fresh pending row fails closed, and current durable state (Q) is authoritative", async () => {
+  const store = new PostgresOutcomeJobExecutionStore(new FakeSqlClient());
+  const accepted = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-pg-11", correlationId: "corr-pg-11",
+    attempt: 1, sequence: 1, type: "ACCEPTED", occurredAt: "2026-09-26T00:00:00.000Z",
+  });
+  await store.appendEvent(accepted);
+  const started = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-pg-11", correlationId: "corr-pg-11",
+    attempt: 1, sequence: 1, type: "ATTEMPT_STARTED", occurredAt: "2026-09-26T00:00:01.000Z",
+  });
+  await store.appendEvent(started);
+  const pCancelRequest = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-pg-11", correlationId: "corr-pg-11",
+    attempt: 1, sequence: 2, type: "CANCEL_REQUESTED", occurredAt: "2026-09-26T00:00:02.000Z", reason: "first attempt",
+  });
+  await store.appendEvent(pCancelRequest);
+  const currentState = await store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-pg-11");
+
+  let qCheckpointRequest: ReturnType<typeof createOutcomeJobExecutionEvent> | undefined;
+  const invoker: ControlOperationInvoker & { checkpointCalls: number } = {
+    checkpointCalls: 0,
+    requestCancel: async () => { throw new Error("requestCancel must never be invoked for this scenario"); },
+    async requestCheckpoint() { this.checkpointCalls += 1; throw new Error("requestCheckpoint must never be invoked - a different pending (Q) has taken over the slot"); },
+    async reconcileControlRequest() {
+      qCheckpointRequest = createOutcomeJobExecutionEvent({
+        tenantScope, customer, project, job, runId: "run-pg-11", correlationId: "corr-pg-11",
+        attempt: 1, sequence: 3, type: "CHECKPOINT_REQUESTED", occurredAt: "2026-09-26T00:00:03.000Z",
+      });
+      await store.appendEvent(qCheckpointRequest);
+      return { acknowledged: false }; // P determinately did NOT happen
+    },
+  };
+  await assert.rejects(
+    () => requestExecutionCheckpoint({
+      tenantScope, customer, project, job, authority, currentState: currentState!, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: false, supportsCheckpoint: true }, store, controlInvoker: invoker,
+    }),
+    PendingControlOperationReconciliationRequiredError,
+    "the Postgres-backed store must fail closed identically to the File/in-memory store when a different fresh pending supersedes the original",
+  );
+  assert.equal(invoker.checkpointCalls, 0, "no control effect may be invoked while Q is the current unresolved pending");
+  const finalState = await store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-pg-11");
+  assert.deepEqual(finalState?.attempts.get(1)?.pendingControlRequest, {
+    kind: "CHECKPOINT_REQUESTED",
+    controlRequestId: qCheckpointRequest!.eventId,
+  }, "current durable pending truth in the Postgres-backed store must be Q, exactly");
 });
 
 test("P6 (Rev145 F2, adversarial): a row whose event_id column does not match the canonical derivation from its own tuple fails closed", async () => {

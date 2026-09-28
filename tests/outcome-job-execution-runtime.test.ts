@@ -1207,6 +1207,178 @@ test("D48 (Rev166 F19, bounded self-audit witness): a FRESH checkpoint whose con
   assert.equal(stateAfterRace?.attempts.get(1)?.lastCheckpointRef, undefined, "the racing invoker's real checkpointRef must never be durably recorded when the resolving event never won its slot");
 });
 
+test("D49 (Rev167 F20, mandatory witness): pending P (cancel) determinately resolves false, but a DIFFERENT fresh pending Q (checkpoint) durably wins the slot in the same window - the checkpoint caller fails closed with zero effect, and a later cancel request R also invokes zero effect while Q remains pending", async () => {
+  const job = freshJob("job-d49");
+  const store = new InMemoryExecutionEventStore();
+  await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d49", correlationId: "corr-d49", store, invoker: acceptingInvoker(),
+  });
+  const pCancelRequest = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-d49", correlationId: "corr-d49",
+    attempt: 1, sequence: 2, type: "CANCEL_REQUESTED", occurredAt: "2026-09-26T00:00:30.000Z", reason: "first attempt",
+  });
+  store.appendEvent(pCancelRequest);
+  const currentState = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d49");
+
+  let qCheckpointRequest: OutcomeJobExecutionEvent | undefined;
+  const invoker: ControlOperationInvoker & { checkpointCalls: number } = {
+    checkpointCalls: 0,
+    requestCancel: async () => { throw new Error("requestCancel must never be invoked for this scenario"); },
+    async requestCheckpoint() { this.checkpointCalls += 1; throw new Error("requestCheckpoint must never be invoked - P's own fate is still being determined and a different pending (Q) has taken over the slot"); },
+    async reconcileControlRequest(input) {
+      // While reconciling P (the cancel), an entirely different caller's
+      // FRESH checkpoint request (Q) durably wins the exact slot P's own
+      // resolution would have targeted.
+      qCheckpointRequest = createOutcomeJobExecutionEvent({
+        tenantScope, customer, project, job, runId: "run-d49", correlationId: "corr-d49",
+        attempt: 1, sequence: 3, type: "CHECKPOINT_REQUESTED", occurredAt: "2026-09-26T00:00:31.000Z",
+      });
+      store.appendEvent(qCheckpointRequest);
+      assert.equal(input.kind, "CANCEL");
+      return { acknowledged: false }; // P determinately did NOT happen
+    },
+  };
+  await assert.rejects(
+    () => requestExecutionCheckpoint({
+      tenantScope, customer, project, job, authority, currentState: currentState!, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: false, supportsCheckpoint: true }, store, controlInvoker: invoker,
+    }),
+    PendingControlOperationReconciliationRequiredError,
+    "a different, genuinely NEW pending (Q) superseding the original (P) must still fail closed - non-terminal current state alone is not enough to proceed",
+  );
+  assert.equal(invoker.checkpointCalls, 0, "no control effect may be invoked while Q is the current unresolved pending");
+  const stateWithQPending = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d49");
+  assert.deepEqual(stateWithQPending?.attempts.get(1)?.pendingControlRequest, {
+    kind: "CHECKPOINT_REQUESTED",
+    controlRequestId: qCheckpointRequest!.eventId,
+  }, "current durable pending truth must be Q, exactly - not P, not cleared, not fabricated");
+
+  // A later, unrelated cancel request R must also invoke zero effect while Q
+  // remains the current unresolved pending - this is the ordinary any-kind
+  // reconciliation mechanism (F18/F19), now correctly reached because Q is
+  // visible to R's own request rather than silently skipped.
+  const rInvoker: ControlOperationInvoker = {
+    requestCancel: async () => { throw new Error("requestCancel must never be invoked while Q is unresolved"); },
+    requestCheckpoint: async () => { throw new Error("requestCheckpoint must never be invoked for this scenario"); },
+    async reconcileControlRequest(input) {
+      assert.equal(input.kind, "CHECKPOINT");
+      assert.equal(input.controlRequestId, qCheckpointRequest!.eventId);
+      return undefined; // indeterminate - R must still fail closed
+    },
+  };
+  await assert.rejects(
+    () => requestExecutionCancellation({
+      tenantScope, customer, project, job, authority, currentState: stateWithQPending!, now: "2026-09-26T00:02:00.000Z",
+      capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "R's own reason", store, controlInvoker: rInvoker,
+    }),
+    PendingControlOperationReconciliationRequiredError,
+  );
+});
+
+test("D50 (Rev167 F20, mandatory witness): symmetric direction - pending P (checkpoint) determinately resolves false, but a DIFFERENT fresh pending Q (cancel) durably wins the slot in the same window - the cancel caller fails closed with zero effect", async () => {
+  const job = freshJob("job-d50");
+  const store = new InMemoryExecutionEventStore();
+  await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d50", correlationId: "corr-d50", store, invoker: acceptingInvoker(),
+  });
+  const pCheckpointRequest = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-d50", correlationId: "corr-d50",
+    attempt: 1, sequence: 2, type: "CHECKPOINT_REQUESTED", occurredAt: "2026-09-26T00:00:30.000Z",
+  });
+  store.appendEvent(pCheckpointRequest);
+  const currentState = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d50");
+
+  let qCancelRequest: OutcomeJobExecutionEvent | undefined;
+  const invoker: ControlOperationInvoker & { cancelCalls: number } = {
+    cancelCalls: 0,
+    async requestCancel() { this.cancelCalls += 1; throw new Error("requestCancel must never be invoked - a different pending (Q) has taken over the slot"); },
+    requestCheckpoint: async () => { throw new Error("requestCheckpoint must never be invoked for this scenario"); },
+    async reconcileControlRequest(input) {
+      qCancelRequest = createOutcomeJobExecutionEvent({
+        tenantScope, customer, project, job, runId: "run-d50", correlationId: "corr-d50",
+        attempt: 1, sequence: 3, type: "CANCEL_REQUESTED", occurredAt: "2026-09-26T00:00:31.000Z", reason: "Q's own reason",
+      });
+      store.appendEvent(qCancelRequest);
+      assert.equal(input.kind, "CHECKPOINT");
+      return { acknowledged: false }; // P determinately did NOT happen
+    },
+  };
+  await assert.rejects(
+    () => requestExecutionCancellation({
+      tenantScope, customer, project, job, authority, currentState: currentState!, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "caller's own reason", store, controlInvoker: invoker,
+    }),
+    PendingControlOperationReconciliationRequiredError,
+  );
+  assert.equal(invoker.cancelCalls, 0, "no control effect may be invoked while Q is the current unresolved pending");
+  const stateWithQPending = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d50");
+  assert.deepEqual(stateWithQPending?.attempts.get(1)?.pendingControlRequest, {
+    kind: "CANCEL_REQUESTED",
+    controlRequestId: qCancelRequest!.eventId,
+    reason: "Q's own reason",
+  }, "current durable pending truth must be Q, exactly");
+});
+
+test("D51 (Rev167 F20, mandatory witness): once the superseding pending Q is determinately resolved/cleared, a subsequent eligible control operation can proceed exactly once", async () => {
+  const job = freshJob("job-d51");
+  const store = new InMemoryExecutionEventStore();
+  await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-d51", correlationId: "corr-d51", store, invoker: acceptingInvoker(),
+  });
+  const pCancelRequest = createOutcomeJobExecutionEvent({
+    tenantScope, customer, project, job, runId: "run-d51", correlationId: "corr-d51",
+    attempt: 1, sequence: 2, type: "CANCEL_REQUESTED", occurredAt: "2026-09-26T00:00:30.000Z", reason: "first attempt",
+  });
+  store.appendEvent(pCancelRequest);
+  const currentState = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d51");
+
+  let qCheckpointRequest: OutcomeJobExecutionEvent | undefined;
+  const racingInvoker: ControlOperationInvoker = {
+    requestCancel: async () => { throw new Error("requestCancel must never be invoked for this scenario"); },
+    requestCheckpoint: async () => { throw new Error("requestCheckpoint must never be invoked for this scenario"); },
+    async reconcileControlRequest() {
+      qCheckpointRequest = createOutcomeJobExecutionEvent({
+        tenantScope, customer, project, job, runId: "run-d51", correlationId: "corr-d51",
+        attempt: 1, sequence: 3, type: "CHECKPOINT_REQUESTED", occurredAt: "2026-09-26T00:00:31.000Z",
+      });
+      store.appendEvent(qCheckpointRequest);
+      return { acknowledged: false };
+    },
+  };
+  await assert.rejects(
+    () => requestExecutionCheckpoint({
+      tenantScope, customer, project, job, authority, currentState: currentState!, now: "2026-09-26T00:01:00.000Z",
+      capabilities: { supportsCancel: false, supportsCheckpoint: true }, store, controlInvoker: racingInvoker,
+    }),
+    PendingControlOperationReconciliationRequiredError,
+  );
+  const stateWithQPending = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-d51");
+  assert.equal(stateWithQPending?.attempts.get(1)?.pendingControlRequest?.controlRequestId, qCheckpointRequest!.eventId);
+
+  // Now Q is genuinely, determinately resolved (acknowledged true, with real
+  // checkpoint evidence) - nothing else races this time. A subsequent
+  // eligible cancel request must then proceed and invoke its own control
+  // effect exactly once.
+  const resolvingInvoker: ControlOperationInvoker & { cancelCalls: number } = {
+    cancelCalls: 0,
+    async requestCancel() { this.cancelCalls += 1; return { acknowledged: true }; },
+    requestCheckpoint: async () => { throw new Error("requestCheckpoint must never be invoked for this scenario"); },
+    async reconcileControlRequest(input) {
+      assert.equal(input.kind, "CHECKPOINT");
+      assert.equal(input.controlRequestId, qCheckpointRequest!.eventId);
+      return { acknowledged: true, checkpointRef: "q-resolved-ref" };
+    },
+  };
+  const finalResult = await requestExecutionCancellation({
+    tenantScope, customer, project, job, authority, currentState: stateWithQPending!, now: "2026-09-26T00:02:00.000Z",
+    capabilities: { supportsCancel: true, supportsCheckpoint: false }, reason: "subsequent cancel", store, controlInvoker: resolvingInvoker,
+  });
+  assert.equal(resolvingInvoker.cancelCalls, 1, "the subsequent eligible cancel must proceed and invoke its own effect exactly once");
+  assert.equal(finalResult.attempts.get(1)?.status, "CANCELLED");
+  assert.equal(finalResult.attempts.get(1)?.lastCheckpointRef, "q-resolved-ref", "Q's own genuine resolution evidence must be durably preserved");
+  assert.equal(finalResult.attempts.get(1)?.pendingControlRequest, undefined);
+});
+
 test("D13: dispatch requires the caller's authority to belong to the same tenant as the job", async () => {
   const job = freshJob("job-d13");
   const store = new InMemoryExecutionEventStore();

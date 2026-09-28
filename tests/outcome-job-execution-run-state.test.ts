@@ -436,6 +436,30 @@ test("R14 (Rev166 F19, mandatory witness): restart/replay after a reconciliation
   assert.equal(reconstructed?.attempts.get(1)?.pendingControlRequest, undefined, "a genuine terminal winner must moot/clear the pending cancel, never leave a stale unresolved marker behind");
 });
 
+test("R15 (Rev167 F20, mandatory witness): restart/replay after a DIFFERENT fresh pending (Q) supersedes an original pending (P) reconstructs exactly Q as the current pending identity - never P, never a fabricated resolution of either", () => {
+  // Models D49/D50 at the domain layer: P's own reconciliation never durably
+  // appends anything for a determinately-false result, so the raw event log
+  // a restart/replay folds is exactly [..., P, Q] - Q's own fresh claim
+  // event is what actually applies via the reducer, overwriting P's marker.
+  const accepted = ev();
+  const started = ev({ type: "ATTEMPT_STARTED" });
+  const pCancelRequested = ev({ type: "CANCEL_REQUESTED", sequence: 2, reason: "founder requested" });
+  const qCheckpointRequested = ev({ type: "CHECKPOINT_REQUESTED", sequence: 3 });
+
+  const eventsAfterSupersession = [accepted, started, pCancelRequested, qCheckpointRequested];
+  let live: ReturnType<typeof applyOutcomeJobExecutionEvent> | undefined;
+  for (const event of eventsAfterSupersession) {
+    live = applyOutcomeJobExecutionEvent(live, event);
+  }
+  const reconstructed = reconstructOutcomeJobExecutionRunState(eventsAfterSupersession);
+  assert.deepEqual(reconstructed, live);
+  assert.deepEqual(reconstructed?.attempts.get(1)?.pendingControlRequest, {
+    kind: "CHECKPOINT_REQUESTED",
+    controlRequestId: qCheckpointRequested.eventId,
+  }, "the current pending identity must be exactly Q - P's own marker was durably overwritten, never merely shadowed");
+  assert.equal(reconstructed?.attempts.get(1)?.status, "RUNNING");
+});
+
 test("terminal reason/checkpoint/progress fields are recorded and mutually exclusive per event type at construction time", () => {
   assert.throws(() => ev({ type: "FAILED", reason: undefined }), Error, "FAILED requires a reason");
   assert.throws(
