@@ -74,7 +74,7 @@ function renderPage(input: {
   .skip-link { position: absolute; left: -9999px; top: 0; background: #fff; color: #000; padding: 0.5rem 1rem; z-index: 10; }
   .skip-link:focus { left: 0; }
   a:focus-visible, button:focus-visible, [tabindex]:focus-visible { outline: 3px solid #1a73e8; outline-offset: 2px; }
-  .app-shell { display: grid; grid-template-columns: 14rem 1fr; min-height: 100vh; }
+  .app-shell { display: grid; grid-template-columns: 14rem 1fr; grid-template-rows: auto 1fr; min-height: 100vh; align-content: start; }
   .app-header { grid-column: 1 / -1; padding: 0.75rem 1rem; border-bottom: 1px solid currentColor; display: flex; align-items: center; justify-content: space-between; }
   .app-nav { border-right: 1px solid currentColor; padding: 1rem 0; }
   .app-nav ul { list-style: none; margin: 0; padding: 0; }
@@ -91,7 +91,17 @@ function renderPage(input: {
   table { border-collapse: collapse; width: 100%; }
   th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid currentColor; }
   @media (max-width: 640px) {
-    .app-shell { grid-template-columns: 1fr; }
+    /*
+     * Single-column stacking moves .app-nav into its own grid row (it
+     * shares a row with main only in the 2-column desktop layout above),
+     * so the row template needs a THIRD track here - otherwise the "1fr"
+     * leftover-space track lands on .app-nav instead of main, stretching
+     * the nav bar to fill the viewport and leaving a large visible gap
+     * before the page content (a real defect found via rendered mobile
+     * screenshot inspection, not merely inferred from CSS).
+     */
+    .app-shell { grid-template-columns: 1fr; grid-template-rows: auto auto 1fr; }
+    .app-header { flex-direction: column; align-items: flex-start; gap: 0.35rem; }
     .app-nav { border-right: none; border-bottom: 1px solid currentColor; padding: 0.5rem 0; }
     .app-nav ul { display: flex; flex-wrap: wrap; }
     main { padding: 0.75rem; }

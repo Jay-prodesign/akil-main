@@ -147,6 +147,43 @@ test("Admin renders the organization/access it was given plus every NOT_ACTIVE c
   assert.match(rendered.html, /NOT ACTIVE/);
 });
 
+test("Rev170 F2: the app-shell grid reserves leftover vertical space for the content row, not the header - found via real rendered screenshot inspection (a short-content page like Work previously stretched the header row to fill min-height: 100vh, pushing the header text down inside a visibly oversized band)", () => {
+  const view: HomeViewState = {
+    kind: "READY",
+    organization: { displayName: "Org", state: "ACTIVE" },
+    access: { role: "MEMBER", permissions: ["READ"], canPerformProtectedActions: false },
+    work: { kind: "NOT_ACTIVE" },
+  };
+  const rendered = renderInternalOsPage(homePageContent(NAV_DESTINATIONS, "Org", view));
+  assert.match(rendered.html, /\.app-shell\s*\{[^}]*grid-template-rows:\s*auto 1fr;/);
+});
+
+test("Rev170 F2: the mobile breakpoint gives the single-column stack a THIRD explicit row so the nav bar (not main) does not absorb leftover space - found via real rendered mobile screenshot inspection (a short-content page previously stretched the nav bar to fill the viewport, leaving a large blank gap before the page content)", () => {
+  const view: HomeViewState = {
+    kind: "READY",
+    organization: { displayName: "Org", state: "ACTIVE" },
+    access: { role: "MEMBER", permissions: ["READ"], canPerformProtectedActions: false },
+    work: { kind: "NOT_ACTIVE" },
+  };
+  const rendered = renderInternalOsPage(homePageContent(NAV_DESTINATIONS, "Org", view));
+  const mediaBlockMatch = rendered.html.match(/@media \(max-width: 640px\) \{([\s\S]*?)\n  \}/);
+  assert.ok(mediaBlockMatch, "expected the mobile breakpoint media block to be present");
+  assert.match(mediaBlockMatch![1]!, /\.app-shell\s*\{[^}]*grid-template-rows:\s*auto auto 1fr;/);
+});
+
+test("Rev170 F2: the mobile breakpoint stacks the header title and organization line vertically instead of a row-flex, preventing them from crowding/wrapping onto the same visual line - found via real rendered mobile screenshot inspection", () => {
+  const view: HomeViewState = {
+    kind: "READY",
+    organization: { displayName: "Org", state: "ACTIVE" },
+    access: { role: "MEMBER", permissions: ["READ"], canPerformProtectedActions: false },
+    work: { kind: "NOT_ACTIVE" },
+  };
+  const rendered = renderInternalOsPage(homePageContent(NAV_DESTINATIONS, "Org", view));
+  const mediaBlockMatch = rendered.html.match(/@media \(max-width: 640px\) \{([\s\S]*?)\n  \}/);
+  assert.ok(mediaBlockMatch, "expected the mobile breakpoint media block to be present");
+  assert.match(mediaBlockMatch![1]!, /\.app-header\s*\{[^}]*flex-direction:\s*column;/);
+});
+
 test("every rendered page carries a skip link and semantic header/nav/main landmarks", () => {
   const view: HomeViewState = {
     kind: "READY",

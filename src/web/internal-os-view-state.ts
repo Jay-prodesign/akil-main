@@ -49,20 +49,57 @@ export const NAV_DESTINATIONS: ReadonlyArray<NavDestination> = [
 ];
 
 /**
- * Phase A: every destination is visible to any granted, READ-permitted
- * staff member - none of these 9 destinations requires WRITE/EXECUTE or a
- * curated role merely to be LISTED (only their CONTENT may render
- * NOT_ACTIVE/UNAVAILABLE truthfully). This is deliberately still computed
- * from `access` (the real `EffectiveAccessResolution`, already proven
- * `GRANTED` before this is ever called) rather than a static constant, so
- * a future destination that genuinely requires more than READ has exactly
- * one place to add that rule without touching render/routing code.
+ * Rev170 F1 correction: the stable IA is designed once, but the NINE
+ * destinations are no longer uniformly visible to every GRANTED staff
+ * member - Rev168/canonical 23B/23C require the projection to differ for
+ * broad Founder/high-access, ordinary Member/project-scoped, and
+ * restricted fixtures, derived from the CURRENT `EffectiveAccessResolution`
+ * permissions/`canPerformProtectedActions` plus real assignment evidence -
+ * never from `OrganizationAccessRole`/`OWNER`/`ADMIN` labels, which never
+ * create authority (Rev168). `home`/`people`/`products` are the READ-only
+ * floor every GRANTED staff member sees (each renders only safe,
+ * self-scoped or already-authorized content); `work` requires at least one
+ * real project `AssignmentReference` (Rev168: "Project detail requires
+ * exact current assignment evidence" - a member with zero assignments has
+ * nothing to see there, so the destination itself is hidden rather than
+ * merely rendering EMPTY); `admin`/`ai-capabilities`/`connections`/
+ * `knowledge` require `WRITE` (organization-shaping destinations, even
+ * though Phase A itself exposes no mutating affordance yet); `attention`
+ * requires `EXECUTE` or `canPerformProtectedActions` (approvals/execution
+ * surface). This is the ONE place visibility is computed - both
+ * `resolveNavVisibility` (what is LISTED) and the request handler's own
+ * direct-route gate (what is REACHABLE) call this same function, so a
+ * destination hidden from navigation cannot be reached by deep-linking
+ * either (Rev170: "server-side fail-closed direct access to destinations
+ * hidden by that policy").
  */
-export function resolveNavVisibility(access: EffectiveAccessResolution): ReadonlyArray<NavDestination> {
+export function isDestinationVisible(key: DestinationKey, context: InternalOsAccessContext): boolean {
+  const access = context.access;
   if (access.decision !== "GRANTED") {
+    return false;
+  }
+  switch (key) {
+    case "home":
+    case "people":
+    case "products":
+      return true;
+    case "work":
+      return context.grant.assignments.some((assignment) => assignment.projectId !== undefined);
+    case "attention":
+      return access.canPerformProtectedActions || access.permissions.has("EXECUTE");
+    case "admin":
+    case "ai-capabilities":
+    case "connections":
+    case "knowledge":
+      return access.permissions.has("WRITE");
+  }
+}
+
+export function resolveNavVisibility(context: InternalOsAccessContext): ReadonlyArray<NavDestination> {
+  if (context.access.decision !== "GRANTED") {
     return [];
   }
-  return NAV_DESTINATIONS;
+  return NAV_DESTINATIONS.filter((destination) => isDestinationVisible(destination.key, context));
 }
 
 export interface OrganizationSummary {

@@ -12,6 +12,7 @@ import { requireInternalOsAccess } from "../src/web/internal-os-access.js";
 import { createDevFixtureStaffSessionProvider } from "../src/web/dev-fixture-staff-session-provider.js";
 import {
   resolveNavVisibility,
+  isDestinationVisible,
   resolveHomeView,
   resolveWorkView,
   resolveWorkProjectDetailView,
@@ -35,14 +36,29 @@ const jobAlpha = createOutcomeJob({
   tenantScope, customer, project: projectAlpha, jobId: "job-alpha-1", jobFamily: "WEBSITE_BUILD", businessObjective: "Deliver",
 });
 
-function contextFor(assignedProjectIds: ReadonlyArray<string>) {
-  const principal = createAuthenticatedStaffPrincipal({ principalId: "viewer", displayName: "Viewer" });
-  const membership = createOrganizationMembership({ membershipId: "m-viewer", tenantScope, principalRef: principal.principalId, role: "STAFF" });
+let viewerCounter = 0;
+
+function contextFor(
+  assignedProjectIds: ReadonlyArray<string>,
+  options?: { permissions?: ReadonlyArray<"READ" | "WRITE" | "EXECUTE">; canPerformProtectedActions?: boolean },
+) {
+  viewerCounter += 1;
+  const principalId = `viewer-${viewerCounter}`;
+  const principal = createAuthenticatedStaffPrincipal({ principalId, displayName: "Viewer" });
+  const membership = createOrganizationMembership({ membershipId: `m-${principalId}`, tenantScope, principalRef: principal.principalId, role: "STAFF" });
   const assignments = assignedProjectIds.map((projectId, index) =>
-    createAssignmentReference({ assignmentId: `assignment-${index}`, membership, customerId: customer.customerId, projectId }),
+    createAssignmentReference({ assignmentId: `assignment-${principalId}-${index}`, membership, customerId: customer.customerId, projectId }),
   );
-  const grant = { membership, authority: createAuthorityContext({ tenantScope, permissions: ["READ"], canPerformProtectedActions: false }), assignments };
-  const sessionToken = "token-viewer";
+  const grant = {
+    membership,
+    authority: createAuthorityContext({
+      tenantScope,
+      permissions: options?.permissions ?? ["READ"],
+      canPerformProtectedActions: options?.canPerformProtectedActions ?? false,
+    }),
+    assignments,
+  };
+  const sessionToken = `token-${principalId}`;
   const provider = createDevFixtureStaffSessionProvider({
     fixtures: new Map([[sessionToken, { principal, issuedAt: "2026-01-01T00:00:00.000Z" }]]),
     isProduction: false,
@@ -66,11 +82,61 @@ function jobSourceFor(jobs: ReadonlyArray<ReturnType<typeof createOutcomeJob>>):
   };
 }
 
-test("resolveNavVisibility returns all 9 destinations for a GRANTED access resolution - one stable IA regardless of role", () => {
-  const context = contextFor([]);
-  const nav = resolveNavVisibility(context.access);
+test("Rev170 F1: resolveNavVisibility returns all 9 destinations for a Founder/high-access fixture (READ+WRITE+EXECUTE, protected actions, real assignment)", () => {
+  const context = contextFor([projectAlpha.projectId], { permissions: ["READ", "WRITE", "EXECUTE"], canPerformProtectedActions: true });
+  const nav = resolveNavVisibility(context);
   assert.equal(nav.length, 9);
   assert.deepEqual(nav, NAV_DESTINATIONS);
+});
+
+test("Rev170 F1: resolveNavVisibility returns only home/work/people/products for a READ-only Member with exactly one assignment - materially fewer than Founder", () => {
+  const context = contextFor([projectAlpha.projectId], { permissions: ["READ"], canPerformProtectedActions: false });
+  const nav = resolveNavVisibility(context);
+  assert.deepEqual(nav.map((destination) => destination.key), ["home", "work", "people", "products"]);
+});
+
+test("Rev170 F1: resolveNavVisibility returns only home/people/products for a READ-only Restricted fixture with zero assignments - materially fewer than Member (no Work without assignment evidence)", () => {
+  const context = contextFor([], { permissions: ["READ"], canPerformProtectedActions: false });
+  const nav = resolveNavVisibility(context);
+  assert.deepEqual(nav.map((destination) => destination.key), ["home", "people", "products"]);
+});
+
+test("Rev170 F1: resolveNavVisibility returns an empty array when access is not GRANTED", () => {
+  const context = contextFor([projectAlpha.projectId], { permissions: ["READ", "WRITE", "EXECUTE"], canPerformProtectedActions: true });
+  const deniedContext = { ...context, access: { ...context.access, decision: "DENIED" as const } };
+  assert.deepEqual(resolveNavVisibility(deniedContext), []);
+});
+
+test("Rev170 F1: isDestinationVisible - work requires real assignment evidence, independent of permission level", () => {
+  const withAssignment = contextFor([projectAlpha.projectId]);
+  const withoutAssignment = contextFor([]);
+  assert.equal(isDestinationVisible("work", withAssignment), true);
+  assert.equal(isDestinationVisible("work", withoutAssignment), false);
+});
+
+test("Rev170 F1: isDestinationVisible - admin/ai-capabilities/connections/knowledge require WRITE, not merely READ or an OWNER/ADMIN label", () => {
+  const readOnly = contextFor([]);
+  const withWrite = contextFor([], { permissions: ["READ", "WRITE"] });
+  for (const key of ["admin", "ai-capabilities", "connections", "knowledge"] as const) {
+    assert.equal(isDestinationVisible(key, readOnly), false);
+    assert.equal(isDestinationVisible(key, withWrite), true);
+  }
+});
+
+test("Rev170 F1: isDestinationVisible - attention requires EXECUTE or canPerformProtectedActions", () => {
+  const readOnly = contextFor([]);
+  const withExecute = contextFor([], { permissions: ["READ", "EXECUTE"] });
+  const withProtected = contextFor([], { permissions: ["READ"], canPerformProtectedActions: true });
+  assert.equal(isDestinationVisible("attention", readOnly), false);
+  assert.equal(isDestinationVisible("attention", withExecute), true);
+  assert.equal(isDestinationVisible("attention", withProtected), true);
+});
+
+test("Rev170 F1: isDestinationVisible - home/people/products are always visible to any GRANTED staff member regardless of permission tier", () => {
+  const readOnly = contextFor([]);
+  for (const key of ["home", "people", "products"] as const) {
+    assert.equal(isDestinationVisible(key, readOnly), true);
+  }
 });
 
 test("resolveWorkView with no projectSource renders NOT_ACTIVE - missing data source degrades honestly, never fabricates content", () => {

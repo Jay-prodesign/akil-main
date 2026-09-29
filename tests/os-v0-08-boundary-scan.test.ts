@@ -90,6 +90,7 @@ test("OS-V0-08: each module exports exactly the expected surface", () => {
   ]);
   assert.deepEqual(Object.keys(InternalOsViewState).sort(), [
     "NAV_DESTINATIONS",
+    "isDestinationVisible",
     "resolveAdminView",
     "resolveHomeView",
     "resolveNavVisibility",

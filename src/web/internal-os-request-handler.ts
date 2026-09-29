@@ -9,12 +9,14 @@ import {
 } from "./internal-os-access.js";
 import {
   resolveNavVisibility,
+  isDestinationVisible,
   resolveHomeView,
   resolveWorkView,
   resolveWorkProjectDetailView,
   resolvePeopleView,
   resolveProductsView,
   resolveAdminView,
+  type DestinationKey,
   type WorkProjectSource,
   type WorkJobSource,
 } from "./internal-os-view-state.js";
@@ -156,8 +158,38 @@ export function createInternalOsRequestHandler(deps: InternalOsRequestHandlerDep
       throw error;
     }
 
-    const nav = resolveNavVisibility(context.access);
+    const nav = resolveNavVisibility(context);
     const organizationName = deps.organization.displayName;
+
+    /**
+     * Rev170 F1: a destination hidden from `nav` must also fail closed when
+     * reached directly - a Member/Restricted fixture cannot bypass the
+     * navigation policy by deep-linking a path it was never shown. `work`
+     * covers both the listing and its project-detail sub-route (a
+     * destination hidden in its entirety has no reachable detail page
+     * either); `home`/`people`/`products` are never gated here since
+     * `isDestinationVisible` always returns `true` for them under Phase A's
+     * policy.
+     */
+    let gatedDestinationKey: DestinationKey | undefined;
+    switch (parsed.kind) {
+      case "work":
+      case "work-detail":
+        gatedDestinationKey = "work";
+        break;
+      case "attention":
+      case "ai-capabilities":
+      case "connections":
+      case "knowledge":
+      case "admin":
+        gatedDestinationKey = parsed.kind;
+        break;
+      default:
+        gatedDestinationKey = undefined;
+    }
+    if (gatedDestinationKey !== undefined && !isDestinationVisible(gatedDestinationKey, context)) {
+      return toResponse(renderInternalOsPage({ kind: "FORBIDDEN", nav }));
+    }
 
     let content: InternalOsPageContent;
     switch (parsed.kind) {
