@@ -18,6 +18,7 @@ import {
   StaleQuotaEnvelopeError,
   CrossScopeQuotaSubstitutionError,
   QuotaReservationConflictError,
+  QuotaReservationAlreadySettledError,
   InvalidQuotaAdmissionError,
   type QuotaEnvelope,
 } from "../src/domain/execution-quota-admission.js";
@@ -35,12 +36,22 @@ function scope(overrides: Partial<{ customerId: string; projectId: string; planI
   });
 }
 
-function envelope(limitMinorUnits: number, overrides: Partial<{ envelopeRef: string; sourceFingerprint: string; scopeOverrides: Parameters<typeof scope>[0] }> = {}): QuotaEnvelope {
+function envelope(limitMinorUnits: number, overrides: Partial<{ envelopeRef: string; sourceFingerprint: string; scopeOverrides: Parameters<typeof scope>[0]; unitLimit: number }> = {}): QuotaEnvelope {
   return createQuotaEnvelope({
     scope: scope(overrides.scopeOverrides),
     envelopeRef: overrides.envelopeRef ?? "envelope-1",
     sourceFingerprint: overrides.sourceFingerprint ?? "qfp-1",
-    limit: { presence: "REPORTED", amountMinorUnits: limitMinorUnits, currency: "USD" },
+    unitLimit: overrides.unitLimit ?? 1_000_000,
+    monetaryLimit: { presence: "REPORTED", amountMinorUnits: limitMinorUnits, currency: "USD" },
+  });
+}
+
+function unitOnlyEnvelope(unitLimit: number, overrides: Partial<{ envelopeRef: string; sourceFingerprint: string; scopeOverrides: Parameters<typeof scope>[0] }> = {}): QuotaEnvelope {
+  return createQuotaEnvelope({
+    scope: scope(overrides.scopeOverrides),
+    envelopeRef: overrides.envelopeRef ?? "envelope-1",
+    sourceFingerprint: overrides.sourceFingerprint ?? "qfp-1",
+    unitLimit,
   });
 }
 
@@ -59,14 +70,15 @@ test("Q1 (Minimum Adversarial Evidence #7): a stale quota envelope cannot author
   assertCurrentQuotaEnvelope(env, "qfp-old"); // does not throw when current
 });
 
-test("Q2: an envelope cannot be constructed with an UNKNOWN limit - never invent a numeric ceiling", () => {
+test("Q2: an envelope's monetaryLimit, when supplied, cannot be UNKNOWN - never invent a numeric ceiling", () => {
   assert.throws(
     () =>
       createQuotaEnvelope({
         scope: scope(),
         envelopeRef: "e",
         sourceFingerprint: "fp",
-        limit: { presence: "UNKNOWN" },
+        unitLimit: 100,
+        monetaryLimit: { presence: "UNKNOWN" },
       }),
     InvalidQuotaAdmissionError,
   );
@@ -93,7 +105,7 @@ test("Q3 (#1 basis, single-writer serialization): two admissions in the same sco
     occurredAt: "2026-09-29T00:00:01.000Z",
   });
   assert.equal(second.outcome.status, "REJECTED");
-  assert.match(second.outcome.event.reason ?? "", /insufficient allowance/);
+  assert.match(second.outcome.event.reason ?? "", /insufficient monetary allowance/);
 
   // A third request that DOES fit in the remaining 40 succeeds.
   const third = admitQuotaReservation({
@@ -346,21 +358,29 @@ test("Q15 (#16): the read model distinguishes UNKNOWN/INCOMPLETE committed usage
     requestedAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }, occurredAt: "2026-09-29T00:00:01.000Z",
   });
   const cleanReadModel = projectQuotaReadModel(admitted.ledger, env);
-  assert.equal(cleanReadModel.status, "COMPUTED");
-  if (cleanReadModel.status === "COMPUTED") {
-    assert.equal(cleanReadModel.remaining, 900);
+  assert.equal(cleanReadModel.monetary.status, "COMPUTED");
+  if (cleanReadModel.monetary.status === "COMPUTED") {
+    assert.equal(cleanReadModel.monetary.remaining, 900);
   }
 
   const committedUnknown = commitQuotaUsage({
     ledger: admitted.ledger, identity: id, idempotencyKey: "key-1", actualAmount: { presence: "UNKNOWN" }, occurredAt: "2026-09-29T00:00:02.000Z",
   });
   const incompleteReadModel = projectQuotaReadModel(committedUnknown.ledger, env);
-  assert.equal(incompleteReadModel.status, "INCOMPLETE");
-  assert.ok(!("remaining" in incompleteReadModel), "an INCOMPLETE read model must never carry a fabricated numeric remaining");
+  assert.equal(incompleteReadModel.monetary.status, "INCOMPLETE");
+  assert.ok(!("remaining" in incompleteReadModel.monetary), "an INCOMPLETE monetary read model must never carry a fabricated numeric remaining");
 });
 
 test("Q16 (#17): commit never fabricates worker/provider/model/route attribution - absence stays explicit, and real attribution is preserved exactly", () => {
-  const env = envelope(1000);
+  // Rev177 F10/F6 (rescoped): this test's own second admission would
+  // otherwise be rejected by F6's "UNKNOWN committed monetary usage blocks
+  // further monetary-ceiling-dependent admission" rule, since the first
+  // admission's commit above is UNKNOWN and both share this scope/ledger -
+  // that rejection is a genuine, correct F6 finding, not a false positive,
+  // but it is irrelevant to what THIS test actually verifies (attribution
+  // field handling). Use a unit-floor-only envelope (no monetaryLimit) so
+  // F6 never applies here at all.
+  const env = createQuotaEnvelope({ scope: scope(), envelopeRef: "envelope-1", sourceFingerprint: "qfp-1", unitLimit: 1_000_000 });
   const id = identity();
   const admitted = admitQuotaReservation({
     ledger: EMPTY_QUOTA_LEDGER, envelope: env, identity: id, idempotencyKey: "key-1",
@@ -563,5 +583,210 @@ test("Q24 (Rev177 F2, sourceFingerprint conflict): a same-idempotencyKey replay 
     QuotaReservationConflictError,
     "a same-idempotencyKey replay under a different envelope version (sourceFingerprint) must fail closed, never silently authorize under the new policy without a fresh idempotencyKey",
   );
+});
+
+test("Q25 (Rev177 F7, canonical latest lookup): once a reservation has genuinely settled to RELEASED, the same idempotencyKey can never replay as current RESERVED or be re-admitted", () => {
+  const env = envelope(1000);
+  const id = identity();
+  const admitted = admitQuotaReservation({
+    ledger: EMPTY_QUOTA_LEDGER, envelope: env, identity: id, idempotencyKey: "key-1",
+    requestedAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }, occurredAt: "2026-09-29T00:00:00.000Z",
+  });
+  const released = releaseQuotaReservation({ ledger: admitted.ledger, identity: id, idempotencyKey: "key-1", occurredAt: "2026-09-29T00:00:01.000Z" });
+  assert.equal(released.outcome.status, "RELEASED");
+
+  assert.throws(
+    () =>
+      admitQuotaReservation({
+        ledger: released.ledger, envelope: env, identity: id, idempotencyKey: "key-1",
+        requestedAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }, occurredAt: "2026-09-29T00:00:02.000Z",
+      }),
+    QuotaReservationAlreadySettledError,
+    "an idempotencyKey that has already terminally settled (RELEASED) must never replay as current RESERVED again",
+  );
+});
+
+test("Q26 (Rev177 F7, monotonic terminal): committing usage against an already-RELEASED reservation fails closed rather than resurrecting spend", () => {
+  const env = envelope(1000);
+  const id = identity();
+  const admitted = admitQuotaReservation({
+    ledger: EMPTY_QUOTA_LEDGER, envelope: env, identity: id, idempotencyKey: "key-1",
+    requestedAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }, occurredAt: "2026-09-29T00:00:00.000Z",
+  });
+  const released = releaseQuotaReservation({ ledger: admitted.ledger, identity: id, idempotencyKey: "key-1", occurredAt: "2026-09-29T00:00:01.000Z" });
+  assert.equal(released.outcome.status, "RELEASED");
+
+  assert.throws(
+    () =>
+      commitQuotaUsage({
+        ledger: released.ledger, identity: id, idempotencyKey: "key-1",
+        actualAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }, occurredAt: "2026-09-29T00:00:02.000Z",
+      }),
+    QuotaReservationAlreadySettledError,
+    "a RELEASED reservation's allowance has already been returned to the pool - committing usage against it now would fabricate spend",
+  );
+});
+
+test("Q27 (Rev177 F7, cross-currency overage safety): committing an actualAmount in a different currency than the reservation fails closed rather than performing cross-currency arithmetic", () => {
+  const env = envelope(1000);
+  const id = identity();
+  const admitted = admitQuotaReservation({
+    ledger: EMPTY_QUOTA_LEDGER, envelope: env, identity: id, idempotencyKey: "key-1",
+    requestedAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }, occurredAt: "2026-09-29T00:00:00.000Z",
+  });
+  assert.throws(
+    () =>
+      commitQuotaUsage({
+        ledger: admitted.ledger, identity: id, idempotencyKey: "key-1",
+        actualAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "EUR" }, occurredAt: "2026-09-29T00:00:01.000Z",
+      }),
+    InvalidQuotaAdmissionError,
+    "actualAmount currency must match the reservation's own currency - cross-currency overage arithmetic is never performed",
+  );
+});
+
+test("Q28 (Rev177 F7, UNKNOWN/mismatched allowedOverage cannot authorize a clean COMMITTED): an UNKNOWN or wrong-currency allowedOverage is treated the same as exceeding the tolerance", () => {
+  const env = envelope(1000);
+  const idUnknownTolerance = identity({ runId: "run-unknown-tolerance" });
+  const admittedA = admitQuotaReservation({
+    ledger: EMPTY_QUOTA_LEDGER, envelope: env, identity: idUnknownTolerance, idempotencyKey: "key-a",
+    requestedAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }, occurredAt: "2026-09-29T00:00:00.000Z",
+  });
+  const committedUnknownTolerance = commitQuotaUsage({
+    ledger: admittedA.ledger, identity: idUnknownTolerance, idempotencyKey: "key-a",
+    actualAmount: { presence: "REPORTED", amountMinorUnits: 150, currency: "USD" }, occurredAt: "2026-09-29T00:00:01.000Z",
+    allowedOverage: { presence: "UNKNOWN" },
+  });
+  assert.equal(committedUnknownTolerance.outcome.status, "RECONCILIATION_REQUIRED", "an UNKNOWN allowed-overage tolerance can never prove an overage was allowed - it must not yield a clean COMMITTED");
+
+  const idMismatchedCurrency = identity({ runId: "run-mismatched-currency-tolerance" });
+  const admittedB = admitQuotaReservation({
+    ledger: committedUnknownTolerance.ledger, envelope: env, identity: idMismatchedCurrency, idempotencyKey: "key-b",
+    requestedAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }, occurredAt: "2026-09-29T00:00:02.000Z",
+  });
+  const committedMismatchedCurrency = commitQuotaUsage({
+    ledger: admittedB.ledger, identity: idMismatchedCurrency, idempotencyKey: "key-b",
+    actualAmount: { presence: "REPORTED", amountMinorUnits: 150, currency: "USD" }, occurredAt: "2026-09-29T00:00:03.000Z",
+    allowedOverage: { presence: "REPORTED", amountMinorUnits: 100, currency: "EUR" },
+  });
+  assert.equal(committedMismatchedCurrency.outcome.status, "RECONCILIATION_REQUIRED", "an allowed-overage tolerance denominated in a different currency cannot be compared - it must not yield a clean COMMITTED");
+});
+
+test("Q29 (Rev177 F7, RESERVED requires REPORTED amount): a persisted RESERVED record with a missing or UNKNOWN amount is rejected as corrupted/malformed truth", () => {
+  const env = envelope(1000);
+  const id = identity();
+  const admitted = admitQuotaReservation({
+    ledger: EMPTY_QUOTA_LEDGER, envelope: env, identity: id, idempotencyKey: "key-1",
+    requestedAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }, occurredAt: "2026-09-29T00:00:00.000Z",
+  });
+  const reservedEvent = admitted.outcome.event;
+  const malformed = { ...reservedEvent, amount: undefined };
+  assert.throws(
+    () => validatePersistedQuotaReservationEvent(malformed, id.scope),
+    InvalidQuotaAdmissionError,
+    "a RESERVED row can only ever have been constructed with a REPORTED amount - a missing amount is structurally impossible truth",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rev177 F10: quota is split into a REQUIRED unit floor (always enforced,
+// structurally knowable regardless of monetary cost telemetry) and an
+// OPTIONAL monetary dimension (enforced only when the envelope actually
+// configures one). Rev177 F6, rescoped: "UNKNOWN committed usage blocks
+// further admission" only ever applies to the monetary dimension, once F10
+// makes that distinction expressible at all.
+// ---------------------------------------------------------------------------
+
+test("Q30 (Rev177 F10, load-bearing): the unit floor rejects admission even when the requested amount is UNKNOWN and no monetaryLimit is configured - it is the sole, always-enforced ceiling", () => {
+  const env = unitOnlyEnvelope(1);
+  const first = admitQuotaReservation({
+    ledger: EMPTY_QUOTA_LEDGER, envelope: env, identity: identity({ runId: "run-a" }), idempotencyKey: "key-a",
+    requestedAmount: { presence: "UNKNOWN" }, occurredAt: "2026-09-29T00:00:00.000Z",
+  });
+  assert.equal(first.outcome.status, "RESERVED", "a scope with no monetaryLimit must admit an UNKNOWN estimate fine, as long as the unit floor has room");
+
+  const second = admitQuotaReservation({
+    ledger: first.ledger, envelope: env, identity: identity({ runId: "run-b" }), idempotencyKey: "key-b",
+    requestedAmount: { presence: "UNKNOWN" }, occurredAt: "2026-09-29T00:00:01.000Z",
+  });
+  assert.equal(second.outcome.status, "REJECTED");
+  assert.match(second.outcome.event.reason ?? "", /insufficient unit allowance/);
+});
+
+test("Q31 (Rev177 F10): a scope with no monetaryLimit never rejects for currency mismatch or exceeding a numeric ceiling - the unit floor is the only dimension that exists", () => {
+  const env = unitOnlyEnvelope(1_000_000);
+  const admitted = admitQuotaReservation({
+    ledger: EMPTY_QUOTA_LEDGER, envelope: env, identity: identity(), idempotencyKey: "key-1",
+    requestedAmount: { presence: "REPORTED", amountMinorUnits: 999_999_999, currency: "EUR" }, occurredAt: "2026-09-29T00:00:00.000Z",
+  });
+  assert.equal(admitted.outcome.status, "RESERVED", "an arbitrarily large amount in any currency is fine absent a monetaryLimit to check it against");
+});
+
+test("Q32 (Rev177 F6, rescoped): UNKNOWN committed monetary usage blocks further admission ONLY when the envelope configures a monetaryLimit - a unit-floor-only scope is unaffected", () => {
+  const withCeiling = envelope(1000);
+  const idA = identity({ runId: "run-a" });
+  const admittedA = admitQuotaReservation({
+    ledger: EMPTY_QUOTA_LEDGER, envelope: withCeiling, identity: idA, idempotencyKey: "key-a",
+    requestedAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }, occurredAt: "2026-09-29T00:00:00.000Z",
+  });
+  const committedA = commitQuotaUsage({
+    ledger: admittedA.ledger, identity: idA, idempotencyKey: "key-a",
+    actualAmount: { presence: "UNKNOWN" }, occurredAt: "2026-09-29T00:00:01.000Z",
+  });
+  const idB = identity({ runId: "run-b" });
+  const rejectedB = admitQuotaReservation({
+    ledger: committedA.ledger, envelope: withCeiling, identity: idB, idempotencyKey: "key-b",
+    requestedAmount: { presence: "REPORTED", amountMinorUnits: 50, currency: "USD" }, occurredAt: "2026-09-29T00:00:02.000Z",
+  });
+  assert.equal(rejectedB.outcome.status, "REJECTED", "a monetaryLimit-configured scope can no longer trust its remaining allowance once any committed usage is UNKNOWN");
+  assert.match(rejectedB.outcome.event.reason ?? "", /UNKNOWN committed monetary usage/);
+
+  // The identical sequence under a unit-floor-only envelope (no
+  // monetaryLimit) is entirely unaffected - there is no monetary allowance
+  // to distrust, and the unit floor alone continues to govern admission.
+  const unitOnly = unitOnlyEnvelope(1_000_000);
+  const idC = identity({ runId: "run-c" });
+  const admittedC = admitQuotaReservation({
+    ledger: EMPTY_QUOTA_LEDGER, envelope: unitOnly, identity: idC, idempotencyKey: "key-c",
+    requestedAmount: { presence: "UNKNOWN" }, occurredAt: "2026-09-29T00:00:03.000Z",
+  });
+  const committedC = commitQuotaUsage({
+    ledger: admittedC.ledger, identity: idC, idempotencyKey: "key-c",
+    actualAmount: { presence: "UNKNOWN" }, occurredAt: "2026-09-29T00:00:04.000Z",
+  });
+  const idD = identity({ runId: "run-d" });
+  const admittedD = admitQuotaReservation({
+    ledger: committedC.ledger, envelope: unitOnly, identity: idD, idempotencyKey: "key-d",
+    requestedAmount: { presence: "UNKNOWN" }, occurredAt: "2026-09-29T00:00:05.000Z",
+  });
+  assert.equal(admittedD.outcome.status, "RESERVED", "a unit-floor-only scope has no monetary allowance to protect, so a prior UNKNOWN commit never blocks a later admission");
+});
+
+test("Q33 (Rev177 F10): the read model's unit dimension is always COMPUTED, independent of the monetary dimension's own status (NOT_CONFIGURED or INCOMPLETE)", () => {
+  const unitOnly = unitOnlyEnvelope(10);
+  const admitted = admitQuotaReservation({
+    ledger: EMPTY_QUOTA_LEDGER, envelope: unitOnly, identity: identity(), idempotencyKey: "key-1",
+    requestedAmount: { presence: "UNKNOWN" }, occurredAt: "2026-09-29T00:00:00.000Z",
+  });
+  const notConfigured = projectQuotaReadModel(admitted.ledger, unitOnly);
+  assert.equal(notConfigured.monetary.status, "NOT_CONFIGURED");
+  assert.equal(notConfigured.unitLimit, 10);
+  assert.equal(notConfigured.unitReserved, 1);
+  assert.equal(notConfigured.unitRemaining, 9);
+
+  const withCeiling = envelope(1000);
+  const admittedCeiling = admitQuotaReservation({
+    ledger: EMPTY_QUOTA_LEDGER, envelope: withCeiling, identity: identity({ runId: "run-2" }), idempotencyKey: "key-2",
+    requestedAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }, occurredAt: "2026-09-29T00:00:01.000Z",
+  });
+  const committedUnknown = commitQuotaUsage({
+    ledger: admittedCeiling.ledger, identity: identity({ runId: "run-2" }), idempotencyKey: "key-2",
+    actualAmount: { presence: "UNKNOWN" }, occurredAt: "2026-09-29T00:00:02.000Z",
+  });
+  const incomplete = projectQuotaReadModel(committedUnknown.ledger, withCeiling);
+  assert.equal(incomplete.monetary.status, "INCOMPLETE", "the monetary dimension is genuinely incomplete");
+  assert.equal(incomplete.unitLimit, 1_000_000, "the unit dimension is NEVER incomplete - it remains fully computed regardless of the monetary side");
+  assert.equal(incomplete.unitCommitted, 1);
+  assert.equal(incomplete.unitRemaining, 999_999);
 });
 

@@ -48,6 +48,19 @@
 -- `idempotency_key` already recorded fails closed exactly like a differing
 -- `envelope_ref`/identity/amount already does - see
 -- `assertReplayMatchesOriginalRequest` in `execution-quota-admission.ts`.
+--
+-- Rev177 F8: schema-level defense in depth, refined into this same additive
+-- migration - these mirror the canonical TypeScript validator
+-- (`validatePersistedQuotaReservationEvent`) exactly, so a malformed/
+-- incoherent row can never be written even by a future caller that bypasses
+-- the TypeScript layer, rather than relying solely on re-validating every
+-- row on every read. `admit()`'s own atomic allowance decision sums raw
+-- `amount_minor_units` values directly without a separate TypeScript
+-- validation pass first (Minimum Adversarial Evidence for that CTE would
+-- otherwise require a read-then-decide-then-insert race window this store
+-- is specifically built to avoid) - these constraints are what make that
+-- safe: a RESERVED row can only ever have a coherent REPORTED amount, and
+-- no row can ever carry a negative amount.
 
 CREATE TABLE IF NOT EXISTS quota_reservation_events (
     id                  BIGSERIAL PRIMARY KEY,
@@ -82,6 +95,15 @@ CREATE TABLE IF NOT EXISTS quota_reservation_events (
     ),
     CONSTRAINT quota_reservation_events_amount_presence_recognized CHECK (
         amount_presence IS NULL OR amount_presence IN ('REPORTED', 'UNKNOWN')
+    ),
+    CONSTRAINT quota_reservation_events_amount_non_negative CHECK (
+        amount_minor_units IS NULL OR amount_minor_units >= 0
+    ),
+    CONSTRAINT quota_reservation_events_reported_amount_coherent CHECK (
+        amount_presence IS DISTINCT FROM 'REPORTED' OR (amount_minor_units IS NOT NULL AND currency IS NOT NULL)
+    ),
+    CONSTRAINT quota_reservation_events_reserved_requires_reported CHECK (
+        type != 'RESERVED' OR amount_presence = 'REPORTED'
     )
 );
 

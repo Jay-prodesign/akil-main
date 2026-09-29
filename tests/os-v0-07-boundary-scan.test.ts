@@ -103,12 +103,12 @@ test("OS-V0-07: package.json still declares no new runtime dependency", () => {
   assert.deepEqual(Object.keys(packageJson.devDependencies ?? {}).sort(), ["@types/node", "typescript"]);
 });
 
-test("OS-V0-07: execution-quota-admission.ts never invents a canonical global numeric limit - createQuotaEnvelope only ever accepts a caller-supplied REPORTED limit, with no fallback/default value", () => {
+test("OS-V0-07: execution-quota-admission.ts never invents a canonical global numeric limit - createQuotaEnvelope's optional monetaryLimit, when supplied, is constructed directly from the caller's own input with no fallback/default value", () => {
   const content = readFileSync(join(REPO_ROOT, "src/domain/execution-quota-admission.ts"), "utf8");
   const start = content.indexOf("export function createQuotaEnvelope(");
   const end = content.indexOf("\n}", content.indexOf("): QuotaEnvelope {", start));
   const body = content.slice(start, end);
-  assert.match(body, /createCostAmount\(input\.limit\)/, "the envelope limit must be constructed directly from the caller's own input, never a default");
+  assert.match(body, /createCostAmount\(input\.monetaryLimit\)/, "the envelope monetaryLimit must be constructed directly from the caller's own input, never a default");
   assert.doesNotMatch(body, /\?\?/, "createQuotaEnvelope must not supply a fallback/default for any caller-controlled policy value");
 });
 

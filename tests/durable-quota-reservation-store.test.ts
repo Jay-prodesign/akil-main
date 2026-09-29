@@ -21,7 +21,8 @@ const scope = createQuotaAdmissionScope({
 });
 const envelope = createQuotaEnvelope({
   scope, envelopeRef: "envelope-1", sourceFingerprint: "qfp-1",
-  limit: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
+  unitLimit: 1_000_000,
+  monetaryLimit: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
 });
 
 test("P1 (Minimum Adversarial Evidence #1): two concurrent admissions in the same scope, together exceeding the limit, resolve to exactly one RESERVED and one REJECTED", async () => {
@@ -77,7 +78,7 @@ test("P2: admit/commit round-trips and survives a simulated restart (a fresh sto
     // honestly INCOMPLETE rather than a fabricated numeric remaining - this
     // itself is proof the restart replayed the real persisted event, not an
     // empty ledger (an empty ledger would report a clean COMPUTED 100).
-    assert.equal(readModel.status, "INCOMPLETE");
+    assert.equal(readModel.monetary.status, "INCOMPLETE");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

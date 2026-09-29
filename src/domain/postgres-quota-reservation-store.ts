@@ -18,6 +18,11 @@ import {
   type QuotaReadModel,
   InvalidQuotaAdmissionError,
 } from "./execution-quota-admission.js";
+// Rev177 F4 note: `QuotaReservationAlreadySettledError`/`QuotaReservationConflictError`
+// are never caught or constructed here directly - `claimFirstTerminalDisposition`'s
+// callers reconcile a lost race by re-invoking the SAME pure `commitQuotaUsage`/
+// `releaseQuotaReservation` reducers against the real winning ledger state,
+// which already throw/return the correct outcome (Rev177 F7).
 import { createCostAmount } from "./execution-economics-attribution.js";
 import type { AsyncQuotaReservationStore } from "../ports/async-quota-reservation-store.js";
 import type { SqlClient } from "../ports/sql-client.js";
@@ -160,9 +165,9 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
     }
     const amountMinorUnits = presence === "REPORTED" ? (input.requestedAmount as { amountMinorUnits?: unknown }).amountMinorUnits : 0;
     const currency = presence === "REPORTED" ? (input.requestedAmount as { currency?: unknown }).currency : null;
-    if (presence === "REPORTED" && currency !== input.envelope.limit.currency) {
+    if (input.envelope.monetaryLimit !== undefined && presence === "REPORTED" && currency !== input.envelope.monetaryLimit.currency) {
       throw new InvalidQuotaAdmissionError(
-        `requestedAmount currency "${String(currency)}" does not match envelope limit currency "${input.envelope.limit.currency}"`,
+        `requestedAmount currency "${String(currency)}" does not match envelope monetaryLimit currency "${input.envelope.monetaryLimit.currency}"`,
       );
     }
     const scopeKey = quotaScopeKey(scope);
@@ -204,27 +209,44 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
          -- occurred_at) picks exactly the true latest row per
          -- idempotency_key, mirroring the pure projectQuotaScopeUsage
          -- reducer's own "latest event per reservation" fold.
-         SELECT DISTINCT ON (e.idempotency_key) e.idempotency_key, e.type, e.amount_minor_units
+         SELECT DISTINCT ON (e.idempotency_key) e.idempotency_key, e.type, e.amount_minor_units, e.amount_presence
          FROM quota_reservation_events e, scope_lock
          WHERE e.tenant_id = $1 AND e.scope_key = $2
          ORDER BY e.idempotency_key, e.id DESC
        ),
        current_usage AS (
-         SELECT COALESCE(SUM(l.amount_minor_units), 0) AS total
+         -- Rev177 F10: unit_count (a finite, always-known count of
+         -- outstanding-or-settled reservations) is the ALWAYS-enforced hard
+         -- floor. monetary_total/has_unknown_committed only ever matter
+         -- when the envelope configured a real monetaryLimit ($14 non-NULL)
+         -- to protect - mirroring the pure admitQuotaReservation reducer's
+         -- own unit-floor-first, monetary-only-if-configured decision order.
+         SELECT
+           COUNT(*) FILTER (WHERE l.type IN ('RESERVED', 'COMMITTED', 'RECONCILIATION_REQUIRED')) AS unit_count,
+           COALESCE(SUM(l.amount_minor_units) FILTER (WHERE l.type IN ('RESERVED', 'COMMITTED', 'RECONCILIATION_REQUIRED')), 0) AS monetary_total,
+           EXISTS (
+             SELECT 1 FROM latest_per_reservation l2
+             WHERE l2.type IN ('COMMITTED', 'RECONCILIATION_REQUIRED') AND l2.amount_presence = 'UNKNOWN'
+           ) AS has_unknown_committed
          FROM latest_per_reservation l
-         WHERE l.type IN ('RESERVED', 'COMMITTED', 'RECONCILIATION_REQUIRED')
        ),
        decision AS (
          SELECT
            CASE
              WHEN EXISTS (SELECT 1 FROM already_reserved) THEN NULL
+             WHEN (SELECT unit_count FROM current_usage) + 1 > $20::bigint THEN 'REJECTED'
+             WHEN $14::bigint IS NULL THEN 'RESERVED'
+             WHEN (SELECT has_unknown_committed FROM current_usage) THEN 'REJECTED'
              WHEN $12 = 'UNKNOWN' THEN 'REJECTED'
-             WHEN (SELECT total FROM current_usage) + $13::bigint <= $14::bigint THEN 'RESERVED'
+             WHEN (SELECT monetary_total FROM current_usage) + $13::bigint <= $14::bigint THEN 'RESERVED'
              ELSE 'REJECTED'
            END AS decided_type,
            CASE
+             WHEN (SELECT unit_count FROM current_usage) + 1 > $20::bigint THEN 'insufficient unit allowance remaining under the current envelope''s unit floor'
+             WHEN $14::bigint IS NULL THEN NULL
+             WHEN (SELECT has_unknown_committed FROM current_usage) THEN 'an UNKNOWN committed monetary usage already exists in this scope - further monetary-ceiling-dependent admission cannot trust the remaining monetary allowance'
              WHEN $12 = 'UNKNOWN' THEN 'an UNKNOWN estimated cost cannot be admitted against a monetary ceiling - it is never treated as zero'
-             WHEN (SELECT total FROM current_usage) + $13::bigint > $14::bigint THEN 'insufficient allowance remaining under the current envelope limit'
+             WHEN (SELECT monetary_total FROM current_usage) + $13::bigint > $14::bigint THEN 'insufficient monetary allowance remaining under the current envelope''s monetaryLimit'
              ELSE NULL
            END AS decided_reason
        ),
@@ -275,12 +297,13 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
         input.envelope.envelopeRef,
         presence,
         amountMinorUnits ?? 0,
-        input.envelope.limit.amountMinorUnits,
+        input.envelope.monetaryLimit?.amountMinorUnits ?? null,
         input.occurredAt,
         currency,
         candidateReservedEventId,
         candidateRejectedEventId,
         input.envelope.sourceFingerprint,
+        input.envelope.unitLimit,
       ],
     );
     const row = result.rows[0];
@@ -310,6 +333,21 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
     return event.type === "RESERVED" ? { status: "RESERVED", event } : { status: "REJECTED", event };
   }
 
+  /**
+   * Rev177 F4: `commit()` and `release()` each independently read-then-append
+   * in separate queries. Because COMMITTED, RELEASED and RECONCILIATION_REQUIRED
+   * all have DIFFERENT `event_id`s, two concurrent terminal transitions on the
+   * SAME RESERVED reservation (one calling commit, the other release) could
+   * both durably insert - the `UNIQUE (tenant_id, event_id)` constraint alone
+   * cannot serialize "the first terminal disposition wins" across different
+   * event types. `claimFirstTerminalDisposition` closes this: reading the
+   * RESERVED row's own fields OUTSIDE the lock is safe (a RESERVED row is
+   * immutable once created), but "does a terminal disposition already exist
+   * for this exact reservation, and if not, insert this one" is one atomic
+   * SQL statement, `pg_advisory_xact_lock`-guarded on `(tenant, idempotencyKey)`
+   * - a different, narrower lock key than `admit()`'s own per-scope lock, so
+   * the two never contend with each other.
+   */
   async commit(input: {
     readonly identity: QuotaReservationIdentity;
     readonly idempotencyKey: unknown;
@@ -323,23 +361,28 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
     };
     readonly allowedOverage?: { presence: unknown; amountMinorUnits?: unknown; currency?: unknown };
   }): Promise<QuotaCommitOutcome> {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const ledger = await this.readReservationLedger(input.identity, input.idempotencyKey);
-      const { ledger: nextLedger, outcome } = commitQuotaUsage({ ledger, ...input });
-      if (nextLedger === ledger) {
-        return outcome;
-      }
-      const newEvent = nextLedger.events[nextLedger.events.length - 1] as QuotaReservationEvent;
-      const inserted = await this.insertEventIfAbsent(newEvent);
-      if (inserted) {
-        return outcome;
-      }
-      // Lost the race to a concurrent identical-idempotencyKey commit - loop
-      // once more to re-read now-current durable state and reconcile
-      // (replays safely if content matches, fails closed via
-      // `QuotaReservationConflictError` if it does not).
+    const ledger = await this.readReservationLedger(input.identity, input.idempotencyKey);
+    const { ledger: nextLedger, outcome } = commitQuotaUsage({ ledger, ...input });
+    if (nextLedger === ledger) {
+      // Already-terminal identical-content safe replay, decided purely from
+      // what was just read - no new event is being appended, so no atomicity
+      // is needed here.
+      return outcome;
     }
-    throw new InvalidQuotaAdmissionError("internal error: commit() could not converge after retrying a lost concurrent-insert race");
+    const candidateEvent = nextLedger.events[nextLedger.events.length - 1] as QuotaReservationEvent;
+    const winningEvent = await this.claimFirstTerminalDisposition(candidateEvent);
+    if (winningEvent.eventId === candidateEvent.eventId) {
+      return outcome;
+    }
+    // Lost the first-terminal-disposition claim to a DIFFERENT concurrent
+    // transition (e.g. this commit raced a release that won instead).
+    // Reconcile by re-invoking the SAME pure reducer against the ACTUAL
+    // winning ledger state - it already knows how to safely replay
+    // identical content, report a graceful outcome, or fail closed
+    // (Rev177 F7's monotonic-terminal fix), so no decision logic is
+    // duplicated here.
+    const { outcome: reconciledOutcome } = commitQuotaUsage({ ledger: { events: [...ledger.events, winningEvent] }, ...input });
+    return reconciledOutcome;
   }
 
   async release(input: {
@@ -348,24 +391,35 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
     readonly occurredAt: unknown;
     readonly reason?: unknown;
   }): Promise<QuotaReleaseOutcome> {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const ledger = await this.readReservationLedger(input.identity, input.idempotencyKey);
-      const { ledger: nextLedger, outcome } = releaseQuotaReservation({ ledger, ...input });
-      if (nextLedger === ledger) {
-        return outcome;
-      }
-      const newEvent = nextLedger.events[nextLedger.events.length - 1] as QuotaReservationEvent;
-      const inserted = await this.insertEventIfAbsent(newEvent);
-      if (inserted) {
-        return outcome;
-      }
+    const ledger = await this.readReservationLedger(input.identity, input.idempotencyKey);
+    const { ledger: nextLedger, outcome } = releaseQuotaReservation({ ledger, ...input });
+    if (nextLedger === ledger) {
+      return outcome;
     }
-    throw new InvalidQuotaAdmissionError("internal error: release() could not converge after retrying a lost concurrent-insert race");
+    const candidateEvent = nextLedger.events[nextLedger.events.length - 1] as QuotaReservationEvent;
+    const winningEvent = await this.claimFirstTerminalDisposition(candidateEvent);
+    if (winningEvent.eventId === candidateEvent.eventId) {
+      return outcome;
+    }
+    const { outcome: reconciledOutcome } = releaseQuotaReservation({ ledger: { events: [...ledger.events, winningEvent] }, ...input });
+    return reconciledOutcome;
   }
 
+  /**
+   * Rev177 F8: Postgres gives NO ordering guarantee for a plain `SELECT *`
+   * without an `ORDER BY` - rows can physically return in any order the
+   * planner chooses. Every pure fold this module feeds these events into
+   * (`findLatestEvent`, `projectQuotaScopeUsage`, `projectQuotaReadModel`,
+   * etc.) determines "latest" by iterating the array and keeping the LAST
+   * match - which is only correct if the array is already in true
+   * chronological (insertion) order. `ORDER BY id ASC` makes that explicit
+   * and DB-enforced, exactly mirroring `admit()`'s own `latest_per_reservation`
+   * CTE, which already orders by `id` rather than trusting return order or
+   * the caller-supplied `occurred_at`.
+   */
   async getReadModel(envelope: QuotaEnvelope): Promise<QuotaReadModel> {
     const result = await this.client.query<RawQuotaReservationRow>(
-      `SELECT * FROM quota_reservation_events WHERE tenant_id = $1 AND scope_key = $2`,
+      `SELECT * FROM quota_reservation_events WHERE tenant_id = $1 AND scope_key = $2 ORDER BY id ASC`,
       [envelope.scope.tenantId, quotaScopeKey(envelope.scope)],
     );
     const events = result.rows.map((row) => rowToRecord(row, envelope.scope));
@@ -375,20 +429,45 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
   private async readReservationLedger(identity: QuotaReservationIdentity, idempotencyKey: unknown): Promise<QuotaLedger> {
     const result = await this.client.query<RawQuotaReservationRow>(
       `SELECT * FROM quota_reservation_events
-       WHERE tenant_id = $1 AND scope_key = $2 AND job_id = $3 AND run_id = $4 AND attempt_ref = $5 AND idempotency_key = $6`,
+       WHERE tenant_id = $1 AND scope_key = $2 AND job_id = $3 AND run_id = $4 AND attempt_ref = $5 AND idempotency_key = $6
+       ORDER BY id ASC`,
       [identity.scope.tenantId, quotaScopeKey(identity.scope), identity.jobId, identity.runId, identity.attemptRef, idempotencyKey],
     );
     const events = result.rows.map((row) => rowToRecord(row, identity.scope));
     return { events };
   }
 
-  private async insertEventIfAbsent(event: QuotaReservationEvent): Promise<boolean> {
-    const result = await this.client.query(
-      `INSERT INTO quota_reservation_events
-         (tenant_id, event_id, scope_key, customer_id, project_id, plan_id, plan_version, job_id, run_id, attempt_ref, idempotency_key, envelope_ref, source_fingerprint, type, occurred_at, amount_minor_units, amount_presence, currency, reason, worker_ref, provider_ref, model_ref, route_ref)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
-       ON CONFLICT (tenant_id, event_id) DO NOTHING
-       RETURNING event_id`,
+  /**
+   * Rev177 F4: the one atomic "claim the first terminal disposition for this
+   * exact reservation" statement shared by `commit()`/`release()`. Locked on
+   * `(tenant, idempotencyKey)` - narrower than, and independent of, `admit()`'s
+   * own per-scope lock. If a terminal event (COMMITTED/RELEASED/
+   * RECONCILIATION_REQUIRED) already exists for this idempotencyKey, that row
+   * is returned unchanged and the candidate is never inserted; otherwise the
+   * candidate is inserted and returned. The caller compares the returned
+   * row's `eventId` against its own candidate's to know whether it won.
+   */
+  private async claimFirstTerminalDisposition(event: QuotaReservationEvent): Promise<QuotaReservationEvent> {
+    const result = await this.client.query<RawQuotaReservationRow>(
+      `WITH lock_slot AS (
+         SELECT pg_advisory_xact_lock(hashtext($1 || ':' || $11)) AS locked
+       ),
+       existing_terminal AS (
+         SELECT e.* FROM quota_reservation_events e, lock_slot
+         WHERE e.tenant_id = $1 AND e.idempotency_key = $11
+           AND e.type IN ('COMMITTED', 'RELEASED', 'RECONCILIATION_REQUIRED')
+       ),
+       inserted AS (
+         INSERT INTO quota_reservation_events
+           (tenant_id, event_id, scope_key, customer_id, project_id, plan_id, plan_version, job_id, run_id, attempt_ref, idempotency_key, envelope_ref, source_fingerprint, type, occurred_at, amount_minor_units, amount_presence, currency, reason, worker_ref, provider_ref, model_ref, route_ref)
+         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
+         WHERE NOT EXISTS (SELECT 1 FROM existing_terminal)
+         ON CONFLICT (tenant_id, event_id) DO NOTHING
+         RETURNING *
+       )
+       SELECT * FROM existing_terminal
+       UNION ALL
+       SELECT * FROM inserted`,
       [
         event.identity.scope.tenantId,
         event.eventId,
@@ -415,6 +494,10 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
         event.attribution?.routeRef ?? null,
       ],
     );
-    return result.rows.length > 0;
+    const row = result.rows[0];
+    if (row === undefined) {
+      throw new InvalidQuotaAdmissionError("internal error: claimFirstTerminalDisposition produced no row - neither an existing terminal nor a fresh insert");
+    }
+    return rowToRecord(row, event.identity.scope);
   }
 }

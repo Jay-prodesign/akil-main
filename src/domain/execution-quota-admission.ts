@@ -67,6 +67,28 @@ export class QuotaReservationConflictError extends Error {
   }
 }
 
+/**
+ * Rev177 F7: "make first terminal reservation disposition monotonic ...
+ * incompatible dual terminals/standalone terminals fail closed." Thrown when
+ * an idempotencyKey whose reservation has already reached a genuine terminal
+ * disposition (COMMITTED/RELEASED/RECONCILIATION_REQUIRED) is used again in
+ * a way that would resurrect it - either a fresh `admitQuotaReservation`
+ * call (which must never echo a stale RESERVED/REJECTED for an
+ * idempotencyKey that has since settled) or a `commitQuotaUsage` call
+ * against a RELEASED reservation (which must never fabricate spend for
+ * allowance that was already returned to the pool). A real later retry
+ * always uses its own new attempt's distinct identity/idempotencyKey, never
+ * this same settled one.
+ */
+export class QuotaReservationAlreadySettledError extends Error {
+  constructor(idempotencyKey: string, settledAs: QuotaReservationEventType) {
+    super(
+      `idempotencyKey "${idempotencyKey}" has already terminally settled as ${settledAs} - it can never be re-admitted, resurrected, or transitioned to a different terminal state`,
+    );
+    this.name = "QuotaReservationAlreadySettledError";
+  }
+}
+
 function requireNonEmptyString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.length === 0 || value.trim().length === 0 || value.trim() !== value) {
     throw new InvalidQuotaAdmissionError(`${field} must be a non-empty string with no leading/trailing whitespace`);
@@ -85,6 +107,13 @@ function requireValidTimestamp(value: unknown, field: string): string {
 function requirePositiveInteger(value: unknown, field: string): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
     throw new InvalidQuotaAdmissionError(`${field} must be a positive integer`);
+  }
+  return value;
+}
+
+function requireNonNegativeInteger(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new InvalidQuotaAdmissionError(`${field} must be a non-negative integer`);
   }
   return value;
 }
@@ -158,38 +187,53 @@ export function quotaScopeKey(scope: QuotaAdmissionScope): string {
 }
 
 /**
- * G1/POLICY VALUES: "there are no canonical global numeric defaults ...
- * never invent limits." `limit` must always be a REPORTED `CostAmount` - an
- * envelope that does not know its own numeric ceiling cannot be
- * constructed at all, so a caller with no real policy value is structurally
- * unable to admit anything against a fabricated/implied limit (the caller's
- * own integration layer is responsible for treating "no envelope available"
- * as BLOCKED/UNAVAILABLE, never as "unlimited").
+ * Rev177 F10: quota is split into a REQUIRED unit floor and an OPTIONAL
+ * monetary dimension, rather than one single monetary `limit` field.
+ *
+ * `unitLimit` is a finite, policy-proven count of admittable reservations
+ * for this scope - structurally knowable and enforceable regardless of
+ * whether any real monetary cost telemetry exists (the activated
+ * `WorkerInvoker` boundary never reports real provider cost, only whether
+ * an attempt occurred at all), so it is the one hard ceiling that ALWAYS
+ * applies. `monetaryLimit`, when supplied, must always be a REPORTED
+ * `CostAmount` (G1/POLICY VALUES: "never invent limits" - an envelope
+ * cannot opt into monetary enforcement with no known numeric ceiling); when
+ * omitted, this scope simply has no monetary ceiling to protect, and the
+ * unit floor alone governs admission. The caller's own integration layer
+ * remains responsible for treating "no envelope available at all" as
+ * BLOCKED/UNAVAILABLE, never as "unlimited."
  */
 export interface QuotaEnvelope {
   readonly scope: QuotaAdmissionScope;
   readonly envelopeRef: string;
   readonly sourceFingerprint: string;
-  readonly limit: CostAmount;
+  readonly unitLimit: number;
+  readonly monetaryLimit?: CostAmount;
 }
 
 export function createQuotaEnvelope(input: {
   scope: QuotaAdmissionScope;
   envelopeRef: unknown;
   sourceFingerprint: unknown;
-  limit: { presence: unknown; amountMinorUnits?: unknown; currency?: unknown };
+  unitLimit: unknown;
+  monetaryLimit?: { presence: unknown; amountMinorUnits?: unknown; currency?: unknown };
 }): QuotaEnvelope {
-  const limit = createCostAmount(input.limit);
-  if (limit.presence !== "REPORTED") {
-    throw new InvalidQuotaAdmissionError(
-      "envelope limit must be REPORTED - an envelope with no known numeric ceiling cannot be constructed (never invent a limit)",
-    );
+  const unitLimit = requireNonNegativeInteger(input.unitLimit, "unitLimit");
+  let monetaryLimit: CostAmount | undefined;
+  if (input.monetaryLimit !== undefined) {
+    monetaryLimit = createCostAmount(input.monetaryLimit);
+    if (monetaryLimit.presence !== "REPORTED") {
+      throw new InvalidQuotaAdmissionError(
+        "envelope monetaryLimit, when supplied, must be REPORTED - an envelope cannot opt into monetary enforcement with no known numeric ceiling (never invent a limit)",
+      );
+    }
   }
   return {
     scope: input.scope,
     envelopeRef: requireNonEmptyString(input.envelopeRef, "envelopeRef"),
     sourceFingerprint: requireNonEmptyString(input.sourceFingerprint, "sourceFingerprint"),
-    limit,
+    unitLimit,
+    ...(monetaryLimit !== undefined ? { monetaryLimit } : {}),
   };
 }
 
@@ -326,6 +370,18 @@ export function deriveQuotaReservationEventId(identity: QuotaReservationIdentity
   return JSON.stringify([quotaScopeKey(identity.scope), identity.jobId, identity.runId, identity.attemptRef, idempotencyKey, type]);
 }
 
+/**
+ * Rev177 F1 (technical refinement): the ONE canonical attempt-identity
+ * idempotency key derivation - `[jobId, runId, attemptRef]`, collision-safe
+ * via `JSON.stringify` exactly like `quotaScopeKey`/`deriveQuotaReservationEventId`
+ * above. Exported so `outcome-job-execution-runtime.ts` reuses this single
+ * definition instead of inlining its own separate encoding of the same
+ * tuple, which risks the two independently drifting out of sync.
+ */
+export function deriveQuotaReservationIdempotencyKey(identity: QuotaReservationIdentity): string {
+  return JSON.stringify([identity.jobId, identity.runId, identity.attemptRef]);
+}
+
 export interface QuotaLedger {
   readonly events: ReadonlyArray<QuotaReservationEvent>;
 }
@@ -337,17 +393,21 @@ function appendToLedger(ledger: QuotaLedger, event: QuotaReservationEvent): Quot
 }
 
 /**
- * The admission decision for a fresh idempotencyKey, OR the LATEST replayed
- * decision for one already recorded (Minimum Adversarial Evidence #2:
- * "identical reservation replay -> no second allowance consumption"). Must
- * scan for the latest match, not the first - a REJECTED decision can later
- * be superseded by a RESERVED one for the same idempotencyKey (Rev176:
- * "rejected-then-later-admissible recovery" - see `admitQuotaReservation`).
+ * Rev177 F7 clarification: the reservation's CANONICAL latest lifecycle
+ * event for this exact `(tenantId, idempotencyKey)` - of ANY type, not just
+ * RESERVED/REJECTED. A historical-type-only lookup would find a stale
+ * RESERVED/REJECTED row and treat it as still current even after the SAME
+ * reservation has since moved on to a genuine terminal disposition
+ * (COMMITTED/RELEASED/RECONCILIATION_REQUIRED) - incorrectly allowing that
+ * terminal reservation to "replay as current RESERVED" or be silently
+ * re-decided. `admitQuotaReservation` uses this to fail closed the moment a
+ * caller tries to re-admit against an idempotencyKey that has already
+ * terminally settled, rather than resurrecting or echoing a stale decision.
  */
-function findAdmissionEvent(ledger: QuotaLedger, tenantId: TenantScope["tenantId"], idempotencyKey: string): QuotaReservationEvent | undefined {
+function findCanonicalLatestForIdempotencyKey(ledger: QuotaLedger, tenantId: TenantScope["tenantId"], idempotencyKey: string): QuotaReservationEvent | undefined {
   let latest: QuotaReservationEvent | undefined;
   for (const event of ledger.events) {
-    if (event.identity.scope.tenantId === tenantId && event.idempotencyKey === idempotencyKey && (event.type === "RESERVED" || event.type === "REJECTED")) {
+    if (event.identity.scope.tenantId === tenantId && event.idempotencyKey === idempotencyKey) {
       latest = event;
     }
   }
@@ -390,6 +450,19 @@ export interface QuotaScopeUsage {
   readonly reservedTotal: number;
   readonly committedTotal: number;
   readonly hasUnknownCommitted: boolean;
+  /**
+   * Rev177 F10: unit counts mirror `reservedTotal`/`committedTotal`'s own
+   * split, but COUNT reservations (one per distinct reservation) rather
+   * than SUM a monetary amount - the count is always knowable regardless of
+   * whether the reservation's own monetary amount is REPORTED or UNKNOWN.
+   * `unitReservedCount` is RESERVED-only; `unitCommittedCount` is
+   * COMMITTED+RECONCILIATION_REQUIRED (the same "still counts against
+   * allowance" set `committedTotal` already uses). Unlike `committedTotal`,
+   * neither of these is ever "incomplete" - a reservation either occurred
+   * or it did not, independent of whether its real dollar cost is known.
+   */
+  readonly unitReservedCount: number;
+  readonly unitCommittedCount: number;
 }
 
 export function projectQuotaScopeUsage(ledger: QuotaLedger, scope: QuotaAdmissionScope): QuotaScopeUsage {
@@ -406,10 +479,16 @@ export function projectQuotaScopeUsage(ledger: QuotaLedger, scope: QuotaAdmissio
   let reservedTotal = 0;
   let committedTotal = 0;
   let hasUnknownCommitted = false;
+  let unitReservedCount = 0;
+  let unitCommittedCount = 0;
   for (const [key, event] of latestByReservation.entries()) {
-    if (event.type === "RESERVED" && event.amount?.presence === "REPORTED") {
-      reservedTotal += event.amount.amountMinorUnits as number;
+    if (event.type === "RESERVED") {
+      unitReservedCount += 1;
+      if (event.amount?.presence === "REPORTED") {
+        reservedTotal += event.amount.amountMinorUnits as number;
+      }
     } else if (event.type === "COMMITTED" || event.type === "RECONCILIATION_REQUIRED") {
+      unitCommittedCount += 1;
       if (event.amount?.presence === "REPORTED") {
         committedTotal += event.amount.amountMinorUnits as number;
       } else {
@@ -421,7 +500,7 @@ export function projectQuotaScopeUsage(ledger: QuotaLedger, scope: QuotaAdmissio
       }
     }
   }
-  return { reservedTotal, committedTotal, hasUnknownCommitted };
+  return { reservedTotal, committedTotal, hasUnknownCommitted, unitReservedCount, unitCommittedCount };
 }
 
 export type QuotaAdmissionOutcome =
@@ -505,7 +584,16 @@ export function admitQuotaReservation(input: {
   }
   const requestedAmount = createCostAmount(input.requestedAmount);
 
-  const existing = findAdmissionEvent(input.ledger, input.identity.scope.tenantId, idempotencyKey);
+  // Rev177 F7: the CANONICAL latest event for this idempotencyKey, of any
+  // type - not merely a RESERVED/REJECTED-only historical lookup, which
+  // would otherwise find a now-stale RESERVED/REJECTED row and treat it as
+  // still current even after the SAME reservation has since moved on to a
+  // genuine terminal disposition.
+  const canonicalLatest = findCanonicalLatestForIdempotencyKey(input.ledger, input.identity.scope.tenantId, idempotencyKey);
+  if (canonicalLatest !== undefined && canonicalLatest.type !== "RESERVED" && canonicalLatest.type !== "REJECTED") {
+    throw new QuotaReservationAlreadySettledError(idempotencyKey, canonicalLatest.type);
+  }
+  const existing = canonicalLatest;
   if (existing !== undefined) {
     assertReplayMatchesOriginalRequest(
       existing,
@@ -519,38 +607,12 @@ export function admitQuotaReservation(input: {
     // below rather than returning immediately.
   }
 
-  if (requestedAmount.presence === "UNKNOWN") {
-    // UNKNOWN is unconditionally inadmissible regardless of usage - if
-    // already rejected for this exact reason, re-evaluating can never
-    // change that, so this is a safe no-op replay rather than a duplicate
-    // (and duplicate-eventId-colliding) REJECTED entry.
-    if (existing !== undefined) {
-      return { ledger: input.ledger, outcome: { status: "REJECTED", event: existing } };
-    }
-    const event: QuotaReservationEvent = {
-      eventId: deriveQuotaReservationEventId(input.identity, idempotencyKey, "REJECTED"),
-      identity: input.identity,
-      idempotencyKey,
-      envelopeRef: input.envelope.envelopeRef,
-      sourceFingerprint: input.envelope.sourceFingerprint,
-      type: "REJECTED",
-      occurredAt,
-      reason: "an UNKNOWN estimated cost cannot be admitted against a monetary ceiling - it is never treated as zero",
-    };
-    return { ledger: appendToLedger(input.ledger, event), outcome: { status: "REJECTED", event } };
-  }
-  if (requestedAmount.currency !== input.envelope.limit.currency) {
-    throw new InvalidQuotaAdmissionError(
-      `requestedAmount currency "${requestedAmount.currency}" does not match envelope limit currency "${input.envelope.limit.currency}"`,
-    );
-  }
-
   // `existing` (when REJECTED) never contributed to reservedTotal/
-  // committedTotal, so this projection already reflects true current usage
-  // with no double-exclusion bookkeeping needed.
+  // committedTotal/unitCount, so this projection already reflects true
+  // current usage with no double-exclusion bookkeeping needed.
   const usage = projectQuotaScopeUsage(input.ledger, input.envelope.scope);
-  const projectedTotal = usage.reservedTotal + usage.committedTotal + (requestedAmount.amountMinorUnits as number);
-  if (projectedTotal > (input.envelope.limit.amountMinorUnits as number)) {
+
+  function rejectWith(reason: string): { readonly ledger: QuotaLedger; readonly outcome: QuotaAdmissionOutcome } {
     if (existing !== undefined) {
       // Still does not fit - replay the original cached rejection rather
       // than appending an identical-eventId duplicate.
@@ -564,10 +626,50 @@ export function admitQuotaReservation(input: {
       sourceFingerprint: input.envelope.sourceFingerprint,
       type: "REJECTED",
       occurredAt,
-      amount: requestedAmount,
-      reason: "insufficient allowance remaining under the current envelope limit",
+      ...(requestedAmount.presence === "REPORTED" ? { amount: requestedAmount } : {}),
+      reason,
     };
     return { ledger: appendToLedger(input.ledger, event), outcome: { status: "REJECTED", event } };
+  }
+
+  // Rev177 F10: the unit floor is the ALWAYS-enforced hard ceiling - a
+  // finite, policy-proven count of admittable reservations, structurally
+  // knowable regardless of whether real monetary cost telemetry exists.
+  // Checked first, before any monetary consideration, and independent of
+  // whether the envelope even configured a monetary dimension at all.
+  if (usage.unitReservedCount + usage.unitCommittedCount + 1 > input.envelope.unitLimit) {
+    return rejectWith("insufficient unit allowance remaining under the current envelope's unit floor");
+  }
+
+  if (input.envelope.monetaryLimit !== undefined) {
+    // Rev177 F6 (rescoped, unblocked by F10): once any committed usage in
+    // this scope has an UNKNOWN actual monetary cost, the scope's remaining
+    // MONETARY allowance can no longer be trusted - but this can only ever
+    // matter for a scope that actually configured a monetary ceiling to
+    // protect. A scope with no monetaryLimit has no monetary allowance to
+    // protect, and the unit floor above remains the sole, always-truthful
+    // gate - this is exactly what makes F6 implementable at all under the
+    // current activated WorkerInvoker, which always honestly commits
+    // UNKNOWN actual cost (no real provider telemetry exists).
+    if (usage.hasUnknownCommitted) {
+      return rejectWith(
+        "an UNKNOWN committed monetary usage already exists in this scope - further monetary-ceiling-dependent admission cannot trust the remaining monetary allowance",
+      );
+    }
+    if (requestedAmount.presence === "UNKNOWN") {
+      // UNKNOWN is unconditionally inadmissible against a REAL monetary
+      // ceiling - it is never treated as zero.
+      return rejectWith("an UNKNOWN estimated cost cannot be admitted against a monetary ceiling - it is never treated as zero");
+    }
+    if (requestedAmount.currency !== input.envelope.monetaryLimit.currency) {
+      throw new InvalidQuotaAdmissionError(
+        `requestedAmount currency "${requestedAmount.currency}" does not match envelope monetaryLimit currency "${input.envelope.monetaryLimit.currency}"`,
+      );
+    }
+    const projectedTotal = usage.reservedTotal + usage.committedTotal + (requestedAmount.amountMinorUnits as number);
+    if (projectedTotal > (input.envelope.monetaryLimit.amountMinorUnits as number)) {
+      return rejectWith("insufficient monetary allowance remaining under the current envelope's monetaryLimit");
+    }
   }
 
   const event: QuotaReservationEvent = {
@@ -624,6 +726,14 @@ export function commitQuotaUsage(input: {
     );
   }
 
+  // Rev177 F7: a RELEASED reservation is a genuine terminal disposition -
+  // its allowance has already been returned to the pool. Committing usage
+  // against it now would fabricate spend for allowance the scope no longer
+  // considers held, silently "resurrecting" a settled reservation.
+  if (reservation.type === "RELEASED") {
+    throw new QuotaReservationAlreadySettledError(idempotencyKey, "RELEASED");
+  }
+
   if (reservation.type === "COMMITTED" || reservation.type === "RECONCILIATION_REQUIRED") {
     if (amountsEqual(reservation.amount, actualAmount) && JSON.stringify(reservation.attribution ?? {}) === JSON.stringify(attribution)) {
       return {
@@ -637,14 +747,46 @@ export function commitQuotaUsage(input: {
   let type: "COMMITTED" | "RECONCILIATION_REQUIRED" = "COMMITTED";
   let reason: string | undefined;
   if (actualAmount.presence === "REPORTED" && reservation.amount?.presence === "REPORTED") {
+    // Rev177 F7: never perform minor-unit arithmetic across different
+    // currencies - a currency mismatch here means the caller supplied an
+    // actual denominated differently than the reservation itself, which can
+    // never happen for a genuinely correct caller and must fail closed
+    // rather than silently subtracting incompatible units.
+    // Rev177 F7: never perform minor-unit arithmetic across different
+    // currencies - a currency mismatch here means the caller supplied an
+    // actual denominated differently than the reservation itself, which can
+    // never happen for a genuinely correct caller and must fail closed
+    // rather than silently subtracting incompatible units.
+    if (actualAmount.currency !== reservation.amount.currency) {
+      throw new InvalidQuotaAdmissionError(
+        `actualAmount currency "${actualAmount.currency}" does not match the reservation's own currency "${reservation.amount.currency}" - cross-currency overage arithmetic is never performed`,
+      );
+    }
     const overage = (actualAmount.amountMinorUnits as number) - (reservation.amount.amountMinorUnits as number);
-    const allowedOverageAmount =
-      input.allowedOverage !== undefined
-        ? createCostAmount(input.allowedOverage)
-        : ({ presence: "REPORTED", amountMinorUnits: 0, currency: actualAmount.currency } as CostAmount);
-    if (allowedOverageAmount.presence === "REPORTED" && overage > (allowedOverageAmount.amountMinorUnits as number)) {
-      type = "RECONCILIATION_REQUIRED";
-      reason = `actual usage exceeded its reservation by ${overage} minor units, beyond the allowed overage of ${allowedOverageAmount.amountMinorUnits}`;
+    if (overage > 0) {
+      const allowedOverageAmount =
+        input.allowedOverage !== undefined
+          ? createCostAmount(input.allowedOverage)
+          : ({ presence: "REPORTED", amountMinorUnits: 0, currency: actualAmount.currency } as CostAmount);
+      // Rev177 F7: "UNKNOWN/mismatched allowedOverage cannot yield a clean
+      // COMMITTED." A tolerance that is itself UNKNOWN, or denominated in a
+      // different currency than the actual, proves nothing about whether
+      // this overage was actually allowed - it must be treated the same as
+      // exceeding the tolerance, never silently treated as "no tolerance
+      // check applies."
+      const provenWithinTolerance =
+        allowedOverageAmount.presence === "REPORTED" &&
+        allowedOverageAmount.currency === actualAmount.currency &&
+        overage <= (allowedOverageAmount.amountMinorUnits as number);
+      if (!provenWithinTolerance) {
+        type = "RECONCILIATION_REQUIRED";
+        reason =
+          allowedOverageAmount.presence !== "REPORTED"
+            ? `actual usage exceeded its reservation by ${overage} minor units, and the allowed overage tolerance is itself UNKNOWN - an unproven tolerance can never authorize a clean commit`
+            : allowedOverageAmount.currency !== actualAmount.currency
+              ? `actual usage exceeded its reservation by ${overage} minor units, but the allowed overage tolerance is denominated in a different currency ("${allowedOverageAmount.currency}") and cannot be compared`
+              : `actual usage exceeded its reservation by ${overage} minor units, beyond the allowed overage of ${allowedOverageAmount.amountMinorUnits}`;
+      }
     }
   }
 
@@ -716,15 +858,19 @@ export function releaseQuotaReservation(input: {
   return { ledger: appendToLedger(input.ledger, event), outcome: { status: "RELEASED", event } };
 }
 
-export type QuotaReadModelStatus = "COMPUTED" | "INCOMPLETE";
-
 /**
- * G7: a truthful internal operator projection. Minimum Adversarial Evidence
- * #16: an UNKNOWN committed actual makes `remaining` genuinely
- * unrepresentable - this returns explicit `INCOMPLETE`, never a fabricated
- * numeric `remaining` (and never confuses that with a real `0`).
+ * Rev177 F10: the unit dimension is NEVER "incomplete" - a reservation
+ * either occurred or it did not, independent of whether its real dollar
+ * cost is known, so `unitLimit`/`unitReserved`/`unitCommitted`/
+ * `unitRemaining` are always present and always numeric. The monetary
+ * dimension remains its own independently-truthful sub-projection:
+ * `NOT_CONFIGURED` when the envelope has no `monetaryLimit` at all (there is
+ * no monetary ceiling to report against), `INCOMPLETE` when
+ * Minimum Adversarial Evidence #16's UNKNOWN-committed-actual case makes a
+ * numeric `remaining` genuinely unrepresentable (never fabricated, never
+ * confused with a real `0`), or `COMPUTED` otherwise.
  */
-export type QuotaReadModel =
+export type QuotaMonetaryReadModel =
   | {
       readonly status: "COMPUTED";
       readonly limit: CostAmount;
@@ -732,18 +878,41 @@ export type QuotaReadModel =
       readonly committed: number;
       readonly remaining: number;
     }
-  | { readonly status: "INCOMPLETE"; readonly reason: string };
+  | { readonly status: "INCOMPLETE"; readonly reason: string }
+  | { readonly status: "NOT_CONFIGURED" };
+
+export interface QuotaReadModel {
+  readonly unitLimit: number;
+  readonly unitReserved: number;
+  readonly unitCommitted: number;
+  readonly unitRemaining: number;
+  readonly monetary: QuotaMonetaryReadModel;
+}
 
 export function projectQuotaReadModel(ledger: QuotaLedger, envelope: QuotaEnvelope): QuotaReadModel {
   const usage = projectQuotaScopeUsage(ledger, envelope.scope);
-  if (usage.hasUnknownCommitted) {
-    return {
+  const unitRemaining = envelope.unitLimit - usage.unitReservedCount - usage.unitCommittedCount;
+
+  let monetary: QuotaMonetaryReadModel;
+  if (envelope.monetaryLimit === undefined) {
+    monetary = { status: "NOT_CONFIGURED" };
+  } else if (usage.hasUnknownCommitted) {
+    monetary = {
       status: "INCOMPLETE",
-      reason: "at least one committed usage event has an UNKNOWN actual cost - remaining allowance cannot be computed",
+      reason: "at least one committed usage event has an UNKNOWN actual cost - remaining monetary allowance cannot be computed",
     };
+  } else {
+    const remaining = (envelope.monetaryLimit.amountMinorUnits as number) - usage.reservedTotal - usage.committedTotal;
+    monetary = { status: "COMPUTED", limit: envelope.monetaryLimit, reserved: usage.reservedTotal, committed: usage.committedTotal, remaining };
   }
-  const remaining = (envelope.limit.amountMinorUnits as number) - usage.reservedTotal - usage.committedTotal;
-  return { status: "COMPUTED", limit: envelope.limit, reserved: usage.reservedTotal, committed: usage.committedTotal, remaining };
+
+  return {
+    unitLimit: envelope.unitLimit,
+    unitReserved: usage.unitReservedCount,
+    unitCommitted: usage.unitCommittedCount,
+    unitRemaining,
+    monetary,
+  };
 }
 
 const RECOGNIZED_QUOTA_RESERVATION_EVENT_TYPES: ReadonlySet<QuotaReservationEventType> = new Set([
@@ -823,6 +992,19 @@ export function validatePersistedQuotaReservationEvent(raw: unknown, expectedSco
     );
   }
   const amount = reconstructCostAmount(candidate.amount, "amount");
+  // Rev177 F7/F10: a RESERVED row can only ever have been constructed by
+  // `admitQuotaReservation` with SOME `amount` recorded (REPORTED when a
+  // monetary estimate was supplied, or UNKNOWN when the envelope has no
+  // `monetaryLimit` to protect and the estimate genuinely was not known) -
+  // `admitQuotaReservation` never constructs a RESERVED event without an
+  // `amount` field at all, so a persisted RESERVED row with a MISSING
+  // amount is structurally impossible truth. Rev177 F10 relaxed this from
+  // "must be REPORTED" once an UNKNOWN-amount RESERVED row became a
+  // legitimate outcome (a scope with no monetary ceiling never rejects an
+  // UNKNOWN estimate).
+  if (type === "RESERVED" && amount === undefined) {
+    throw new InvalidQuotaAdmissionError("a RESERVED record must carry an amount (REPORTED or UNKNOWN) - a missing amount on a RESERVED row is corrupted/malformed truth");
+  }
   const rawAttribution = candidate.attribution as
     | { workerRef?: unknown; providerRef?: unknown; modelRef?: unknown; routeRef?: unknown }
     | undefined;
