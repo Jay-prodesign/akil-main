@@ -17,6 +17,14 @@ import {
 import type { AuthorityContext } from "../domain/authority.js";
 import { requireSameTenant, requirePermission, requireProtectedActionAuthorization } from "../domain/authority.js";
 import { invokeSafely, type WorkerInvoker, type InvokeOutcome } from "../domain/worker-invoker.js";
+import {
+  assertCurrentQuotaEnvelope,
+  createQuotaReservationIdentity,
+  type QuotaEnvelope,
+  type QuotaReservationIdentity,
+  type QuotaAdmissionOutcome,
+  type QuotaCommitOutcome,
+} from "../domain/execution-quota-admission.js";
 
 export class InvalidOutcomeJobExecutionRuntimeError extends Error {
   constructor(reason: string) {
@@ -125,6 +133,102 @@ export interface ExecutionEventStore {
 }
 
 /**
+ * OS-V0-07 (Rev174): store-shape this runtime depends on for pre-effect
+ * budget/quota admission - satisfied structurally by both
+ * `FileDurableQuotaReservationStore` (sync) and
+ * `PostgresQuotaReservationStore` (async), exactly mirroring
+ * `ExecutionEventStore`'s own sync/async structural-typing trick above.
+ */
+export interface QuotaAdmissionPort {
+  admit(input: {
+    readonly envelope: QuotaEnvelope;
+    readonly identity: QuotaReservationIdentity;
+    readonly idempotencyKey: unknown;
+    readonly requestedAmount: { presence: unknown; amountMinorUnits?: unknown; currency?: unknown };
+    readonly occurredAt: unknown;
+  }): QuotaAdmissionOutcome | Promise<QuotaAdmissionOutcome>;
+  commit(input: {
+    readonly identity: QuotaReservationIdentity;
+    readonly idempotencyKey: unknown;
+    readonly actualAmount: { presence: unknown; amountMinorUnits?: unknown; currency?: unknown };
+    readonly occurredAt: unknown;
+  }): QuotaCommitOutcome | Promise<QuotaCommitOutcome>;
+}
+
+interface QuotaAdmissionInput {
+  readonly quotaAdmission: QuotaAdmissionPort;
+  readonly quotaEnvelope: QuotaEnvelope;
+  readonly currentQuotaSourceFingerprint: string;
+  readonly estimatedCost: { presence: unknown; amountMinorUnits?: unknown; currency?: unknown };
+}
+
+/**
+ * G1/G3 (Rev174 MISSION, Rev175 F2 ordering correction): the one
+ * load-bearing pre-effect admission point. Called by EVERY caller racing to
+ * dispatch/retry this exact attempt - winner and losers alike - BEFORE the
+ * ATTEMPT_STARTED claim is even attempted, keyed by the same idempotent
+ * (jobId, runId, attempt) identity, so every racer independently arrives at
+ * the identical decision without double-consuming allowance (Minimum
+ * Adversarial Evidence #1/#2/#4). Authority/activation currentness and
+ * worker-routing eligibility (both already enforced above every call site
+ * of this function) remain strictly higher-priority gates than budget
+ * (Minimum Adversarial Evidence #15) - this function is never reached at
+ * all when those already failed. `ATTEMPT_STARTED.created` (checked by the
+ * caller immediately after this returns) is what decides who may actually
+ * act on this shared decision - see `commitQuotaForAttempt`.
+ *
+ * Returns the derived `QuotaReservationIdentity`/`idempotencyKey` alongside
+ * the decision so the caller can later `commit` actual usage against the
+ * exact same reservation without re-deriving it.
+ */
+async function admitQuotaForAttempt(
+  input: QuotaAdmissionInput & { readonly jobId: string; readonly runId: string; readonly attempt: number; readonly now: unknown },
+): Promise<{
+  readonly identity: QuotaReservationIdentity;
+  readonly idempotencyKey: string;
+  readonly decision: QuotaAdmissionOutcome;
+}> {
+  const identity = createQuotaReservationIdentity({
+    scope: input.quotaEnvelope.scope,
+    jobId: input.jobId,
+    runId: input.runId,
+    attemptRef: String(input.attempt),
+  });
+  const idempotencyKey = `${input.jobId}::${input.runId}::${input.attempt}`;
+  const decision = await input.quotaAdmission.admit({
+    envelope: input.quotaEnvelope,
+    identity,
+    idempotencyKey,
+    requestedAmount: input.estimatedCost,
+    occurredAt: input.now,
+  });
+  return { identity, idempotencyKey, decision };
+}
+
+/**
+ * G5/G6: commits actual usage after invocation, regardless of ACCEPTED or
+ * TEMPORARY_FAILURE - a failed/unknown provider response may still have
+ * consumed real units (Minimum Adversarial Evidence #10). The activated
+ * `WorkerInvoker` boundary reports no token/cost metrics at all (Rev174's
+ * own ACTUAL USAGE constraint: "do not fabricate actual provider usage"),
+ * so the actual committed here is honestly `UNKNOWN`, never a fabricated
+ * echo of the estimate.
+ */
+async function commitQuotaForAttempt(
+  quotaAdmission: QuotaAdmissionPort,
+  identity: QuotaReservationIdentity,
+  idempotencyKey: string,
+  now: unknown,
+): Promise<QuotaCommitOutcome> {
+  return quotaAdmission.commit({
+    identity,
+    idempotencyKey,
+    actualAmount: { presence: "UNKNOWN" },
+    occurredAt: now,
+  });
+}
+
+/**
  * Package Contract I currentness gate. Pure comparison - the caller is
  * responsible for actually re-resolving `currentFingerprint` from
  * `resolveEffectiveConfigurationPolicy`/`compileProjectActivationProfile`
@@ -220,20 +324,21 @@ export interface DispatchOutcomeJobExecutionResult {
  * state rather than assume a fresh dispatch happened.
  */
 export async function dispatchOutcomeJobExecutionRun(
-  input: ScopeInput & {
-    readonly authority: AuthorityContext;
-    readonly runId: unknown;
-    readonly correlationId: unknown;
-    readonly now: unknown;
-    readonly executorKind: unknown;
-    readonly expectedFingerprint: string;
-    readonly currentFingerprint: string;
-    readonly store: ExecutionEventStore;
-    readonly invoker: WorkerInvoker;
-    readonly taskId: string;
-    readonly branch: string;
-    readonly checkpointSha: string;
-  },
+  input: ScopeInput &
+    QuotaAdmissionInput & {
+      readonly authority: AuthorityContext;
+      readonly runId: unknown;
+      readonly correlationId: unknown;
+      readonly now: unknown;
+      readonly executorKind: unknown;
+      readonly expectedFingerprint: string;
+      readonly currentFingerprint: string;
+      readonly store: ExecutionEventStore;
+      readonly invoker: WorkerInvoker;
+      readonly taskId: string;
+      readonly branch: string;
+      readonly checkpointSha: string;
+    },
 ): Promise<DispatchOutcomeJobExecutionResult> {
   requireSameTenant(input.authority, input.tenantScope.tenantId);
   requirePermission(input.authority, "EXECUTE");
@@ -266,6 +371,11 @@ export async function dispatchOutcomeJobExecutionRun(
   }
 
   assertCurrentActivation(input.expectedFingerprint, input.currentFingerprint);
+  // OS-V0-07 (Rev174) Minimum Adversarial Evidence #7: a stale quota
+  // envelope/policy snapshot cannot authorize anything - checked here,
+  // alongside activation currentness and before any event is ever appended,
+  // exactly mirroring `assertCurrentActivation`'s own placement.
+  assertCurrentQuotaEnvelope(input.quotaEnvelope, input.currentQuotaSourceFingerprint);
 
   const acceptedEvent = createOutcomeJobExecutionEvent({
     tenantScope: input.tenantScope,
@@ -280,6 +390,32 @@ export async function dispatchOutcomeJobExecutionRun(
     occurredAt: input.now,
   });
   let { state } = await appendAndGetState(input.store, acceptedEvent);
+
+  // OS-V0-07 (Rev175 F2): the reservation is established BEFORE the
+  // ATTEMPT_STARTED claim is even attempted - every caller racing to
+  // dispatch this exact attempt (winner and losers alike) performs the
+  // SAME idempotent admission call here, keyed by the exact same
+  // (jobId, runId, attempt) idempotencyKey. This is what makes a crash
+  // between reservation and ATTEMPT_STARTED restart-safe: a later
+  // re-dispatch simply replays the identical, already-decided admission
+  // outcome (Minimum Adversarial Evidence #2) rather than reserving twice,
+  // and duplicate concurrent racers consume the allowance exactly once
+  // regardless of which of them (if any) goes on to win the ATTEMPT_STARTED
+  // claim below. `ATTEMPT_STARTED.created` remains the ONLY thing that
+  // decides who may act on this shared, already-established decision - a
+  // losing racer never invokes, commits, or releases it (it simply returns
+  // below, exactly as before), so a loser can never touch a winner's
+  // reservation.
+  const quota = await admitQuotaForAttempt({
+    quotaAdmission: input.quotaAdmission,
+    quotaEnvelope: input.quotaEnvelope,
+    currentQuotaSourceFingerprint: input.currentQuotaSourceFingerprint,
+    estimatedCost: input.estimatedCost,
+    jobId: input.job.jobId,
+    runId: acceptedEvent.runId,
+    attempt: 1,
+    now: input.now,
+  });
 
   const startedEvent = createOutcomeJobExecutionEvent({
     tenantScope: input.tenantScope,
@@ -297,23 +433,50 @@ export async function dispatchOutcomeJobExecutionRun(
   state = started.state;
 
   // Rev145 F1 / Rev146 F6: only the caller who actually WON the durable
-  // claim on this exact ATTEMPT_STARTED event may invoke the worker. This
-  // single atomic gate uniformly covers three cases: (1) a fresh run - both
-  // ACCEPTED and ATTEMPT_STARTED are newly created, this call wins and
-  // invokes; (2) a run that already fully progressed past attempt 1 - the
-  // ATTEMPT_STARTED append for attempt 1 already exists (whatever the
-  // CURRENT attempt now is, since its eventId depends only on the fixed
-  // attempt-1/sequence-1 coordinate), so this call durably loses and
-  // returns the real current state as a pure no-op; (3) Rev146 F6's
-  // ACCEPTED-only crash-recovery window - the process died after ACCEPTED
-  // became durable but before ATTEMPT_STARTED did, so a later re-dispatch
-  // (with the SAME correlationId, already verified above) finds ACCEPTED
-  // already durable (a harmless idempotent no-op re-append) but
-  // ATTEMPT_STARTED genuinely new - this call wins the claim and invokes
-  // exactly once, un-stranding the run. A concurrent recovery race between
-  // two such re-dispatches is resolved by this exact same atomic claim, so
-  // there is still only ever one invocation winner.
+  // claim on this exact ATTEMPT_STARTED event may act on the (already
+  // shared/decided) reservation above. This single atomic gate uniformly
+  // covers three cases: (1) a fresh run - both ACCEPTED and ATTEMPT_STARTED
+  // are newly created, this call wins and proceeds; (2) a run that already
+  // fully progressed past attempt 1 - the ATTEMPT_STARTED append for
+  // attempt 1 already exists (whatever the CURRENT attempt now is, since
+  // its eventId depends only on the fixed attempt-1/sequence-1 coordinate),
+  // so this call durably loses and returns the real current state as a pure
+  // no-op; (3) Rev146 F6's ACCEPTED-only crash-recovery window - the
+  // process died after ACCEPTED became durable but before ATTEMPT_STARTED
+  // did, so a later re-dispatch (with the SAME correlationId, already
+  // verified above) finds ACCEPTED already durable (a harmless idempotent
+  // no-op re-append) but ATTEMPT_STARTED genuinely new - this call wins the
+  // claim and proceeds exactly once, un-stranding the run. A concurrent
+  // recovery race between two such re-dispatches is resolved by this exact
+  // same atomic claim, so there is still only ever one invocation winner -
+  // and, per Rev175 F2, only ever one committer/releaser of the reservation
+  // every racer already independently, idempotently agreed on above.
   if (!started.created) {
+    return { state, invoked: false };
+  }
+
+  // OS-V0-07 (Rev174) G1/G3: authority/activation currentness and
+  // worker-routing eligibility (both already enforced above) remain
+  // strictly higher-priority gates than budget (Minimum Adversarial Evidence
+  // #15) - both were fully checked before the reservation above was ever
+  // attempted. A REJECTED admission never invokes the worker at all; it
+  // records the existing, retryable `BLOCKED` execution-runtime status
+  // instead of inventing a new terminal vocabulary.
+  if (quota.decision.status === "REJECTED") {
+    const blockedEvent = createOutcomeJobExecutionEvent({
+      tenantScope: input.tenantScope,
+      customer: input.customer,
+      project: input.project,
+      job: input.job,
+      runId: acceptedEvent.runId,
+      correlationId: acceptedEvent.correlationId,
+      attempt: 1,
+      sequence: 2,
+      type: "BLOCKED",
+      occurredAt: input.now,
+      reason: quota.decision.event.reason ?? "quota admission rejected",
+    });
+    ({ state } = await appendAndGetState(input.store, blockedEvent));
     return { state, invoked: false };
   }
 
@@ -331,6 +494,10 @@ export async function dispatchOutcomeJobExecutionRun(
       attempt: 1,
     },
   });
+
+  // G5/G6: actual usage is committed once invocation has been attempted,
+  // regardless of outcome - see `commitQuotaForAttempt`'s own doc comment.
+  await commitQuotaForAttempt(input.quotaAdmission, quota.identity, quota.idempotencyKey, input.now);
 
   if (invocationOutcome.status === "TEMPORARY_FAILURE") {
     const failedEvent = createOutcomeJobExecutionEvent({
@@ -371,19 +538,20 @@ const RETRYABLE_ATTEMPT_STATUSES: ReadonlySet<string> = new Set([
  * never authorizes anything the store's real current state disagrees with.
  */
 export async function retryOutcomeJobExecutionAttempt(
-  input: ScopeInput & {
-    readonly authority: AuthorityContext;
-    readonly currentState: OutcomeJobExecutionRunState;
-    readonly now: unknown;
-    readonly executorKind: unknown;
-    readonly expectedFingerprint: string;
-    readonly currentFingerprint: string;
-    readonly store: ExecutionEventStore;
-    readonly invoker: WorkerInvoker;
-    readonly taskId: string;
-    readonly branch: string;
-    readonly checkpointSha: string;
-  },
+  input: ScopeInput &
+    QuotaAdmissionInput & {
+      readonly authority: AuthorityContext;
+      readonly currentState: OutcomeJobExecutionRunState;
+      readonly now: unknown;
+      readonly executorKind: unknown;
+      readonly expectedFingerprint: string;
+      readonly currentFingerprint: string;
+      readonly store: ExecutionEventStore;
+      readonly invoker: WorkerInvoker;
+      readonly taskId: string;
+      readonly branch: string;
+      readonly checkpointSha: string;
+    },
 ): Promise<DispatchOutcomeJobExecutionResult> {
   requireSameTenant(input.authority, input.tenantScope.tenantId);
   requirePermission(input.authority, "EXECUTE");
@@ -404,8 +572,32 @@ export async function retryOutcomeJobExecutionAttempt(
   }
 
   assertCurrentActivation(input.expectedFingerprint, input.currentFingerprint);
+  // OS-V0-07 (Rev174) Minimum Adversarial Evidence #7: a stale quota
+  // envelope/policy snapshot cannot authorize anything - checked here,
+  // alongside activation currentness and before any event is ever appended,
+  // exactly mirroring `assertCurrentActivation`'s own placement.
+  assertCurrentQuotaEnvelope(input.quotaEnvelope, input.currentQuotaSourceFingerprint);
 
   const nextAttempt = freshState.currentAttempt + 1;
+
+  // OS-V0-07 (Rev175 F2): established BEFORE the ATTEMPT_STARTED claim -
+  // see `dispatchOutcomeJobExecutionRun`'s identical gate for the full
+  // crash-safety/duplicate-racer rationale. Design D: a retry re-admits
+  // under current policy/quota for its OWN new attempt - it never reuses
+  // attempt N's reservation, and (since each attempt has a distinct
+  // attemptRef) never double-reserves the SAME already-reserved effect
+  // either.
+  const quota = await admitQuotaForAttempt({
+    quotaAdmission: input.quotaAdmission,
+    quotaEnvelope: input.quotaEnvelope,
+    currentQuotaSourceFingerprint: input.currentQuotaSourceFingerprint,
+    estimatedCost: input.estimatedCost,
+    jobId: input.job.jobId,
+    runId: freshState.runId,
+    attempt: nextAttempt,
+    now: input.now,
+  });
+
   const startedEvent = createOutcomeJobExecutionEvent({
     tenantScope: input.tenantScope,
     customer: input.customer,
@@ -422,11 +614,32 @@ export async function retryOutcomeJobExecutionAttempt(
   let state = started.state;
 
   // Rev145 F1: only the caller who actually won the durable claim on this
-  // exact next-attempt's ATTEMPT_STARTED may invoke the worker. The prior
-  // heuristic ("does state.currentAttempt still equal nextAttempt") could
-  // not distinguish "I won the race" from "someone else won it but the
-  // final state happens to look the same" - the atomic `created` flag can.
+  // exact next-attempt's ATTEMPT_STARTED may act on the reservation above.
+  // The prior heuristic ("does state.currentAttempt still equal
+  // nextAttempt") could not distinguish "I won the race" from "someone else
+  // won it but the final state happens to look the same" - the atomic
+  // `created` flag can. Per Rev175 F2, this is also the only gate that
+  // decides who may commit/release the reservation every racer already
+  // independently, idempotently agreed on above.
   if (!started.created) {
+    return { state, invoked: false };
+  }
+
+  if (quota.decision.status === "REJECTED") {
+    const blockedEvent = createOutcomeJobExecutionEvent({
+      tenantScope: input.tenantScope,
+      customer: input.customer,
+      project: input.project,
+      job: input.job,
+      runId: startedEvent.runId,
+      correlationId: startedEvent.correlationId,
+      attempt: nextAttempt,
+      sequence: 2,
+      type: "BLOCKED",
+      occurredAt: input.now,
+      reason: quota.decision.event.reason ?? "quota admission rejected",
+    });
+    ({ state } = await appendAndGetState(input.store, blockedEvent));
     return { state, invoked: false };
   }
 
@@ -444,6 +657,8 @@ export async function retryOutcomeJobExecutionAttempt(
       attempt: nextAttempt,
     },
   });
+
+  await commitQuotaForAttempt(input.quotaAdmission, quota.identity, quota.idempotencyKey, input.now);
 
   if (invocationOutcome.status === "TEMPORARY_FAILURE") {
     const failedEvent = createOutcomeJobExecutionEvent({
