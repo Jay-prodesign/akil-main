@@ -14,6 +14,7 @@ import {
   requestConnectorConnection,
   transitionConnectorConnection,
   verifyConnectorConnection,
+  rotateConnectorSecret,
   type ConnectorConnectionInstance,
   type ConnectorDescriptor,
 } from "../src/domain/integration-connector-catalog.js";
@@ -32,8 +33,14 @@ import {
   type ConnectorTransport,
   type ConnectorTransportRequest,
   type SecretResolver,
+  type CurrentConnectorConnectionReader,
 } from "../src/domain/connector-execution.js";
 import { InvalidGenericConnectorDefinitionError } from "../src/domain/generic-connector-definition.js";
+import { FileDurableConnectorConnectionStore } from "../src/domain/durable-connector-connection-store.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createCapabilityAdmission } from "../src/domain/capability-admission.js";
 
 function ownership(suffix = "a"): ProjectOwnershipRef {
   return createProjectOwnershipRef({
@@ -89,9 +96,36 @@ function verifiedInstance(input: {
   return verifyConnectorConnection(unverified, "evidence:handshake");
 }
 
+/**
+ * OS-V0-06: a minimal, tenant-scoped `CurrentConnectorConnectionReader` fake
+ * - it only returns a record when BOTH the queried tenantId and
+ * connectionBindingId match, exactly like a real per-tenant durable store
+ * would (a lookup under the wrong tenant or a different binding id finds
+ * nothing) - so tests exercise the same fail-closed shape a real store
+ * produces, without needing a real store for every unit test.
+ */
+function currentStoreFor(instance: ConnectorConnectionInstance): CurrentConnectorConnectionReader {
+  return {
+    get(tenantId, connectionBindingId) {
+      if (tenantId !== instance.binding.ownership.tenantId) {
+        return undefined;
+      }
+      if (connectionBindingId !== instance.binding.connectionBindingId) {
+        return undefined;
+      }
+      return { instance, version: 1 };
+    },
+  };
+}
+
 function definitionFor(): GenericApiConnectorDefinition {
+  return definitionForBinding("bind-akilta-tenant-a");
+}
+
+/** Like `definitionFor()`, but for a caller-supplied `connectionBindingId` - needed once tests stop hardcoding a single shared tenant/binding id. */
+function definitionForBinding(connectionBindingId: string): GenericApiConnectorDefinition {
   return createGenericApiConnectorDefinition({
-    connectionBindingId: "bind-akilta-tenant-a",
+    connectionBindingId,
     baseUrl: "https://api.generic-example.com",
     authMode: "API_KEY",
     endpoints: [{ capabilityRef: "cap:generic-ping", method: "GET", path: "/ping" }],
@@ -132,6 +166,7 @@ test("T1: a successful execution returns a ConnectorExecutionResult carrying the
     bound,
     capabilityRef: "cap:generic-ping",
     requestingOwnership: ownershipRef,
+    connectionStore: currentStoreFor(instance),
     secretResolver,
     transport,
   });
@@ -160,6 +195,7 @@ test("T2 (adversarial): requestingOwnership that does not match the connection's
         bound,
         capabilityRef: "cap:generic-ping",
         requestingOwnership: wrongOwnership,
+        connectionStore: currentStoreFor(instance),
         secretResolver: new FixedSecretResolver("secret"),
         transport,
       }),
@@ -192,6 +228,7 @@ test("T3 (adversarial): a non-VERIFIED connection (REQUESTED) cannot execute", (
         bound,
         capabilityRef: "cap:generic-ping",
         requestingOwnership: ownershipRef,
+        connectionStore: currentStoreFor(instance),
         secretResolver: new FixedSecretResolver("secret"),
         transport,
       }),
@@ -217,6 +254,7 @@ test("T4 (adversarial): a DEGRADED connection cannot execute", () => {
         bound,
         capabilityRef: "cap:generic-ping",
         requestingOwnership: ownershipRef,
+        connectionStore: currentStoreFor(degraded),
         secretResolver: new FixedSecretResolver("secret"),
         transport,
       }),
@@ -242,6 +280,7 @@ test("T5 (adversarial): a REVOKED connection cannot execute", () => {
         bound,
         capabilityRef: "cap:generic-ping",
         requestingOwnership: ownershipRef,
+        connectionStore: currentStoreFor(revoked),
         secretResolver: new FixedSecretResolver("secret"),
         transport,
       }),
@@ -263,6 +302,7 @@ test("T6 (adversarial): an undeclared capabilityRef fails closed before any tran
         bound,
         capabilityRef: "cap:never-declared",
         requestingOwnership: ownershipRef,
+        connectionStore: currentStoreFor(instance),
         secretResolver: new FixedSecretResolver("secret"),
         transport,
       }),
@@ -284,6 +324,7 @@ test("T7 (adversarial): a connection with no bound secretRef cannot execute (unr
         bound,
         capabilityRef: "cap:generic-ping",
         requestingOwnership: ownershipRef,
+        connectionStore: currentStoreFor(instance),
         secretResolver: new FixedSecretResolver("secret"),
         transport,
       }),
@@ -310,6 +351,7 @@ test("T8 (adversarial): a secretResolver that throws surfaces as UnresolvedConne
         bound,
         capabilityRef: "cap:generic-ping",
         requestingOwnership: ownershipRef,
+        connectionStore: currentStoreFor(instance),
         secretResolver: throwingResolver,
         transport,
       }),
@@ -330,6 +372,7 @@ test("T9 (adversarial): a secretResolver returning an empty string is treated as
         bound,
         capabilityRef: "cap:generic-ping",
         requestingOwnership: ownershipRef,
+        connectionStore: currentStoreFor(instance),
         secretResolver: new FixedSecretResolver(""),
         transport,
       }),
@@ -350,6 +393,7 @@ test("T10 (adversarial): a transport-reported AUTHORIZATION_FAILED is surfaced a
         bound,
         capabilityRef: "cap:generic-ping",
         requestingOwnership: ownershipRef,
+        connectionStore: currentStoreFor(instance),
         secretResolver: new FixedSecretResolver("secret"),
         transport,
       }),
@@ -370,6 +414,7 @@ test("T11: a transport-reported TRANSPORT_ERROR is surfaced as a thrown Connecto
         bound,
         capabilityRef: "cap:generic-ping",
         requestingOwnership: ownershipRef,
+        connectionStore: currentStoreFor(instance),
         secretResolver: new FixedSecretResolver("secret"),
         transport,
       }),
@@ -418,6 +463,7 @@ test("T12 (GOOGLE_WORKSPACE multi-host): a Sheets endpoint's baseUrlOverride is 
     bound,
     capabilityRef: "cap:workspace-sheets-read",
     requestingOwnership: ownershipRef,
+    connectionStore: currentStoreFor(instance),
     secretResolver: new FixedSecretResolver("secret-value"),
     transport,
   });
@@ -432,6 +478,7 @@ test("T12 (GOOGLE_WORKSPACE multi-host): a Sheets endpoint's baseUrlOverride is 
     bound,
     capabilityRef: "cap:workspace-docs-read",
     requestingOwnership: ownershipRef,
+    connectionStore: currentStoreFor(instance),
     secretResolver: new FixedSecretResolver("secret-value"),
     transport,
   });
@@ -450,9 +497,379 @@ test("T13 (adversarial secret-leak proof): the resolved secret never appears any
     bound,
     capabilityRef: "cap:generic-ping",
     requestingOwnership: ownershipRef,
+    connectionStore: currentStoreFor(instance),
     secretResolver: new FixedSecretResolver(SECRET_VALUE),
     transport,
   });
 
   assert.ok(!JSON.stringify(result).includes(SECRET_VALUE));
+});
+
+// ---------------------------------------------------------------------------
+// OS-V0-06: execution-time currentness witnesses (Rev171 pre-admission
+// packet's 12 mandatory adversarial witnesses). T1-T13 above already prove
+// witnesses 9 (secretResolver throws/empty -> no transport, T8/T9) and 10
+// (successful current VERIFIED path invokes transport once with no secret
+// leak, T1/T13) once `connectionStore` is wired through - no separate test
+// duplicates those. The remaining witnesses are new below.
+// ---------------------------------------------------------------------------
+
+/** Proves the secret resolver is never even called - not merely that its return value is ignored. */
+class ExplodingSecretResolver implements SecretResolver {
+  resolve(secretRefId: string): string {
+    throw new Error(`SecretResolver.resolve must never be called in this scenario - was called with secretRefId="${secretRefId}"`);
+  }
+}
+
+class RecordingSecretResolver implements SecretResolver {
+  public readonly seenSecretRefIds: string[] = [];
+  constructor(private readonly valuesBySecretRefId: Readonly<Record<string, string>>) {}
+  resolve(secretRefId: string): string {
+    this.seenSecretRefIds.push(secretRefId);
+    const value = this.valuesBySecretRefId[secretRefId];
+    if (value === undefined) {
+      throw new Error(`RecordingSecretResolver has no fixture value for secretRefId "${secretRefId}"`);
+    }
+    return value;
+  }
+}
+
+/**
+ * A raw fake store that returns exactly the given instance regardless of the
+ * queried tenantId/connectionBindingId - unlike `currentStoreFor`, this
+ * simulates a store record actually existing under a colliding/foreign key
+ * (used only for the ownership/collision witnesses below, where the point is
+ * that `executeConnectorCapability`'s OWN ownership check, not the store's
+ * lookup semantics, must be what fails it closed).
+ */
+function storeAlwaysReturning(instance: ConnectorConnectionInstance): CurrentConnectorConnectionReader {
+  return { get: () => ({ instance, version: 1 }) };
+}
+
+function sameTenantOwnership(customerSuffix: string, projectSuffix: string): ProjectOwnershipRef {
+  return createProjectOwnershipRef({
+    tenantId: "akilta-tenant-shared",
+    customerId: `customer-${customerSuffix}`,
+    projectId: `project-${projectSuffix}`,
+  });
+}
+
+test("R1 (OS-V0-06 witness 1, adversarial): a stale caller-held VERIFIED instance is rejected when the current durable connection is REVOKED - zero secret resolution, zero transport", () => {
+  const ownershipRef = ownership("r1");
+  const staleVerified = verifiedInstance({ ownershipRef, secretRefId: "secret-ref-1" });
+  const currentRevoked: ConnectorConnectionInstance = {
+    ...staleVerified,
+    binding: transitionConnectionBinding(staleVerified.binding, "REVOKED"),
+  };
+  const definition = definitionForBinding(staleVerified.binding.connectionBindingId);
+  const bound = bindGenericApiDefinition({ instance: staleVerified, definition });
+  const transport = new RecordingMockTransport();
+
+  assert.throws(
+    () =>
+      executeConnectorCapability({
+        bound,
+        capabilityRef: "cap:generic-ping",
+        requestingOwnership: ownershipRef,
+        connectionStore: currentStoreFor(currentRevoked),
+        secretResolver: new ExplodingSecretResolver(),
+        transport,
+      }),
+    ConnectorExecutionNotAuthorizedError,
+  );
+  assert.equal(transport.seenRequests.length, 0);
+});
+
+test("R2 (OS-V0-06 witness 2, adversarial): a stale caller-held VERIFIED instance is rejected when the current durable connection is DEGRADED - zero secret resolution, zero transport", () => {
+  const ownershipRef = ownership("r2");
+  const staleVerified = verifiedInstance({ ownershipRef, secretRefId: "secret-ref-1" });
+  const currentDegraded: ConnectorConnectionInstance = {
+    ...staleVerified,
+    binding: transitionConnectionBinding(staleVerified.binding, "DEGRADED"),
+  };
+  const definition = definitionForBinding(staleVerified.binding.connectionBindingId);
+  const bound = bindGenericApiDefinition({ instance: staleVerified, definition });
+  const transport = new RecordingMockTransport();
+
+  assert.throws(
+    () =>
+      executeConnectorCapability({
+        bound,
+        capabilityRef: "cap:generic-ping",
+        requestingOwnership: ownershipRef,
+        connectionStore: currentStoreFor(currentDegraded),
+        secretResolver: new ExplodingSecretResolver(),
+        transport,
+      }),
+    ConnectorExecutionNotAuthorizedError,
+  );
+  assert.equal(transport.seenRequests.length, 0);
+});
+
+test("R3 (OS-V0-06 witness 3, adversarial): stale caller secretRef A is never resolved when the current durable connection was rotated to secretRef B and demoted to DEGRADED pending re-verification", () => {
+  const ownershipRef = ownership("r3");
+  const staleVerifiedWithA = verifiedInstance({ ownershipRef, secretRefId: "secret-ref-A" });
+  const rotatedToB = rotateConnectorSecret({
+    instance: staleVerifiedWithA,
+    newSecretRef: createSecretRef({ secretRefId: "secret-ref-B" }),
+  });
+  assert.equal(rotatedToB.binding.connectionState, "DEGRADED", "rotating a VERIFIED binding's secret must demote it to DEGRADED");
+  const definition = definitionForBinding(staleVerifiedWithA.binding.connectionBindingId);
+  const bound = bindGenericApiDefinition({ instance: staleVerifiedWithA, definition });
+  const transport = new RecordingMockTransport();
+  const resolver = new ExplodingSecretResolver();
+
+  assert.throws(
+    () =>
+      executeConnectorCapability({
+        bound,
+        capabilityRef: "cap:generic-ping",
+        requestingOwnership: ownershipRef,
+        connectionStore: currentStoreFor(rotatedToB),
+        secretResolver: resolver,
+        transport,
+      }),
+    ConnectorExecutionNotAuthorizedError,
+  );
+  assert.equal(transport.seenRequests.length, 0, "secret-ref-A must never be resolved once the current durable connection has moved on");
+});
+
+test("R4 (OS-V0-06 witness 4, positive path): after rotation is genuinely re-verified and durably current, execution resolves secretRef B and never the caller's stale secretRef A", () => {
+  const ownershipRef = ownership("r4");
+  const staleVerifiedWithA = verifiedInstance({ ownershipRef, secretRefId: "secret-ref-A" });
+  const rotatedToB = rotateConnectorSecret({
+    instance: staleVerifiedWithA,
+    newSecretRef: createSecretRef({ secretRefId: "secret-ref-B" }),
+  });
+  const reverifiedWithB = verifyConnectorConnection(rotatedToB, "evidence:re-handshake-after-rotation");
+  assert.equal(reverifiedWithB.binding.connectionState, "VERIFIED");
+  assert.equal(reverifiedWithB.binding.secretRef, "secret-ref-B");
+
+  const definition = definitionForBinding(staleVerifiedWithA.binding.connectionBindingId);
+  // Caller still only holds its original pre-rotation VERIFIED(A) snapshot.
+  const bound = bindGenericApiDefinition({ instance: staleVerifiedWithA, definition });
+  const transport = new RecordingMockTransport("SUCCESS", { pong: true });
+  const resolver = new RecordingSecretResolver({ "secret-ref-A": "VALUE-A", "secret-ref-B": "VALUE-B" });
+
+  const result = executeConnectorCapability({
+    bound,
+    capabilityRef: "cap:generic-ping",
+    requestingOwnership: ownershipRef,
+    connectionStore: currentStoreFor(reverifiedWithB),
+    secretResolver: resolver,
+    transport,
+  });
+
+  assert.deepEqual(resolver.seenSecretRefIds, ["secret-ref-B"]);
+  assert.equal(transport.seenRequests[0]?.authSecretValue, "VALUE-B");
+  assert.ok(!JSON.stringify(result).includes("VALUE-A"));
+});
+
+test("R5 (OS-V0-06 witness 5, adversarial): a missing current durable connection record fails closed", () => {
+  const ownershipRef = ownership("r5");
+  const staleVerified = verifiedInstance({ ownershipRef, secretRefId: "secret-ref-1" });
+  const definition = definitionForBinding(staleVerified.binding.connectionBindingId);
+  const bound = bindGenericApiDefinition({ instance: staleVerified, definition });
+  const transport = new RecordingMockTransport();
+  const emptyStore: CurrentConnectorConnectionReader = { get: () => undefined };
+
+  assert.throws(
+    () =>
+      executeConnectorCapability({
+        bound,
+        capabilityRef: "cap:generic-ping",
+        requestingOwnership: ownershipRef,
+        connectionStore: emptyStore,
+        secretResolver: new ExplodingSecretResolver(),
+        transport,
+      }),
+    ConnectorExecutionNotAuthorizedError,
+  );
+  assert.equal(transport.seenRequests.length, 0);
+});
+
+test("R6 (OS-V0-06 witness 6, adversarial): a current durable record whose exact ownership does not match the requesting ownership fails closed, even though a record was found for the queried id", () => {
+  const ownershipRef = ownership("r6-requester");
+  const foreignOwnership = ownership("r6-foreign");
+  const staleVerified = verifiedInstance({ ownershipRef, secretRefId: "secret-ref-1" });
+  const currentUnderForeignOwnership: ConnectorConnectionInstance = {
+    ...staleVerified,
+    binding: { ...staleVerified.binding, ownership: foreignOwnership },
+  };
+  const definition = definitionForBinding(staleVerified.binding.connectionBindingId);
+  const bound = bindGenericApiDefinition({ instance: staleVerified, definition });
+  const transport = new RecordingMockTransport();
+
+  assert.throws(
+    () =>
+      executeConnectorCapability({
+        bound,
+        capabilityRef: "cap:generic-ping",
+        requestingOwnership: ownershipRef,
+        connectionStore: storeAlwaysReturning(currentUnderForeignOwnership),
+        secretResolver: new ExplodingSecretResolver(),
+        transport,
+      }),
+    ConnectorExecutionNotAuthorizedError,
+  );
+  assert.equal(transport.seenRequests.length, 0);
+});
+
+test("R7 (OS-V0-06 witness 7, adversarial): a colliding connectionBindingId belonging to a different customer/project under the SAME tenant cannot authorize execution", () => {
+  const projectXOwnership = sameTenantOwnership("x", "x");
+  const projectYOwnership = sameTenantOwnership("y", "y");
+  const descriptor = genericApiDescriptor();
+  const requirementY = requirementFor(descriptor, projectYOwnership);
+  const instanceY = requestConnectorConnection({
+    requirement: requirementY,
+    connectorDescriptor: descriptor,
+    connectionBindingId: "colliding-bind-id",
+    workspaceRef: "workspace-y",
+    integrationInstanceRef: "instance-y",
+    delegatedScope: [],
+    authMode: "API_KEY",
+    secretRef: createSecretRef({ secretRefId: "secret-ref-y" }),
+  });
+  const verifiedY = verifyConnectorConnection(transitionConnectorConnection(instanceY, "CONNECTED_UNVERIFIED"), "evidence:y");
+
+  // Project X's own (stale) caller context, using the SAME connectionBindingId string by coincidence/replay.
+  const requirementX = requirementFor(descriptor, projectXOwnership);
+  const staleInstanceX = requestConnectorConnection({
+    requirement: requirementX,
+    connectorDescriptor: descriptor,
+    connectionBindingId: "colliding-bind-id",
+    workspaceRef: "workspace-x",
+    integrationInstanceRef: "instance-x",
+    delegatedScope: [],
+    authMode: "API_KEY",
+    secretRef: createSecretRef({ secretRefId: "secret-ref-x" }),
+  });
+  const verifiedX = verifyConnectorConnection(transitionConnectorConnection(staleInstanceX, "CONNECTED_UNVERIFIED"), "evidence:x");
+
+  const definition = definitionForBinding(verifiedX.binding.connectionBindingId);
+  const bound = bindGenericApiDefinition({ instance: verifiedX, definition });
+  const transport = new RecordingMockTransport();
+
+  assert.throws(
+    () =>
+      executeConnectorCapability({
+        bound,
+        capabilityRef: "cap:generic-ping",
+        requestingOwnership: projectXOwnership,
+        connectionStore: storeAlwaysReturning(verifiedY),
+        secretResolver: new ExplodingSecretResolver(),
+        transport,
+      }),
+    ConnectorExecutionNotAuthorizedError,
+  );
+  assert.equal(transport.seenRequests.length, 0);
+});
+
+test("R8 (OS-V0-06 witness 8, adversarial): a previously produced VERIFIED_AVAILABLE CapabilityAdmission has no bearing on execution once the connection is currently revoked", () => {
+  const ownershipRef = ownership("r8");
+  const descriptor = genericApiDescriptor();
+  const requirement = requirementFor(descriptor, ownershipRef);
+  const staleVerified = verifiedInstance({ ownershipRef, secretRefId: "secret-ref-1" });
+
+  // A CapabilityAdmission legitimately constructed while the binding was
+  // still VERIFIED - this object continues to exist and claims
+  // VERIFIED_AVAILABLE, but `executeConnectorCapability` never accepts a
+  // CapabilityAdmission as input at all, so it structurally cannot rescue
+  // execution once the underlying connection is later revoked.
+  const staleAdmission = createCapabilityAdmission({
+    capabilityAdmissionId: "admission-r8",
+    ownership: ownershipRef,
+    requiredCapabilityRef: requirement.requiredCapabilityRef,
+    status: "VERIFIED_AVAILABLE",
+    binding: staleVerified.binding,
+    requirement,
+    evidenceRef: "evidence:admission",
+  });
+  assert.equal(staleAdmission.status, "VERIFIED_AVAILABLE");
+
+  const currentRevoked: ConnectorConnectionInstance = {
+    ...staleVerified,
+    binding: transitionConnectionBinding(staleVerified.binding, "REVOKED"),
+  };
+  const definition = definitionForBinding(staleVerified.binding.connectionBindingId);
+  const bound = bindGenericApiDefinition({ instance: staleVerified, definition });
+  const transport = new RecordingMockTransport();
+
+  assert.throws(
+    () =>
+      executeConnectorCapability({
+        bound,
+        capabilityRef: "cap:generic-ping",
+        requestingOwnership: ownershipRef,
+        connectionStore: currentStoreFor(currentRevoked),
+        secretResolver: new ExplodingSecretResolver(),
+        transport,
+      }),
+    ConnectorExecutionNotAuthorizedError,
+  );
+  assert.equal(transport.seenRequests.length, 0);
+});
+
+test("R11 (OS-V0-06 witness 11, adversarial): a current durable record whose connectorKind no longer matches the bound definition's expected connectorKind fails before secret/transport", () => {
+  const ownershipRef = ownership("r11");
+  const staleVerified = verifiedInstance({ ownershipRef, secretRefId: "secret-ref-1" });
+  const currentWithSwitchedProvider: ConnectorConnectionInstance = {
+    ...staleVerified,
+    connectorKind: "GITHUB",
+  };
+  const definition = definitionForBinding(staleVerified.binding.connectionBindingId);
+  const bound = bindGenericApiDefinition({ instance: staleVerified, definition });
+  const transport = new RecordingMockTransport();
+
+  assert.throws(
+    () =>
+      executeConnectorCapability({
+        bound,
+        capabilityRef: "cap:generic-ping",
+        requestingOwnership: ownershipRef,
+        connectionStore: currentStoreFor(currentWithSwitchedProvider),
+        secretResolver: new ExplodingSecretResolver(),
+        transport,
+      }),
+    ConnectorExecutionNotAuthorizedError,
+  );
+  assert.equal(transport.seenRequests.length, 0);
+});
+
+test("R12 (OS-V0-06 witness 12, adversarial, real durable store): a fresh store instance opened against the same directory after a simulated process restart reproduces the identical currentness outcome", () => {
+  const dir = mkdtempSync(join(tmpdir(), "conn-exec-replay-"));
+  try {
+    const ownershipRef = ownership("r12");
+    const staleVerified = verifiedInstance({ ownershipRef, secretRefId: "secret-ref-1" });
+
+    const storeBeforeRestart = new FileDurableConnectorConnectionStore(dir);
+    storeBeforeRestart.save(staleVerified);
+    const revoked: ConnectorConnectionInstance = {
+      ...staleVerified,
+      binding: transitionConnectionBinding(staleVerified.binding, "REVOKED"),
+    };
+    storeBeforeRestart.save(revoked, 1);
+
+    // Simulate a process restart: a brand-new store object over the same directory.
+    const storeAfterRestart = new FileDurableConnectorConnectionStore(dir);
+    const definition = definitionForBinding(staleVerified.binding.connectionBindingId);
+    const bound = bindGenericApiDefinition({ instance: staleVerified, definition });
+    const transport = new RecordingMockTransport();
+
+    assert.throws(
+      () =>
+        executeConnectorCapability({
+          bound,
+          capabilityRef: "cap:generic-ping",
+          requestingOwnership: ownershipRef,
+          connectionStore: storeAfterRestart,
+          secretResolver: new ExplodingSecretResolver(),
+          transport,
+        }),
+      ConnectorExecutionNotAuthorizedError,
+    );
+    assert.equal(transport.seenRequests.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
