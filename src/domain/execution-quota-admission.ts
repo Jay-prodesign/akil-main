@@ -300,14 +300,21 @@ function appendToLedger(ledger: QuotaLedger, event: QuotaReservationEvent): Quot
 }
 
 /**
- * The admission decision for a fresh idempotencyKey, OR the replayed
+ * The admission decision for a fresh idempotencyKey, OR the LATEST replayed
  * decision for one already recorded (Minimum Adversarial Evidence #2:
- * "identical reservation replay -> no second allowance consumption").
+ * "identical reservation replay -> no second allowance consumption"). Must
+ * scan for the latest match, not the first - a REJECTED decision can later
+ * be superseded by a RESERVED one for the same idempotencyKey (Rev176:
+ * "rejected-then-later-admissible recovery" - see `admitQuotaReservation`).
  */
 function findAdmissionEvent(ledger: QuotaLedger, tenantId: TenantScope["tenantId"], idempotencyKey: string): QuotaReservationEvent | undefined {
-  return ledger.events.find(
-    (e) => e.identity.scope.tenantId === tenantId && e.idempotencyKey === idempotencyKey && (e.type === "RESERVED" || e.type === "REJECTED"),
-  );
+  let latest: QuotaReservationEvent | undefined;
+  for (const event of ledger.events) {
+    if (event.identity.scope.tenantId === tenantId && event.idempotencyKey === idempotencyKey && (event.type === "RESERVED" || event.type === "REJECTED")) {
+      latest = event;
+    }
+  }
+  return latest;
 }
 
 function findLatestEvent(
@@ -401,6 +408,19 @@ export type QuotaAdmissionOutcome =
  * (#3), (3) currency mismatch between the request and the envelope. An
  * UNKNOWN requested amount is never treated as zero-cost/auto-admitted
  * (#8) - it is REJECTED, exactly like insufficient allowance.
+ *
+ * Rev176 "rejected-then-later-admissible recovery": a RESERVED decision is
+ * PERMANENT - it already durably consumed real allowance, so replaying it
+ * always returns the exact same event, never re-evaluated. A REJECTED
+ * decision consumed no allowance at all, so - unlike RESERVED - it is safe,
+ * and required, to re-evaluate fresh against CURRENT usage on a later call
+ * with the identical request: circumstances (another reservation committed/
+ * released) may have changed since the original rejection, and a caller
+ * must not be permanently stuck replaying a stale rejection forever. If the
+ * fresh evaluation still does not fit, the ORIGINAL cached REJECTED event is
+ * returned unchanged (never a duplicate-eventId second REJECTED entry) -
+ * only an actual upgrade to RESERVED (a genuinely new, distinct eventId)
+ * ever appends a new event once a REJECTED one already exists.
  */
 export function admitQuotaReservation(input: {
   readonly ledger: QuotaLedger;
@@ -426,13 +446,21 @@ export function admitQuotaReservation(input: {
     ) {
       throw new QuotaReservationConflictError(idempotencyKey, "identity, envelopeRef, or requestedAmount differs from the original request");
     }
-    return {
-      ledger: input.ledger,
-      outcome: existing.type === "RESERVED" ? { status: "RESERVED", event: existing } : { status: "REJECTED", event: existing },
-    };
+    if (existing.type === "RESERVED") {
+      return { ledger: input.ledger, outcome: { status: "RESERVED", event: existing } };
+    }
+    // existing.type === "REJECTED": fall through to a fresh re-evaluation
+    // below rather than returning immediately.
   }
 
   if (requestedAmount.presence === "UNKNOWN") {
+    // UNKNOWN is unconditionally inadmissible regardless of usage - if
+    // already rejected for this exact reason, re-evaluating can never
+    // change that, so this is a safe no-op replay rather than a duplicate
+    // (and duplicate-eventId-colliding) REJECTED entry.
+    if (existing !== undefined) {
+      return { ledger: input.ledger, outcome: { status: "REJECTED", event: existing } };
+    }
     const event: QuotaReservationEvent = {
       eventId: deriveQuotaReservationEventId(input.identity, idempotencyKey, "REJECTED"),
       identity: input.identity,
@@ -450,9 +478,17 @@ export function admitQuotaReservation(input: {
     );
   }
 
+  // `existing` (when REJECTED) never contributed to reservedTotal/
+  // committedTotal, so this projection already reflects true current usage
+  // with no double-exclusion bookkeeping needed.
   const usage = projectQuotaScopeUsage(input.ledger, input.envelope.scope);
   const projectedTotal = usage.reservedTotal + usage.committedTotal + (requestedAmount.amountMinorUnits as number);
   if (projectedTotal > (input.envelope.limit.amountMinorUnits as number)) {
+    if (existing !== undefined) {
+      // Still does not fit - replay the original cached rejection rather
+      // than appending an identical-eventId duplicate.
+      return { ledger: input.ledger, outcome: { status: "REJECTED", event: existing } };
+    }
     const event: QuotaReservationEvent = {
       eventId: deriveQuotaReservationEventId(input.identity, idempotencyKey, "REJECTED"),
       identity: input.identity,

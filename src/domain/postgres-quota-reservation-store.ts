@@ -165,19 +165,44 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
       `WITH scope_lock AS (
          SELECT pg_advisory_xact_lock(hashtext($1 || ':' || $2)) AS locked
        ),
-       already_existing AS (
+       already_reserved AS (
+         -- Rev176 "rejected-then-later-admissible recovery": only an existing
+         -- RESERVED decision is permanent and blocks re-evaluation - it
+         -- already durably consumed real allowance. A REJECTED-only history
+         -- consumed nothing, so it must not permanently block this
+         -- idempotencyKey from ever being re-evaluated once circumstances
+         -- change.
          SELECT e.* FROM quota_reservation_events e, scope_lock
-         WHERE e.tenant_id = $1 AND e.idempotency_key = $10 AND e.type IN ('RESERVED', 'REJECTED')
+         WHERE e.tenant_id = $1 AND e.idempotency_key = $10 AND e.type = 'RESERVED'
+       ),
+       existing_rejected AS (
+         SELECT e.* FROM quota_reservation_events e, scope_lock
+         WHERE e.tenant_id = $1 AND e.idempotency_key = $10 AND e.type = 'REJECTED'
+       ),
+       latest_per_reservation AS (
+         -- Rev176: this store is strictly append-only - a COMMITTED or
+         -- RELEASED transition never deletes or updates its reservation's
+         -- earlier RESERVED row. Summing every matching row directly would
+         -- therefore double-count a reservation's original RESERVED amount
+         -- alongside its own later COMMITTED/RELEASED row. DISTINCT ON
+         -- ordered by the database-assigned id column (never caller-supplied
+         -- occurred_at) picks exactly the true latest row per
+         -- idempotency_key, mirroring the pure projectQuotaScopeUsage
+         -- reducer's own "latest event per reservation" fold.
+         SELECT DISTINCT ON (e.idempotency_key) e.idempotency_key, e.type, e.amount_minor_units
+         FROM quota_reservation_events e, scope_lock
+         WHERE e.tenant_id = $1 AND e.scope_key = $2
+         ORDER BY e.idempotency_key, e.id DESC
        ),
        current_usage AS (
-         SELECT COALESCE(SUM(e.amount_minor_units), 0) AS total
-         FROM quota_reservation_events e, scope_lock
-         WHERE e.tenant_id = $1 AND e.scope_key = $2 AND e.type IN ('RESERVED', 'COMMITTED', 'RECONCILIATION_REQUIRED')
+         SELECT COALESCE(SUM(l.amount_minor_units), 0) AS total
+         FROM latest_per_reservation l
+         WHERE l.type IN ('RESERVED', 'COMMITTED', 'RECONCILIATION_REQUIRED')
        ),
        decision AS (
          SELECT
            CASE
-             WHEN EXISTS (SELECT 1 FROM already_existing) THEN NULL
+             WHEN EXISTS (SELECT 1 FROM already_reserved) THEN NULL
              WHEN $12 = 'UNKNOWN' THEN 'REJECTED'
              WHEN (SELECT total FROM current_usage) + $13::bigint <= $14::bigint THEN 'RESERVED'
              ELSE 'REJECTED'
@@ -201,11 +226,24 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
            d.decided_reason
          FROM decision d
          WHERE d.decided_type IS NOT NULL
+           -- Still REJECTED and a REJECTED row already exists for this exact
+           -- idempotencyKey: this would derive the IDENTICAL event_id as
+           -- that existing row (event_id depends only on identity/
+           -- idempotencyKey/type, never on content/time) - never attempt
+           -- that insert; the final SELECT below replays the original
+           -- cached rejection instead. Only a genuine upgrade to RESERVED
+           -- (a distinct event_id) may append a new row once REJECTED
+           -- already exists.
+           AND NOT (d.decided_type = 'REJECTED' AND EXISTS (SELECT 1 FROM existing_rejected))
+         ON CONFLICT (tenant_id, event_id) DO NOTHING
          RETURNING *
        )
-       SELECT * FROM already_existing
+       SELECT * FROM already_reserved
        UNION ALL
-       SELECT * FROM inserted`,
+       SELECT * FROM inserted
+       UNION ALL
+       SELECT * FROM existing_rejected
+         WHERE NOT EXISTS (SELECT 1 FROM already_reserved) AND NOT EXISTS (SELECT 1 FROM inserted)`,
       [
         scope.tenantId,
         scopeKey,

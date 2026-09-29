@@ -1759,7 +1759,7 @@ test("D22 (Rev146 F6): re-dispatching an already fully-progressed run (past atte
 // OS-V0-07 (Rev174, Usage/Cost/Quota Guardrails) integration witnesses.
 // ---------------------------------------------------------------------------
 
-test("QI1 (G1/G3, #8): a REJECTED quota admission never invokes the worker - the attempt is recorded BLOCKED instead, and remains retryable", async () => {
+test("QI1 (G1/G3, #8, Rev176): a REJECTED quota admission never invokes the worker and never creates even a momentary RUNNING attempt - the run stays ACCEPTED, with the quota store's own REJECTED event as the durable truth", async () => {
   const job = freshJob("job-qi1");
   const store = new InMemoryExecutionEventStore();
   const { store: quota, envelope: smallEnvelope } = smallLimitQuota(50);
@@ -1772,11 +1772,14 @@ test("QI1 (G1/G3, #8): a REJECTED quota admission never invokes the worker - the
   });
   assert.equal(invoked, false, "the worker must never be invoked when quota admission is rejected");
   assert.equal(result.invoked, false);
-  assert.equal(result.state.status, "BLOCKED");
-  assert.equal(result.state.attempts.get(1)?.reason, "insufficient allowance remaining under the current envelope limit");
+  assert.equal(result.state.status, "ACCEPTED", "no ATTEMPT_STARTED must ever be appended for a rejected admission - the run never even momentarily becomes RUNNING");
+  assert.equal(result.state.currentAttempt, 0);
+  const quotaEvent = quota.ledgerSnapshot().events.find((e) => e.identity.jobId === job.jobId && e.identity.runId === "run-qi1");
+  assert.equal(quotaEvent?.type, "REJECTED");
+  assert.equal(quotaEvent?.reason, "insufficient allowance remaining under the current envelope limit");
 });
 
-test("QI2 (Design D, #5): a retry re-admits under current quota and is BLOCKED exactly like a fresh dispatch when the allowance is exhausted - fallback/retry cannot bypass the ceiling", async () => {
+test("QI2 (Design D, #5, Rev176): a retry re-admits under current quota and is rejected exactly like a fresh dispatch when the allowance is exhausted - fallback/retry cannot bypass the ceiling, and the run stays at its prior terminal status rather than a fake RUNNING attempt 2", async () => {
   const job = freshJob("job-qi2");
   const store = new InMemoryExecutionEventStore();
   const { store: quota, envelope: smallEnvelope } = smallLimitQuota(100);
@@ -1789,7 +1792,9 @@ test("QI2 (Design D, #5): a retry re-admits under current quota and is BLOCKED e
   assert.equal(dispatched.state.status, "FAILED");
 
   // Retry (attempt 2) re-admits under the SAME now-exhausted envelope and is
-  // BLOCKED - it never bypasses the ceiling merely by being a retry/fallback.
+  // rejected - it never bypasses the ceiling merely by being a retry/fallback,
+  // and never creates a fake RUNNING attempt 2 for an attempt that will
+  // never actually execute.
   const retried = await retryOutcomeJobExecutionAttempt({
     tenantScope, customer, project, job, authority, currentState: dispatched.state,
     now: "2026-09-26T00:01:00.000Z", executorKind: "INJECTED",
@@ -1799,8 +1804,8 @@ test("QI2 (Design D, #5): a retry re-admits under current quota and is BLOCKED e
     store, invoker: acceptingInvoker(), taskId: "task-1", branch: "b", checkpointSha: "sha-2",
   });
   assert.equal(retried.invoked, false);
-  assert.equal(retried.state.status, "BLOCKED");
-  assert.equal(retried.state.currentAttempt, 2);
+  assert.equal(retried.state.status, "FAILED", "the run must stay at its prior terminal status - attempt 2 never started");
+  assert.equal(retried.state.currentAttempt, 1, "currentAttempt must not advance to 2 for a rejected admission");
 });
 
 test("QI3 (G5/G6, #10): a rejected/failed invocation still commits attributable usage once, as UNKNOWN - it is never discarded merely because the business effect failed", async () => {
@@ -1920,4 +1925,152 @@ test("QI7 (Rev175 F2, duplicate-race ownership): two concurrent dispatch calls f
   const committedEvents = events.filter((e) => e.type === "COMMITTED");
   assert.equal(reservedEvents.length, 1, "both racers sharing the same idempotencyKey must produce exactly one RESERVED event, never two");
   assert.equal(committedEvents.length, 1, "only the ATTEMPT_STARTED winner may commit - the loser must never commit or release the shared reservation");
+});
+
+test("QI-concurrent-rejection (Rev176, concurrent rejection no-fake-attempt proof): two concurrent dispatch calls both facing insufficient quota never create even one fake RUNNING attempt - neither ever touches ATTEMPT_STARTED", async () => {
+  const job = freshJob("job-qi-concurrent-rejection");
+  const store = new InMemoryExecutionEventStore();
+  const { store: quota, envelope: smallEnvelope } = smallLimitQuota(50);
+  let invokeCount = 0;
+  const invoker: WorkerInvoker = { role: "CLAUDE_PRIMARY_ENGINEER", invoke: async () => { invokeCount += 1; return { accepted: true }; } };
+  const runId = "run-qi-concurrent-rejection";
+
+  const callOnce = () =>
+    dispatchOutcomeJobExecutionRun({
+      ...baseDispatch, job, authority, runId, correlationId: "corr-concurrent-rejection", store, invoker,
+      quotaAdmission: quota, quotaEnvelope: smallEnvelope,
+      estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
+    });
+  const [resultA, resultB] = await Promise.all([callOnce(), callOnce()]);
+
+  assert.equal(invokeCount, 0, "neither concurrent racer may invoke the worker when quota is insufficient for both");
+  assert.equal(resultA.invoked, false);
+  assert.equal(resultB.invoked, false);
+  assert.equal(resultA.state.status, "ACCEPTED", "neither racer may create even a momentary RUNNING attempt");
+  assert.equal(resultB.state.status, "ACCEPTED");
+  assert.equal(resultA.state.currentAttempt, 0);
+});
+
+/**
+ * OS-V0-07 Rev176: a genuinely load-bearing crash/restart double, as
+ * distinct from QI6/QI7's own honestly-reported non-load-bearing evidence
+ * (see docs/exec-plans/active/OS-V0-07.md's Rev175 correction section).
+ * `admit()` durably persists the reservation through the REAL underlying
+ * store first (exactly as a genuine crash would leave it), THEN throws once
+ * - simulating the process dying in the exact window between the
+ * reservation becoming durable and ATTEMPT_STARTED ever being attempted.
+ * Reverting the runtime's reservation-before-ATTEMPT_STARTED ordering
+ * (Rev175 F2) makes this genuinely fail: under the old ordering, ATTEMPT_STARTED
+ * would already have durably won BEFORE this throwing admit() is ever
+ * reached, so the simulated crash would strand the run with ATTEMPT_STARTED
+ * already claimed and the worker never invoked - a later "recovery" call
+ * would durably lose the ATTEMPT_STARTED claim and return `invoked: false`
+ * forever, so `invokeCount` would stay 0 rather than reaching 1.
+ */
+class PersistThenThrowOnceQuotaAdmission {
+  private armed = true;
+  constructor(private readonly inner: InMemoryQuotaAdmissionStore) {}
+
+  admit(input: {
+    envelope: QuotaEnvelope;
+    identity: QuotaReservationIdentity;
+    idempotencyKey: unknown;
+    requestedAmount: { presence: unknown; amountMinorUnits?: unknown; currency?: unknown };
+    occurredAt: unknown;
+  }): QuotaAdmissionOutcome {
+    const outcome = this.inner.admit(input);
+    if (this.armed) {
+      this.armed = false;
+      throw new Error("simulated crash: reservation persisted durably, but the process died before ATTEMPT_STARTED was ever attempted");
+    }
+    return outcome;
+  }
+
+  commit(input: {
+    identity: QuotaReservationIdentity;
+    idempotencyKey: unknown;
+    actualAmount: { presence: unknown; amountMinorUnits?: unknown; currency?: unknown };
+    occurredAt: unknown;
+  }): QuotaCommitOutcome {
+    return this.inner.commit(input);
+  }
+}
+
+test("QI-crash-dispatch (Rev176, load-bearing): a crash immediately after the reservation persists but before ATTEMPT_STARTED is appended is restart-safe - recovery replays the SAME reservation and invokes exactly once", async () => {
+  const job = freshJob("job-qi-crash-dispatch");
+  const store = new InMemoryExecutionEventStore();
+  const innerQuota = new InMemoryQuotaAdmissionStore();
+  const crashingQuota = new PersistThenThrowOnceQuotaAdmission(innerQuota);
+  let invokeCount = 0;
+  const invoker: WorkerInvoker = { role: "CLAUDE_PRIMARY_ENGINEER", invoke: async () => { invokeCount += 1; return { accepted: true }; } };
+  const runId = "run-qi-crash-dispatch";
+
+  await assert.rejects(() =>
+    dispatchOutcomeJobExecutionRun({
+      ...baseDispatch, job, authority, runId, correlationId: "corr-crash-dispatch", store, invoker, quotaAdmission: crashingQuota,
+    }),
+  );
+  assert.equal(invokeCount, 0, "the worker must never be invoked before the simulated crash");
+  const stateAfterCrash = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, runId);
+  assert.equal(stateAfterCrash?.status, "ACCEPTED", "no ATTEMPT_STARTED may exist yet after the simulated crash");
+
+  // "Restart": a fresh dispatch call reusing the SAME underlying quota
+  // store (the crash-simulating wrapper only throws once, like a real
+  // process that crashed once and was then genuinely restarted).
+  const recovered = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId, correlationId: "corr-crash-dispatch", store, invoker, quotaAdmission: crashingQuota,
+  });
+  assert.equal(invokeCount, 1, "the recovered dispatch must invoke exactly once");
+  assert.equal(recovered.invoked, true);
+
+  const events = innerQuota.ledgerSnapshot().events.filter((e) => e.identity.jobId === job.jobId && e.identity.runId === runId);
+  assert.equal(events.filter((e) => e.type === "RESERVED").length, 1, "the pre-crash reservation must be replayed idempotently, never duplicated");
+  assert.equal(events.filter((e) => e.type === "COMMITTED").length, 1, "usage must be committed exactly once for the recovered attempt");
+});
+
+test("QI-crash-retry (Rev176, load-bearing): the same crash/restart proof for a retry's attempt N+1 reservation", async () => {
+  const job = freshJob("job-qi-crash-retry");
+  const store = new InMemoryExecutionEventStore();
+  const innerQuota = new InMemoryQuotaAdmissionStore();
+  const runId = "run-qi-crash-retry";
+
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId, correlationId: "corr-crash-retry", store, invoker: rejectingInvoker(), quotaAdmission: innerQuota,
+  });
+  assert.equal(dispatched.state.status, "FAILED");
+
+  const crashingQuota = new PersistThenThrowOnceQuotaAdmission(innerQuota);
+  let invokeCount = 0;
+  const invoker: WorkerInvoker = { role: "CLAUDE_PRIMARY_ENGINEER", invoke: async () => { invokeCount += 1; return { accepted: true }; } };
+
+  await assert.rejects(() =>
+    retryOutcomeJobExecutionAttempt({
+      tenantScope, customer, project, job, authority, currentState: dispatched.state,
+      now: "2026-09-26T00:01:00.000Z", executorKind: "INJECTED",
+      expectedFingerprint: "fp-1", currentFingerprint: "fp-1",
+      quotaAdmission: crashingQuota, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1",
+      estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
+      store, invoker, taskId: "task-1", branch: "b", checkpointSha: "sha-2",
+    }),
+  );
+  assert.equal(invokeCount, 0, "the worker must never be invoked before the simulated crash");
+  const stateAfterCrash = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, runId);
+  assert.equal(stateAfterCrash?.status, "FAILED", "attempt 2's ATTEMPT_STARTED may not exist yet after the simulated crash");
+  assert.equal(stateAfterCrash?.currentAttempt, 1);
+
+  const recovered = await retryOutcomeJobExecutionAttempt({
+    tenantScope, customer, project, job, authority, currentState: stateAfterCrash as OutcomeJobExecutionRunState,
+    now: "2026-09-26T00:02:00.000Z", executorKind: "INJECTED",
+    expectedFingerprint: "fp-1", currentFingerprint: "fp-1",
+    quotaAdmission: crashingQuota, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1",
+    estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
+    store, invoker, taskId: "task-1", branch: "b", checkpointSha: "sha-3",
+  });
+  assert.equal(invokeCount, 1, "the recovered retry must invoke exactly once");
+  assert.equal(recovered.invoked, true);
+  assert.equal(recovered.state.currentAttempt, 2);
+
+  const events = innerQuota.ledgerSnapshot().events.filter((e) => e.identity.jobId === job.jobId && e.identity.runId === runId && e.identity.attemptRef === "2");
+  assert.equal(events.filter((e) => e.type === "RESERVED").length, 1, "the pre-crash attempt-2 reservation must be replayed idempotently, never duplicated");
+  assert.equal(events.filter((e) => e.type === "COMMITTED").length, 1);
 });

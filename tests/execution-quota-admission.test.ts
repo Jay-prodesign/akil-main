@@ -454,3 +454,50 @@ test("Q20: committing usage against a reservation that was REJECTED, or that nev
   );
 });
 
+test("Q21 (Rev176, rejected-then-later-admissible recovery): a REJECTED decision is re-evaluated fresh on a later identical request and upgrades to RESERVED once allowance frees up - a RESERVED decision, by contrast, is permanent and never re-evaluated", () => {
+  const env = envelope(100);
+  const blockerId = identity({ runId: "run-blocker" });
+  const blocked = admitQuotaReservation({
+    ledger: EMPTY_QUOTA_LEDGER, envelope: env, identity: blockerId, idempotencyKey: "key-blocker",
+    requestedAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }, occurredAt: "2026-09-29T00:00:00.000Z",
+  });
+  assert.equal(blocked.outcome.status, "RESERVED");
+
+  const laterId = identity({ runId: "run-later" });
+  const requestedAmount = { presence: "REPORTED", amountMinorUnits: 50, currency: "USD" } as const;
+  const firstAttempt = admitQuotaReservation({
+    ledger: blocked.ledger, envelope: env, identity: laterId, idempotencyKey: "key-later", requestedAmount, occurredAt: "2026-09-29T00:00:01.000Z",
+  });
+  assert.equal(firstAttempt.outcome.status, "REJECTED");
+
+  // Re-evaluating the IDENTICAL still-rejected request appends no duplicate
+  // event and returns the same cached rejection - not a growing ledger of
+  // identical REJECTED entries.
+  const stillRejected = admitQuotaReservation({
+    ledger: firstAttempt.ledger, envelope: env, identity: laterId, idempotencyKey: "key-later", requestedAmount, occurredAt: "2026-09-29T00:00:02.000Z",
+  });
+  assert.equal(stillRejected.outcome.status, "REJECTED");
+  assert.deepEqual(stillRejected.ledger, firstAttempt.ledger);
+
+  // Free up the blocking reservation.
+  const released = releaseQuotaReservation({
+    ledger: stillRejected.ledger, identity: blockerId, idempotencyKey: "key-blocker", occurredAt: "2026-09-29T00:00:03.000Z",
+  });
+  assert.equal(released.outcome.status, "RELEASED");
+
+  // The SAME idempotencyKey, same identical request, now succeeds.
+  const nowAdmitted = admitQuotaReservation({
+    ledger: released.ledger, envelope: env, identity: laterId, idempotencyKey: "key-later", requestedAmount, occurredAt: "2026-09-29T00:00:04.000Z",
+  });
+  assert.equal(nowAdmitted.outcome.status, "RESERVED", "a REJECTED decision must be re-evaluated once circumstances change, never permanently stuck");
+
+  // Once RESERVED, it is permanent - a further identical call never
+  // re-evaluates it again, even if the scope later becomes fully consumed
+  // by something else.
+  const replayed = admitQuotaReservation({
+    ledger: nowAdmitted.ledger, envelope: env, identity: laterId, idempotencyKey: "key-later", requestedAmount, occurredAt: "2026-09-29T00:00:05.000Z",
+  });
+  assert.equal(replayed.outcome.status, "RESERVED");
+  assert.deepEqual(replayed.ledger, nowAdmitted.ledger);
+});
+

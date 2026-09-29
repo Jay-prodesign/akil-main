@@ -27,8 +27,21 @@
 -- any live database by this checkpoint (no DATABASE_URL is configured or
 -- connected to in this repository - "No concrete DB driver/live DB
 -- activation," matching every other Postgres store in this repository).
+--
+-- Rev176: `id` provides a reliable, monotonic insertion-order column so
+-- `PostgresQuotaReservationStore`'s current-usage query can select the
+-- LATEST row per `idempotency_key` (via `DISTINCT ON (idempotency_key)
+-- ... ORDER BY idempotency_key, id DESC`) before summing - a naive
+-- `SUM(amount_minor_units) WHERE type IN (...)` over every row would
+-- double-count a reservation's original RESERVED amount alongside its
+-- later COMMITTED/RELEASED row for the same idempotency_key, since neither
+-- transition deletes or updates the earlier row (this store is strictly
+-- append-only, mirroring every other event-sourced store in this
+-- repository). `occurred_at` (caller-supplied, TEXT) is not trustworthy
+-- for this - only a database-assigned sequence is.
 
 CREATE TABLE IF NOT EXISTS quota_reservation_events (
+    id                  BIGSERIAL PRIMARY KEY,
     tenant_id           TEXT NOT NULL,
     event_id            TEXT NOT NULL,
     scope_key           TEXT NOT NULL,

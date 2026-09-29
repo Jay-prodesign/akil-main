@@ -40,12 +40,13 @@ interface RawRow {
  * in this file): recognizes each distinct query by a distinguishing
  * substring and models its intended semantics directly in JS, rather than
  * parsing/executing SQL. The admit() query's `pg_advisory_xact_lock`-guarded
- * CTE is modeled as: find any already-existing RESERVED/REJECTED row for
- * this idempotencyKey (replay), else sum current RESERVED/COMMITTED/
- * RECONCILIATION_REQUIRED rows for the scope and decide RESERVED/REJECTED -
- * exactly the real query's own decision logic, since this fake never
- * actually needs the lock (its own JS execution is already single-threaded
- * and synchronous within one `query()` call).
+ * CTE is modeled as: an existing RESERVED row for this idempotencyKey is
+ * permanent and blocks re-evaluation (replay); an existing REJECTED row
+ * consumed no allowance, so it is re-evaluated fresh against current usage
+ * (Rev176 "rejected-then-later-admissible recovery") - if it now fits, a
+ * NEW RESERVED row is appended (a distinct event_id, since event_id depends
+ * on type); if it still does not fit, the ORIGINAL cached REJECTED row is
+ * replayed unchanged rather than appending a duplicate-event_id row.
  */
 class FakeSqlClient implements SqlClient {
   readonly rows: RawRow[] = [];
@@ -58,18 +59,32 @@ class FakeSqlClient implements SqlClient {
         presence, amountMinorUnits, limitMinorUnits, occurredAt, currency,
       ] = params as [string, string, string, string, string, number, string, string, string, string, string, string, number, number, string, string | null];
 
-      const already = this.rows.find((r) => r.tenant_id === tenantId && r.idempotency_key === idempotencyKey && (r.type === "RESERVED" || r.type === "REJECTED"));
-      if (already !== undefined) {
-        return { rows: [already] as unknown as ReadonlyArray<Row> };
+      const alreadyReserved = this.rows.find((r) => r.tenant_id === tenantId && r.idempotency_key === idempotencyKey && r.type === "RESERVED");
+      if (alreadyReserved !== undefined) {
+        return { rows: [alreadyReserved] as unknown as ReadonlyArray<Row> };
       }
+      const existingRejected = this.rows.find((r) => r.tenant_id === tenantId && r.idempotency_key === idempotencyKey && r.type === "REJECTED");
+
       let decidedType: "RESERVED" | "REJECTED";
       let reason: string | null;
       if (presence === "UNKNOWN") {
         decidedType = "REJECTED";
         reason = "an UNKNOWN estimated cost cannot be admitted against a monetary ceiling - it is never treated as zero";
       } else {
-        const currentTotal = this.rows
-          .filter((r) => r.tenant_id === tenantId && r.scope_key === scopeKey && (r.type === "RESERVED" || r.type === "COMMITTED" || r.type === "RECONCILIATION_REQUIRED"))
+        // Rev176: this store is append-only - a COMMITTED/RELEASED
+        // transition never deletes/updates its reservation's earlier
+        // RESERVED row, so summing every matching row would double-count.
+        // Mirror the real SQL's `DISTINCT ON (idempotency_key) ... ORDER BY
+        // id DESC`: keep only the LATEST (last-pushed) row per
+        // idempotency_key before summing.
+        const latestByIdempotencyKey = new Map<string, RawRow>();
+        for (const r of this.rows) {
+          if (r.tenant_id === tenantId && r.scope_key === scopeKey) {
+            latestByIdempotencyKey.set(r.idempotency_key, r);
+          }
+        }
+        const currentTotal = Array.from(latestByIdempotencyKey.values())
+          .filter((r) => r.type === "RESERVED" || r.type === "COMMITTED" || r.type === "RECONCILIATION_REQUIRED")
           .reduce((sum, r) => sum + (r.amount_minor_units ?? 0), 0);
         if (currentTotal + amountMinorUnits <= limitMinorUnits) {
           decidedType = "RESERVED";
@@ -79,6 +94,13 @@ class FakeSqlClient implements SqlClient {
           reason = "insufficient allowance remaining under the current envelope limit";
         }
       }
+
+      if (decidedType === "REJECTED" && existingRejected !== undefined) {
+        // Still does not fit - replay the original cached rejection rather
+        // than inserting a duplicate-event_id row.
+        return { rows: [existingRejected] as unknown as ReadonlyArray<Row> };
+      }
+
       const eventId = [scopeKey, jobId, runId, attemptRef, idempotencyKey, decidedType].join("::");
       const row: RawRow = {
         tenant_id: tenantId, event_id: eventId, scope_key: scopeKey, customer_id: customerId, project_id: projectId,
@@ -200,4 +222,28 @@ test("PG4: getReadModel reflects committed UNKNOWN usage as INCOMPLETE, never a 
   await store.commit({ identity, idempotencyKey: "key-1", actualAmount: { presence: "UNKNOWN" }, occurredAt: "2026-09-29T00:00:01.000Z" });
   const readModel = await store.getReadModel(envelope);
   assert.equal(readModel.status, "INCOMPLETE");
+});
+
+test("PG5 (Rev176, rejected-then-later-admissible recovery): a REJECTED admission re-evaluates fresh once the blocking reservation is released, without inserting a duplicate row while still rejected", async () => {
+  const client = new FakeSqlClient();
+  const store = new PostgresQuotaReservationStore(client);
+  const blockerIdentity = createQuotaReservationIdentity({ scope, jobId: "job-5", runId: "run-5-blocker", attemptRef: "1" });
+  await store.admit({
+    envelope, identity: blockerIdentity, idempotencyKey: "key-blocker",
+    requestedAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }, occurredAt: "2026-09-29T00:00:00.000Z",
+  });
+
+  const laterIdentity = createQuotaReservationIdentity({ scope, jobId: "job-5", runId: "run-5-later", attemptRef: "1" });
+  const requestedAmount = { presence: "REPORTED" as const, amountMinorUnits: 50, currency: "USD" };
+  const first = await store.admit({ envelope, identity: laterIdentity, idempotencyKey: "key-later", requestedAmount, occurredAt: "2026-09-29T00:00:01.000Z" });
+  assert.equal(first.status, "REJECTED");
+
+  const stillRejected = await store.admit({ envelope, identity: laterIdentity, idempotencyKey: "key-later", requestedAmount, occurredAt: "2026-09-29T00:00:02.000Z" });
+  assert.equal(stillRejected.status, "REJECTED");
+  assert.equal(client.rows.filter((r) => r.idempotency_key === "key-later").length, 1, "re-checking a still-rejected request must not insert a duplicate row");
+
+  await store.release({ identity: blockerIdentity, idempotencyKey: "key-blocker", occurredAt: "2026-09-29T00:00:03.000Z" });
+
+  const nowAdmitted = await store.admit({ envelope, identity: laterIdentity, idempotencyKey: "key-later", requestedAmount, occurredAt: "2026-09-29T00:00:04.000Z" });
+  assert.equal(nowAdmitted.status, "RESERVED");
 });
