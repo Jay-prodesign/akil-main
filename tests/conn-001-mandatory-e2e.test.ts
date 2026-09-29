@@ -21,7 +21,9 @@ import {
   type ConnectorTransport,
   type ConnectorTransportRequest,
   type SecretResolver,
+  type CurrentConnectorConnectionReader,
 } from "../src/domain/connector-execution.js";
+import type { ConnectorConnectionInstance } from "../src/domain/integration-connector-catalog.js";
 
 /**
  * Rev90/94's two MANDATORY E2E acceptance cases (CONN-001), executed here
@@ -40,6 +42,18 @@ class RoutingMockTransport implements ConnectorTransport {
     }
     return { outcome: "SUCCESS" as const, data: { ok: true, capability: request.capabilityRef } };
   }
+}
+
+/** OS-V0-06: a tenant-scoped current-connection fake mirroring `connector-execution.test.ts`'s own `currentStoreFor`. */
+function currentStoreFor(instance: ConnectorConnectionInstance): CurrentConnectorConnectionReader {
+  return {
+    get(tenantId, connectionBindingId) {
+      if (tenantId !== instance.binding.ownership.tenantId || connectionBindingId !== instance.binding.connectionBindingId) {
+        return undefined;
+      }
+      return { instance, version: 1 };
+    },
+  };
 }
 
 class MapSecretResolver implements SecretResolver {
@@ -111,6 +125,7 @@ test("3H MANDATORY GENERIC CONNECTION E2E: create -> Test Connection (mock) succ
         bound: preVerifyBound,
         capabilityRef: "cap:generic-ping",
         requestingOwnership: tenantX,
+        connectionStore: currentStoreFor(unverified),
         secretResolver,
         transport,
       }),
@@ -134,6 +149,7 @@ test("3H MANDATORY GENERIC CONNECTION E2E: create -> Test Connection (mock) succ
     bound,
     capabilityRef: "cap:generic-ping",
     requestingOwnership: tenantX,
+    connectionStore: currentStoreFor(verified),
     secretResolver,
     transport,
   });
@@ -146,6 +162,7 @@ test("3H MANDATORY GENERIC CONNECTION E2E: create -> Test Connection (mock) succ
         bound,
         capabilityRef: "cap:generic-ping",
         requestingOwnership: tenantY,
+        connectionStore: currentStoreFor(verified),
         secretResolver,
         transport,
       }),
@@ -163,6 +180,7 @@ test("3H MANDATORY GENERIC CONNECTION E2E: create -> Test Connection (mock) succ
         bound: revokedBound,
         capabilityRef: "cap:generic-ping",
         requestingOwnership: tenantX,
+        connectionStore: currentStoreFor(revoked),
         secretResolver,
         transport,
       }),
@@ -235,6 +253,7 @@ test("3I MANDATORY PREBUILT CONNECTION E2E (Google Drive): select provider -> si
     bound,
     capabilityRef: "cap:drive-search",
     requestingOwnership: tenantScope,
+    connectionStore: currentStoreFor(verified),
     secretResolver,
     transport,
   });
@@ -247,6 +266,7 @@ test("3I MANDATORY PREBUILT CONNECTION E2E (Google Drive): select provider -> si
         bound,
         capabilityRef: "cap:drive-search",
         requestingOwnership: foreignTenant,
+        connectionStore: currentStoreFor(verified),
         secretResolver,
         transport,
       }),
@@ -265,6 +285,7 @@ test("3I MANDATORY PREBUILT CONNECTION E2E (Google Drive): select provider -> si
         bound: revokedBound,
         capabilityRef: "cap:drive-search",
         requestingOwnership: tenantScope,
+        connectionStore: currentStoreFor(revoked),
         secretResolver,
         transport,
       }),
