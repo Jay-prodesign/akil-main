@@ -1850,3 +1850,74 @@ test("QI5 (#7): a stale quota envelope blocks admission before any invocation - 
   );
   assert.equal(invoked, false);
 });
+
+// ---------------------------------------------------------------------------
+// OS-V0-07 Rev175 F2: reservation established BEFORE the ATTEMPT_STARTED
+// claim - crash/restart and duplicate-race ownership witnesses.
+// ---------------------------------------------------------------------------
+
+test("QI6 (Rev175 F2): a crash after reservation but before ATTEMPT_STARTED is restart-safe - a later dispatch finds the reservation already durable, replays it idempotently (no double consumption), and still invokes exactly once", async () => {
+  const job = freshJob("job-qi6");
+  const store = new InMemoryExecutionEventStore();
+  const quota = new InMemoryQuotaAdmissionStore();
+  const runId = "run-qi6";
+
+  // Simulates the crash window: the reservation is durably established
+  // (exactly as dispatchOutcomeJobExecutionRun's own internal call would do)
+  // but no ACCEPTED/ATTEMPT_STARTED ever made it into the execution-event
+  // store at all - a genuine crash between the two.
+  const preCrashIdentity = createQuotaReservationIdentity({
+    scope: quotaScope, jobId: job.jobId, runId, attemptRef: "1",
+  });
+  const preCrashOutcome = quota.admit({
+    envelope: quotaEnvelope, identity: preCrashIdentity, idempotencyKey: `${job.jobId}::${runId}::1`,
+    requestedAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }, occurredAt: "2026-09-26T00:00:00.000Z",
+  });
+  assert.equal(preCrashOutcome.status, "RESERVED");
+
+  let invokeCount = 0;
+  const invoker: WorkerInvoker = { role: "CLAUDE_PRIMARY_ENGINEER", invoke: async () => { invokeCount += 1; return { accepted: true }; } };
+  const result = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId, correlationId: "corr-qi6", store, invoker, quotaAdmission: quota,
+  });
+
+  assert.equal(invokeCount, 1, "the recovered dispatch must still invoke exactly once");
+  assert.equal(result.invoked, true);
+  assert.equal(result.state.status, "RUNNING");
+
+  const events = quota.ledgerSnapshot().events.filter((e) => e.identity.jobId === job.jobId && e.identity.runId === runId);
+  const reservedEvents = events.filter((e) => e.type === "RESERVED");
+  const committedEvents = events.filter((e) => e.type === "COMMITTED");
+  assert.equal(reservedEvents.length, 1, "the pre-crash reservation must be replayed idempotently, never duplicated");
+  assert.equal(committedEvents.length, 1, "usage must be committed exactly once for the recovered attempt");
+});
+
+test("QI7 (Rev175 F2, duplicate-race ownership): two concurrent dispatch calls for the same run each independently reserve (idempotently, the same shared decision), but only the ATTEMPT_STARTED winner ever commits - the loser never touches the reservation", async () => {
+  const job = freshJob("job-qi7");
+  const store = new InMemoryExecutionEventStore();
+  const quota = new InMemoryQuotaAdmissionStore();
+  const runId = "run-qi7";
+  let invokeCount = 0;
+  const invoker: WorkerInvoker = {
+    role: "CLAUDE_PRIMARY_ENGINEER",
+    invoke: async () => {
+      invokeCount += 1;
+      return { accepted: true };
+    },
+  };
+
+  const callOnce = () =>
+    dispatchOutcomeJobExecutionRun({
+      ...baseDispatch, job, authority, runId, correlationId: "corr-qi7", store, invoker, quotaAdmission: quota,
+    });
+  const [resultA, resultB] = await Promise.all([callOnce(), callOnce()]);
+
+  assert.equal(invokeCount, 1, "exactly one concurrent racer must actually invoke the worker");
+  assert.deepEqual([resultA.invoked, resultB.invoked].sort(), [false, true]);
+
+  const events = quota.ledgerSnapshot().events.filter((e) => e.identity.jobId === job.jobId && e.identity.runId === runId);
+  const reservedEvents = events.filter((e) => e.type === "RESERVED");
+  const committedEvents = events.filter((e) => e.type === "COMMITTED");
+  assert.equal(reservedEvents.length, 1, "both racers sharing the same idempotencyKey must produce exactly one RESERVED event, never two");
+  assert.equal(committedEvents.length, 1, "only the ATTEMPT_STARTED winner may commit - the loser must never commit or release the shared reservation");
+});
