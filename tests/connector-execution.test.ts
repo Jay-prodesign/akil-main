@@ -873,3 +873,53 @@ test("R12 (OS-V0-06 witness 12, adversarial, real durable store): a fresh store 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("R13 (OS-V0-06 Rev172 F1, real durable store, positive path): a prototype-shaped connectionBindingId (\"__proto__\") round-trips through the real FileDurableConnectorConnectionStore and executes normally via the same currentness re-resolution path as any ordinary binding id", () => {
+  const dir = mkdtempSync(join(tmpdir(), "conn-exec-proto-shaped-"));
+  try {
+    const ownershipRef = ownership("r13");
+    const descriptor = genericApiDescriptor();
+    const requirement = requirementFor(descriptor, ownershipRef);
+    const requested = requestConnectorConnection({
+      requirement,
+      connectorDescriptor: descriptor,
+      connectionBindingId: "__proto__",
+      workspaceRef: "workspace-proto",
+      integrationInstanceRef: "instance-proto",
+      delegatedScope: [],
+      authMode: "API_KEY",
+      secretRef: createSecretRef({ secretRefId: "secret-ref-proto" }),
+    });
+    const verified = verifyConnectorConnection(transitionConnectorConnection(requested, "CONNECTED_UNVERIFIED"), "evidence:proto-handshake");
+
+    const store = new FileDurableConnectorConnectionStore(dir);
+    store.save(verified);
+
+    const definition = definitionForBinding("__proto__");
+    const bound = bindGenericApiDefinition({ instance: verified, definition });
+    const transport = new RecordingMockTransport("SUCCESS", { pong: true });
+    const resolver = new RecordingSecretResolver({ "secret-ref-proto": "VALUE-PROTO" });
+
+    const result = executeConnectorCapability({
+      bound,
+      capabilityRef: "cap:generic-ping",
+      requestingOwnership: ownershipRef,
+      connectionStore: store,
+      secretResolver: resolver,
+      transport,
+    });
+
+    assert.deepEqual(resolver.seenSecretRefIds, ["secret-ref-proto"]);
+    assert.equal(transport.seenRequests[0]?.authSecretValue, "VALUE-PROTO");
+    assert.equal(result.connectionBindingId, "__proto__");
+
+    // Restart-safety: a fresh store instance over the same directory still
+    // finds the record correctly under this prototype-shaped id.
+    const storeAfterRestart = new FileDurableConnectorConnectionStore(dir);
+    const stillFound = storeAfterRestart.get(ownershipRef.tenantId, verified.binding.connectionBindingId);
+    assert.ok(stillFound !== undefined);
+    assert.equal(stillFound?.instance.binding.connectionState, "VERIFIED");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
