@@ -18,6 +18,7 @@ import {
   createQuotaReservationIdentity,
   admitQuotaReservation,
   commitQuotaUsage,
+  releaseQuotaReservation,
   EMPTY_QUOTA_LEDGER,
   StaleQuotaEnvelopeError,
   type QuotaEnvelope,
@@ -25,6 +26,7 @@ import {
   type QuotaLedger,
   type QuotaAdmissionOutcome,
   type QuotaCommitOutcome,
+  type QuotaReleaseOutcome,
 } from "../src/domain/execution-quota-admission.js";
 import {
   dispatchOutcomeJobExecutionRun,
@@ -41,6 +43,7 @@ import {
   PendingControlOperationReconciliationRequiredError,
   type ExecutionEventStore,
   type ControlOperationInvoker,
+  type CurrentQuotaEnvelopeResolver,
 } from "../src/application/outcome-job-execution-runtime.js";
 
 class InMemoryExecutionEventStore implements ExecutionEventStore {
@@ -192,20 +195,42 @@ class InMemoryQuotaAdmissionStore {
     return outcome;
   }
 
+  release(input: {
+    identity: QuotaReservationIdentity;
+    idempotencyKey: unknown;
+    occurredAt: unknown;
+    reason?: unknown;
+  }): QuotaReleaseOutcome {
+    const { ledger, outcome } = releaseQuotaReservation({ ledger: this.ledger, ...input });
+    this.ledger = ledger;
+    return outcome;
+  }
+
   ledgerSnapshot(): QuotaLedger {
     return this.ledger;
   }
 }
 
-function smallLimitQuota(limitMinorUnits: number): { store: InMemoryQuotaAdmissionStore; envelope: QuotaEnvelope } {
+function smallLimitQuota(limitMinorUnits: number): {
+  store: InMemoryQuotaAdmissionStore;
+  envelope: QuotaEnvelope;
+  resolver: CurrentQuotaEnvelopeResolver;
+} {
+  const envelope = createQuotaEnvelope({
+    scope: quotaScope,
+    envelopeRef: "envelope-small",
+    sourceFingerprint: "qfp-1",
+    limit: { presence: "REPORTED", amountMinorUnits: limitMinorUnits, currency: "USD" },
+  });
   return {
     store: new InMemoryQuotaAdmissionStore(),
-    envelope: createQuotaEnvelope({
-      scope: quotaScope,
-      envelopeRef: "envelope-small",
-      sourceFingerprint: "qfp-1",
-      limit: { presence: "REPORTED", amountMinorUnits: limitMinorUnits, currency: "USD" },
-    }),
+    envelope,
+    // Rev177 F3: any caller overriding `quotaEnvelope` to THIS small-limit
+    // envelope must also override `quotaEnvelopeResolver` to match it -
+    // otherwise the pre-effect recheck compares against `baseDispatch`'s
+    // own DEFAULT envelope (a different envelopeRef) and spuriously blocks
+    // an admission that should have gone on to invoke.
+    resolver: { resolveCurrentQuotaEnvelope: () => envelope },
   };
 }
 
@@ -215,6 +240,9 @@ class NeverCalledQuotaAdmission {
   }
   commit(): never {
     throw new Error("quota commit must never be invoked for this scenario");
+  }
+  release(): never {
+    throw new Error("quota release must never be invoked for this scenario");
   }
 }
 
@@ -229,6 +257,31 @@ const quotaEnvelope: QuotaEnvelope = createQuotaEnvelope({
 });
 const sharedQuotaAdmission = new InMemoryQuotaAdmissionStore();
 
+/**
+ * OS-V0-07 (Rev177 F3): the default resolver for every pre-existing test
+ * (none of which exercise pre-effect currentness itself) simply returns the
+ * SAME `quotaEnvelope` object every call - the fresh-recheck-before-effect
+ * gate is then trivially "still current" and every existing dispatch/retry
+ * witness's behavior is unchanged. `QI-*` witnesses that specifically target
+ * this new gate construct their own dedicated resolver (see `sequencedQuotaEnvelopeResolver`).
+ */
+const defaultQuotaEnvelopeResolver: CurrentQuotaEnvelopeResolver = {
+  resolveCurrentQuotaEnvelope: () => quotaEnvelope,
+};
+
+function sequencedQuotaEnvelopeResolver(...envelopes: QuotaEnvelope[]): CurrentQuotaEnvelopeResolver & { callCount: number } {
+  let index = 0;
+  return {
+    callCount: 0,
+    resolveCurrentQuotaEnvelope() {
+      this.callCount += 1;
+      const envelope = envelopes[Math.min(index, envelopes.length - 1)] as QuotaEnvelope;
+      index += 1;
+      return envelope;
+    },
+  };
+}
+
 const baseDispatch = {
   tenantScope, customer, project,
   now: "2026-09-26T00:00:00.000Z",
@@ -239,6 +292,7 @@ const baseDispatch = {
   quotaAdmission: sharedQuotaAdmission,
   quotaEnvelope,
   currentQuotaSourceFingerprint: "qfp-1",
+  quotaEnvelopeResolver: defaultQuotaEnvelopeResolver,
   estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
 };
 
@@ -381,7 +435,7 @@ test("D10 (#9, #10): retry after FAILED advances the attempt and re-invokes; ret
     tenantScope, customer, project, job, authority, currentState: dispatched.state,
     now: "2026-09-26T00:01:00.000Z", executorKind: "INJECTED",
     expectedFingerprint: "fp-1", currentFingerprint: "fp-1",
-      quotaAdmission: sharedQuotaAdmission, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1",
+      quotaAdmission: sharedQuotaAdmission, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1", quotaEnvelopeResolver: defaultQuotaEnvelopeResolver,
       estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
     store, invoker: acceptingInvoker(), taskId: "task-1", branch: "b", checkpointSha: "sha-2",
   });
@@ -396,7 +450,7 @@ test("D10 (#9, #10): retry after FAILED advances the attempt and re-invokes; ret
       tenantScope, customer, project, job, authority, currentState: unknownState,
       now: "2026-09-26T00:03:00.000Z", executorKind: "INJECTED",
       expectedFingerprint: "fp-1", currentFingerprint: "fp-1",
-      quotaAdmission: sharedQuotaAdmission, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1",
+      quotaAdmission: sharedQuotaAdmission, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1", quotaEnvelopeResolver: defaultQuotaEnvelopeResolver,
       estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
       store, invoker: acceptingInvoker(), taskId: "task-1", branch: "b", checkpointSha: "sha-3",
     }),
@@ -407,7 +461,7 @@ test("D10 (#9, #10): retry after FAILED advances the attempt and re-invokes; ret
     tenantScope, customer, project, job, authority: protectedAuthority, currentState: unknownState,
     now: "2026-09-26T00:04:00.000Z", executorKind: "INJECTED",
     expectedFingerprint: "fp-1", currentFingerprint: "fp-1",
-      quotaAdmission: sharedQuotaAdmission, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1",
+      quotaAdmission: sharedQuotaAdmission, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1", quotaEnvelopeResolver: defaultQuotaEnvelopeResolver,
       estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
     store, invoker: acceptingInvoker(), taskId: "task-1", branch: "b", checkpointSha: "sha-4",
   });
@@ -425,7 +479,7 @@ test("D11 (#11): retry is also blocked by a stale activation fingerprint before 
       tenantScope, customer, project, job, authority, currentState: dispatched.state,
       now: "2026-09-26T00:01:00.000Z", executorKind: "INJECTED",
       expectedFingerprint: "fp-old", currentFingerprint: "fp-new",
-      quotaAdmission: sharedQuotaAdmission, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1",
+      quotaAdmission: sharedQuotaAdmission, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1", quotaEnvelopeResolver: defaultQuotaEnvelopeResolver,
       estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
       store, invoker: acceptingInvoker(), taskId: "task-1", branch: "b", checkpointSha: "sha-2",
     }),
@@ -1532,7 +1586,7 @@ test("D15 (Rev145 F1): two concurrent retry calls against the same failed attemp
       tenantScope, customer, project, job, authority, currentState: dispatched.state,
       now: "2026-09-26T00:01:00.000Z", executorKind: "INJECTED",
       expectedFingerprint: "fp-1", currentFingerprint: "fp-1",
-      quotaAdmission: sharedQuotaAdmission, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1",
+      quotaAdmission: sharedQuotaAdmission, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1", quotaEnvelopeResolver: defaultQuotaEnvelopeResolver,
       estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
       store, invoker, taskId: "task-1", branch: "b", checkpointSha: "sha-2",
     });
@@ -1563,7 +1617,7 @@ test("D16 (Rev145 F3): a same-tenant authority without EXECUTE permission is rej
       tenantScope, customer, project, job, authority: readOnlyAuthority, currentState: dispatched.state,
       now: "2026-09-26T00:01:00.000Z", executorKind: "INJECTED",
       expectedFingerprint: "fp-1", currentFingerprint: "fp-1",
-      quotaAdmission: sharedQuotaAdmission, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1",
+      quotaAdmission: sharedQuotaAdmission, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1", quotaEnvelopeResolver: defaultQuotaEnvelopeResolver,
       estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
       store, invoker: acceptingInvoker(), taskId: "task-1", branch: "b", checkpointSha: "sha-2",
     }),
@@ -1611,7 +1665,7 @@ test("D17 (Rev145 F4): a currentState forged to carry a foreign job's identity i
       tenantScope, customer, project, job: jobA, authority, currentState: forgedState,
       now: "2026-09-26T00:01:00.000Z", executorKind: "INJECTED",
       expectedFingerprint: "fp-1", currentFingerprint: "fp-1",
-      quotaAdmission: sharedQuotaAdmission, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1",
+      quotaAdmission: sharedQuotaAdmission, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1", quotaEnvelopeResolver: defaultQuotaEnvelopeResolver,
       estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
       store, invoker: acceptingInvoker(), taskId: "task-1", branch: "b", checkpointSha: "sha-2",
     }),
@@ -1733,7 +1787,7 @@ test("D22 (Rev146 F6): re-dispatching an already fully-progressed run (past atte
     tenantScope, customer, project, job, authority, currentState: dispatched.state,
     now: "2026-09-26T00:01:00.000Z", executorKind: "INJECTED",
     expectedFingerprint: "fp-1", currentFingerprint: "fp-1",
-      quotaAdmission: sharedQuotaAdmission, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1",
+      quotaAdmission: sharedQuotaAdmission, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1", quotaEnvelopeResolver: defaultQuotaEnvelopeResolver,
       estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
     store, invoker: acceptingInvoker(), taskId: "task-1", branch: "b", checkpointSha: "sha-2",
   });
@@ -1762,12 +1816,12 @@ test("D22 (Rev146 F6): re-dispatching an already fully-progressed run (past atte
 test("QI1 (G1/G3, #8, Rev176): a REJECTED quota admission never invokes the worker and never creates even a momentary RUNNING attempt - the run stays ACCEPTED, with the quota store's own REJECTED event as the durable truth", async () => {
   const job = freshJob("job-qi1");
   const store = new InMemoryExecutionEventStore();
-  const { store: quota, envelope: smallEnvelope } = smallLimitQuota(50);
+  const { store: quota, envelope: smallEnvelope, resolver: smallEnvelopeResolver } = smallLimitQuota(50);
   let invoked = false;
   const invoker: WorkerInvoker = { role: "CLAUDE_PRIMARY_ENGINEER", invoke: async () => { invoked = true; return { accepted: true }; } };
   const result = await dispatchOutcomeJobExecutionRun({
     ...baseDispatch, job, authority, runId: "run-qi1", correlationId: "corr-qi1", store, invoker,
-    quotaAdmission: quota, quotaEnvelope: smallEnvelope,
+    quotaAdmission: quota, quotaEnvelope: smallEnvelope, quotaEnvelopeResolver: smallEnvelopeResolver,
     estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
   });
   assert.equal(invoked, false, "the worker must never be invoked when quota admission is rejected");
@@ -1782,11 +1836,11 @@ test("QI1 (G1/G3, #8, Rev176): a REJECTED quota admission never invokes the work
 test("QI2 (Design D, #5, Rev176): a retry re-admits under current quota and is rejected exactly like a fresh dispatch when the allowance is exhausted - fallback/retry cannot bypass the ceiling, and the run stays at its prior terminal status rather than a fake RUNNING attempt 2", async () => {
   const job = freshJob("job-qi2");
   const store = new InMemoryExecutionEventStore();
-  const { store: quota, envelope: smallEnvelope } = smallLimitQuota(100);
+  const { store: quota, envelope: smallEnvelope, resolver: smallEnvelopeResolver } = smallLimitQuota(100);
   // Attempt 1 consumes the entire allowance and fails (retryable).
   const dispatched = await dispatchOutcomeJobExecutionRun({
     ...baseDispatch, job, authority, runId: "run-qi2", correlationId: "corr-qi2", store, invoker: rejectingInvoker(),
-    quotaAdmission: quota, quotaEnvelope: smallEnvelope,
+    quotaAdmission: quota, quotaEnvelope: smallEnvelope, quotaEnvelopeResolver: smallEnvelopeResolver,
     estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
   });
   assert.equal(dispatched.state.status, "FAILED");
@@ -1800,6 +1854,7 @@ test("QI2 (Design D, #5, Rev176): a retry re-admits under current quota and is r
     now: "2026-09-26T00:01:00.000Z", executorKind: "INJECTED",
     expectedFingerprint: "fp-1", currentFingerprint: "fp-1",
     quotaAdmission: quota, quotaEnvelope: smallEnvelope, currentQuotaSourceFingerprint: "qfp-1",
+    quotaEnvelopeResolver: smallEnvelopeResolver,
     estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
     store, invoker: acceptingInvoker(), taskId: "task-1", branch: "b", checkpointSha: "sha-2",
   });
@@ -1875,7 +1930,7 @@ test("QI6 (Rev175 F2): a crash after reservation but before ATTEMPT_STARTED is r
     scope: quotaScope, jobId: job.jobId, runId, attemptRef: "1",
   });
   const preCrashOutcome = quota.admit({
-    envelope: quotaEnvelope, identity: preCrashIdentity, idempotencyKey: `${job.jobId}::${runId}::1`,
+    envelope: quotaEnvelope, identity: preCrashIdentity, idempotencyKey: JSON.stringify([job.jobId, runId, 1]),
     requestedAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }, occurredAt: "2026-09-26T00:00:00.000Z",
   });
   assert.equal(preCrashOutcome.status, "RESERVED");
@@ -1930,7 +1985,7 @@ test("QI7 (Rev175 F2, duplicate-race ownership): two concurrent dispatch calls f
 test("QI-concurrent-rejection (Rev176, concurrent rejection no-fake-attempt proof): two concurrent dispatch calls both facing insufficient quota never create even one fake RUNNING attempt - neither ever touches ATTEMPT_STARTED", async () => {
   const job = freshJob("job-qi-concurrent-rejection");
   const store = new InMemoryExecutionEventStore();
-  const { store: quota, envelope: smallEnvelope } = smallLimitQuota(50);
+  const { store: quota, envelope: smallEnvelope, resolver: smallEnvelopeResolver } = smallLimitQuota(50);
   let invokeCount = 0;
   const invoker: WorkerInvoker = { role: "CLAUDE_PRIMARY_ENGINEER", invoke: async () => { invokeCount += 1; return { accepted: true }; } };
   const runId = "run-qi-concurrent-rejection";
@@ -1938,7 +1993,7 @@ test("QI-concurrent-rejection (Rev176, concurrent rejection no-fake-attempt proo
   const callOnce = () =>
     dispatchOutcomeJobExecutionRun({
       ...baseDispatch, job, authority, runId, correlationId: "corr-concurrent-rejection", store, invoker,
-      quotaAdmission: quota, quotaEnvelope: smallEnvelope,
+      quotaAdmission: quota, quotaEnvelope: smallEnvelope, quotaEnvelopeResolver: smallEnvelopeResolver,
       estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
     });
   const [resultA, resultB] = await Promise.all([callOnce(), callOnce()]);
@@ -1993,6 +2048,15 @@ class PersistThenThrowOnceQuotaAdmission {
     occurredAt: unknown;
   }): QuotaCommitOutcome {
     return this.inner.commit(input);
+  }
+
+  release(input: {
+    identity: QuotaReservationIdentity;
+    idempotencyKey: unknown;
+    occurredAt: unknown;
+    reason?: unknown;
+  }): QuotaReleaseOutcome {
+    return this.inner.release(input);
   }
 }
 
@@ -2049,6 +2113,7 @@ test("QI-crash-retry (Rev176, load-bearing): the same crash/restart proof for a 
       now: "2026-09-26T00:01:00.000Z", executorKind: "INJECTED",
       expectedFingerprint: "fp-1", currentFingerprint: "fp-1",
       quotaAdmission: crashingQuota, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1",
+      quotaEnvelopeResolver: defaultQuotaEnvelopeResolver,
       estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
       store, invoker, taskId: "task-1", branch: "b", checkpointSha: "sha-2",
     }),
@@ -2063,6 +2128,7 @@ test("QI-crash-retry (Rev176, load-bearing): the same crash/restart proof for a 
     now: "2026-09-26T00:02:00.000Z", executorKind: "INJECTED",
     expectedFingerprint: "fp-1", currentFingerprint: "fp-1",
     quotaAdmission: crashingQuota, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1",
+    quotaEnvelopeResolver: defaultQuotaEnvelopeResolver,
     estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
     store, invoker, taskId: "task-1", branch: "b", checkpointSha: "sha-3",
   });
@@ -2073,4 +2139,115 @@ test("QI-crash-retry (Rev176, load-bearing): the same crash/restart proof for a 
   const events = innerQuota.ledgerSnapshot().events.filter((e) => e.identity.jobId === job.jobId && e.identity.runId === runId && e.identity.attemptRef === "2");
   assert.equal(events.filter((e) => e.type === "RESERVED").length, 1, "the pre-crash attempt-2 reservation must be replayed idempotently, never duplicated");
   assert.equal(events.filter((e) => e.type === "COMMITTED").length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// OS-V0-07 Rev177 F3: pre-effect currentness recheck immediately before
+// invokeSafely - a resolver returning envelope A (what admission used) then
+// B (a genuinely different envelope, resolved fresh immediately before
+// invocation) must cause zero worker effect, a safely released reservation,
+// and an explicit retryable state - never a silent invocation under the
+// stale envelope A, and never a leftover RUNNING attempt.
+// ---------------------------------------------------------------------------
+
+test("QI-F3-dispatch (Rev177 F3, load-bearing): a quota envelope that changes between admission and invocation causes zero worker effect on a fresh dispatch - the reservation is released, the attempt is left BLOCKED (retryable), and a later retry under the new envelope invokes exactly once", async () => {
+  const job = freshJob("job-qi-f3-dispatch");
+  const store = new InMemoryExecutionEventStore();
+  const quota = new InMemoryQuotaAdmissionStore();
+  const envelopeB = createQuotaEnvelope({
+    scope: quotaScope, envelopeRef: "envelope-runtime-v2", sourceFingerprint: "qfp-2",
+    limit: { presence: "REPORTED", amountMinorUnits: 1_000_000_000, currency: "USD" },
+  });
+  let invokeCount = 0;
+  const invoker: WorkerInvoker = { role: "CLAUDE_PRIMARY_ENGINEER", invoke: async () => { invokeCount += 1; return { accepted: true }; } };
+  const runId = "run-qi-f3-dispatch";
+
+  // Admission uses envelope A (the default `quotaEnvelope`); the resolver -
+  // called fresh immediately before invocation - returns a DIFFERENT
+  // envelope B. This must be caught before any worker effect.
+  const result = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId, correlationId: "corr-qi-f3-dispatch", store, invoker,
+    quotaAdmission: quota, quotaEnvelopeResolver: { resolveCurrentQuotaEnvelope: () => envelopeB },
+  });
+  assert.equal(invokeCount, 0, "the worker must never be invoked when the envelope has changed immediately before effect");
+  assert.equal(result.invoked, false);
+  assert.equal(result.state.status, "BLOCKED", "the started attempt must be left in an explicit, truthful, retryable state - never a leftover RUNNING attempt");
+  assert.equal(result.state.currentAttempt, 1);
+
+  const events = quota.ledgerSnapshot().events.filter((e) => e.identity.jobId === job.jobId && e.identity.runId === runId);
+  assert.equal(events.filter((e) => e.type === "RESERVED").length, 1);
+  assert.equal(events.filter((e) => e.type === "RELEASED").length, 1, "the stale reservation must be safely released so its allowance becomes available again");
+  assert.equal(events.filter((e) => e.type === "COMMITTED").length, 0, "no usage may be committed - the worker was never invoked");
+
+  // A later retry under the NEW envelope (both admission and the resolver
+  // now agreeing on envelope B) re-admits as its own attempt and invokes
+  // exactly once - never a second policy system, just a fresh attempt.
+  const retried = await retryOutcomeJobExecutionAttempt({
+    tenantScope, customer, project, job, authority, currentState: result.state,
+    now: "2026-09-26T00:01:00.000Z", executorKind: "INJECTED",
+    expectedFingerprint: "fp-1", currentFingerprint: "fp-1",
+    quotaAdmission: quota, quotaEnvelope: envelopeB, currentQuotaSourceFingerprint: "qfp-2",
+    quotaEnvelopeResolver: { resolveCurrentQuotaEnvelope: () => envelopeB },
+    estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
+    store, invoker, taskId: "task-1", branch: "b", checkpointSha: "sha-2",
+  });
+  assert.equal(invokeCount, 1, "the retry under the now-current envelope must invoke exactly once");
+  assert.equal(retried.invoked, true);
+  assert.equal(retried.state.currentAttempt, 2);
+});
+
+test("QI-F3-retry (Rev177 F3, load-bearing): the same pre-effect recheck applies identically to a retry's own attempt N+1", async () => {
+  const job = freshJob("job-qi-f3-retry");
+  const store = new InMemoryExecutionEventStore();
+  const quota = new InMemoryQuotaAdmissionStore();
+  const envelopeB = createQuotaEnvelope({
+    scope: quotaScope, envelopeRef: "envelope-runtime-v2", sourceFingerprint: "qfp-2",
+    limit: { presence: "REPORTED", amountMinorUnits: 1_000_000_000, currency: "USD" },
+  });
+
+  // Attempt 1 dispatches and fails normally under envelope A (admission and
+  // resolver agree throughout).
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-qi-f3-retry", correlationId: "corr-qi-f3-retry", store, invoker: rejectingInvoker(),
+    quotaAdmission: quota,
+  });
+  assert.equal(dispatched.state.status, "FAILED");
+
+  // Attempt 2 (the retry) admits under envelope A, but the resolver - called
+  // fresh immediately before invocation - now returns envelope B.
+  let invokeCount = 0;
+  const invoker: WorkerInvoker = { role: "CLAUDE_PRIMARY_ENGINEER", invoke: async () => { invokeCount += 1; return { accepted: true }; } };
+  const retried = await retryOutcomeJobExecutionAttempt({
+    tenantScope, customer, project, job, authority, currentState: dispatched.state,
+    now: "2026-09-26T00:01:00.000Z", executorKind: "INJECTED",
+    expectedFingerprint: "fp-1", currentFingerprint: "fp-1",
+    quotaAdmission: quota, quotaEnvelope, currentQuotaSourceFingerprint: "qfp-1",
+    quotaEnvelopeResolver: { resolveCurrentQuotaEnvelope: () => envelopeB },
+    estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
+    store, invoker, taskId: "task-1", branch: "b", checkpointSha: "sha-2",
+  });
+  assert.equal(invokeCount, 0, "the worker must never be invoked when the envelope has changed immediately before effect");
+  assert.equal(retried.invoked, false);
+  assert.equal(retried.state.status, "BLOCKED");
+  assert.equal(retried.state.currentAttempt, 2);
+
+  const attempt2Events = quota.ledgerSnapshot().events.filter((e) => e.identity.jobId === job.jobId && e.identity.runId === "run-qi-f3-retry" && e.identity.attemptRef === "2");
+  assert.equal(attempt2Events.filter((e) => e.type === "RESERVED").length, 1);
+  assert.equal(attempt2Events.filter((e) => e.type === "RELEASED").length, 1);
+  assert.equal(attempt2Events.filter((e) => e.type === "COMMITTED").length, 0);
+
+  // Attempt 3, admitted and rechecked entirely under the now-current
+  // envelope B, invokes exactly once.
+  const recovered = await retryOutcomeJobExecutionAttempt({
+    tenantScope, customer, project, job, authority, currentState: retried.state,
+    now: "2026-09-26T00:02:00.000Z", executorKind: "INJECTED",
+    expectedFingerprint: "fp-1", currentFingerprint: "fp-1",
+    quotaAdmission: quota, quotaEnvelope: envelopeB, currentQuotaSourceFingerprint: "qfp-2",
+    quotaEnvelopeResolver: { resolveCurrentQuotaEnvelope: () => envelopeB },
+    estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
+    store, invoker, taskId: "task-1", branch: "b", checkpointSha: "sha-3",
+  });
+  assert.equal(invokeCount, 1, "the recovered retry under the now-current envelope must invoke exactly once");
+  assert.equal(recovered.invoked, true);
+  assert.equal(recovered.state.currentAttempt, 3);
 });

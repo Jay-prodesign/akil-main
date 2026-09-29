@@ -5,6 +5,7 @@ import {
   createQuotaAdmissionScope,
   createQuotaEnvelope,
   createQuotaReservationIdentity,
+  QuotaReservationConflictError,
 } from "../src/domain/execution-quota-admission.js";
 import { PostgresQuotaReservationStore } from "../src/domain/postgres-quota-reservation-store.js";
 import type { SqlClient } from "../src/ports/sql-client.js";
@@ -22,6 +23,7 @@ interface RawRow {
   attempt_ref: string;
   idempotency_key: string;
   envelope_ref: string;
+  source_fingerprint: string;
   type: string;
   occurred_at: string;
   amount_minor_units: number | null;
@@ -53,11 +55,19 @@ class FakeSqlClient implements SqlClient {
 
   async query<Row>(text: string, params: ReadonlyArray<unknown>): Promise<{ rows: ReadonlyArray<Row> }> {
     if (text.includes("pg_advisory_xact_lock")) {
+      // Rev177 F1: candidate RESERVED/REJECTED eventIds now arrive as plain
+      // parameters (computed by the real store via the one canonical
+      // `deriveQuotaReservationEventId`) - this fake never reconstructs an
+      // eventId itself, exactly mirroring the real SQL's own fix.
       const [
         tenantId, scopeKey, customerId, projectId, planId, planVersion,
         jobId, runId, attemptRef, idempotencyKey, envelopeRef,
         presence, amountMinorUnits, limitMinorUnits, occurredAt, currency,
-      ] = params as [string, string, string, string, string, number, string, string, string, string, string, string, number, number, string, string | null];
+        candidateReservedEventId, candidateRejectedEventId, sourceFingerprint,
+      ] = params as [
+        string, string, string, string, string, number, string, string, string, string, string,
+        string, number, number, string, string | null, string, string, string,
+      ];
 
       const alreadyReserved = this.rows.find((r) => r.tenant_id === tenantId && r.idempotency_key === idempotencyKey && r.type === "RESERVED");
       if (alreadyReserved !== undefined) {
@@ -101,11 +111,11 @@ class FakeSqlClient implements SqlClient {
         return { rows: [existingRejected] as unknown as ReadonlyArray<Row> };
       }
 
-      const eventId = [scopeKey, jobId, runId, attemptRef, idempotencyKey, decidedType].join("::");
+      const eventId = decidedType === "RESERVED" ? candidateReservedEventId : candidateRejectedEventId;
       const row: RawRow = {
         tenant_id: tenantId, event_id: eventId, scope_key: scopeKey, customer_id: customerId, project_id: projectId,
         plan_id: planId, plan_version: planVersion, job_id: jobId, run_id: runId, attempt_ref: attemptRef,
-        idempotency_key: idempotencyKey, envelope_ref: envelopeRef, type: decidedType, occurred_at: occurredAt,
+        idempotency_key: idempotencyKey, envelope_ref: envelopeRef, source_fingerprint: sourceFingerprint, type: decidedType, occurred_at: occurredAt,
         amount_minor_units: presence === "UNKNOWN" ? null : amountMinorUnits, amount_presence: presence,
         currency: presence === "UNKNOWN" ? null : currency, reason,
         worker_ref: null, provider_ref: null, model_ref: null, route_ref: null,
@@ -117,10 +127,10 @@ class FakeSqlClient implements SqlClient {
     if (text.includes("INSERT INTO quota_reservation_events")) {
       const [
         tenantId, eventId, scopeKey, customerId, projectId, planId, planVersion, jobId, runId, attemptRef,
-        idempotencyKey, envelopeRef, type, occurredAt, amountMinorUnits, amountPresence, currency, reason,
+        idempotencyKey, envelopeRef, sourceFingerprint, type, occurredAt, amountMinorUnits, amountPresence, currency, reason,
         workerRef, providerRef, modelRef, routeRef,
       ] = params as [
-        string, string, string, string, string, string, number, string, string, string, string, string, string,
+        string, string, string, string, string, string, number, string, string, string, string, string, string, string,
         string, number | null, string | null, string | null, string | null, string | null, string | null, string | null, string | null,
       ];
       const conflict = this.rows.some((r) => r.tenant_id === tenantId && r.event_id === eventId);
@@ -130,7 +140,7 @@ class FakeSqlClient implements SqlClient {
       const row: RawRow = {
         tenant_id: tenantId, event_id: eventId, scope_key: scopeKey, customer_id: customerId, project_id: projectId,
         plan_id: planId, plan_version: planVersion, job_id: jobId, run_id: runId, attempt_ref: attemptRef,
-        idempotency_key: idempotencyKey, envelope_ref: envelopeRef, type, occurred_at: occurredAt,
+        idempotency_key: idempotencyKey, envelope_ref: envelopeRef, source_fingerprint: sourceFingerprint, type, occurred_at: occurredAt,
         amount_minor_units: amountMinorUnits, amount_presence: amountPresence, currency, reason,
         worker_ref: workerRef, provider_ref: providerRef, model_ref: modelRef, route_ref: routeRef,
       };
@@ -246,4 +256,97 @@ test("PG5 (Rev176, rejected-then-later-admissible recovery): a REJECTED admissio
 
   const nowAdmitted = await store.admit({ envelope, identity: laterIdentity, idempotencyKey: "key-later", requestedAmount, occurredAt: "2026-09-29T00:00:04.000Z" });
   assert.equal(nowAdmitted.status, "RESERVED");
+});
+
+test("PG6 (Rev177 F2, replay parity - identity): a same-idempotencyKey replay under a DIFFERENT reservation identity fails closed, matching the pure domain's own contract", async () => {
+  const client = new FakeSqlClient();
+  const store = new PostgresQuotaReservationStore(client);
+  const identityA = createQuotaReservationIdentity({ scope, jobId: "job-6", runId: "run-6a", attemptRef: "1" });
+  const identityB = createQuotaReservationIdentity({ scope, jobId: "job-6", runId: "run-6b", attemptRef: "1" });
+  const requestedAmount = { presence: "REPORTED" as const, amountMinorUnits: 50, currency: "USD" };
+  const first = await store.admit({ envelope, identity: identityA, idempotencyKey: "key-shared", requestedAmount, occurredAt: "2026-09-29T00:00:00.000Z" });
+  assert.equal(first.status, "RESERVED");
+
+  await assert.rejects(
+    () => store.admit({ envelope, identity: identityB, idempotencyKey: "key-shared", requestedAmount, occurredAt: "2026-09-29T00:00:01.000Z" }),
+    QuotaReservationConflictError,
+  );
+});
+
+test("PG7 (Rev177 F2, replay parity - amount): a same-idempotencyKey replay requesting a DIFFERENT amount fails closed", async () => {
+  const client = new FakeSqlClient();
+  const store = new PostgresQuotaReservationStore(client);
+  const identity = createQuotaReservationIdentity({ scope, jobId: "job-7", runId: "run-7", attemptRef: "1" });
+  const first = await store.admit({
+    envelope, identity, idempotencyKey: "key-1",
+    requestedAmount: { presence: "REPORTED", amountMinorUnits: 50, currency: "USD" }, occurredAt: "2026-09-29T00:00:00.000Z",
+  });
+  assert.equal(first.status, "RESERVED");
+
+  await assert.rejects(
+    () =>
+      store.admit({
+        envelope, identity, idempotencyKey: "key-1",
+        requestedAmount: { presence: "REPORTED", amountMinorUnits: 99, currency: "USD" }, occurredAt: "2026-09-29T00:00:01.000Z",
+      }),
+    QuotaReservationConflictError,
+  );
+});
+
+test("PG8 (Rev177 F2, replay parity - envelopeRef): a same-idempotencyKey replay under a DIFFERENT envelopeRef fails closed", async () => {
+  const client = new FakeSqlClient();
+  const store = new PostgresQuotaReservationStore(client);
+  const identity = createQuotaReservationIdentity({ scope, jobId: "job-8", runId: "run-8", attemptRef: "1" });
+  const requestedAmount = { presence: "REPORTED" as const, amountMinorUnits: 50, currency: "USD" };
+  const first = await store.admit({ envelope, identity, idempotencyKey: "key-1", requestedAmount, occurredAt: "2026-09-29T00:00:00.000Z" });
+  assert.equal(first.status, "RESERVED");
+
+  const differentEnvelopeRef = createQuotaEnvelope({
+    scope, envelopeRef: "envelope-DIFFERENT", sourceFingerprint: "qfp-1",
+    limit: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
+  });
+  await assert.rejects(
+    () => store.admit({ envelope: differentEnvelopeRef, identity, idempotencyKey: "key-1", requestedAmount, occurredAt: "2026-09-29T00:00:01.000Z" }),
+    QuotaReservationConflictError,
+  );
+});
+
+test("PG9 (Rev177 F2, replay parity - sourceFingerprint): a same-idempotencyKey replay under a DIFFERENT envelope sourceFingerprint fails closed - the Postgres adapter must not authorize a stored reservation under a new policy version merely because envelopeRef/idempotencyKey still match", async () => {
+  const client = new FakeSqlClient();
+  const store = new PostgresQuotaReservationStore(client);
+  const identity = createQuotaReservationIdentity({ scope, jobId: "job-9", runId: "run-9", attemptRef: "1" });
+  const requestedAmount = { presence: "REPORTED" as const, amountMinorUnits: 50, currency: "USD" };
+  const first = await store.admit({ envelope, identity, idempotencyKey: "key-1", requestedAmount, occurredAt: "2026-09-29T00:00:00.000Z" });
+  assert.equal(first.status, "RESERVED");
+  assert.equal((first as { event: { sourceFingerprint: string } }).event.sourceFingerprint, "qfp-1");
+
+  const differentFingerprint = createQuotaEnvelope({
+    scope, envelopeRef: "envelope-1", sourceFingerprint: "qfp-CHANGED",
+    limit: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
+  });
+  await assert.rejects(
+    () => store.admit({ envelope: differentFingerprint, identity, idempotencyKey: "key-1", requestedAmount, occurredAt: "2026-09-29T00:00:01.000Z" }),
+    QuotaReservationConflictError,
+  );
+});
+
+test("PG10 (Rev177 F1, collision-safe scope key at the adapter level): two distinct scopes whose identifiers contain the `::` delimiter never merge allowance accounting through the Postgres adapter", async () => {
+  const client = new FakeSqlClient();
+  const store = new PostgresQuotaReservationStore(client);
+  const scopeA = createQuotaAdmissionScope({ tenantScope, customerId: "a::b", projectId: "c", planId: "plan-1", planVersion: 1 });
+  const scopeB = createQuotaAdmissionScope({ tenantScope, customerId: "a", projectId: "b::c", planId: "plan-1", planVersion: 1 });
+  const envelopeA = createQuotaEnvelope({ scope: scopeA, envelopeRef: "envelope-a", sourceFingerprint: "qfp-1", limit: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" } });
+  const envelopeB = createQuotaEnvelope({ scope: scopeB, envelopeRef: "envelope-b", sourceFingerprint: "qfp-1", limit: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" } });
+  const identityA = createQuotaReservationIdentity({ scope: scopeA, jobId: "job-10a", runId: "run-10a", attemptRef: "1" });
+  const identityB = createQuotaReservationIdentity({ scope: scopeB, jobId: "job-10b", runId: "run-10b", attemptRef: "1" });
+  const requestedAmount = { presence: "REPORTED" as const, amountMinorUnits: 100, currency: "USD" };
+
+  const outcomeA = await store.admit({ envelope: envelopeA, identity: identityA, idempotencyKey: "key-a", requestedAmount, occurredAt: "2026-09-29T00:00:00.000Z" });
+  assert.equal(outcomeA.status, "RESERVED");
+
+  // scopeB's full, independent allowance must be untouched by scopeA's own
+  // full reservation - a colliding scope_key would incorrectly see scopeA's
+  // usage here and reject.
+  const outcomeB = await store.admit({ envelope: envelopeB, identity: identityB, idempotencyKey: "key-b", requestedAmount, occurredAt: "2026-09-29T00:00:01.000Z" });
+  assert.equal(outcomeB.status, "RESERVED", "scopeB's allowance must be fully isolated from scopeA's, even though their identifiers collide under a naive delimiter join");
 });

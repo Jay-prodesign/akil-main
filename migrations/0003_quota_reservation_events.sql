@@ -39,6 +39,15 @@
 -- append-only, mirroring every other event-sourced store in this
 -- repository). `occurred_at` (caller-supplied, TEXT) is not trustworthy
 -- for this - only a database-assigned sequence is.
+--
+-- Rev177 F2: `source_fingerprint` (refined into this same additive
+-- migration lineage, not a new migration file - this migration is not
+-- live-applied anywhere) records the EXACT envelope/policy version a
+-- reservation was admitted against, alongside its `envelope_ref`. A
+-- conflicting replay whose `source_fingerprint` differs from what this exact
+-- `idempotency_key` already recorded fails closed exactly like a differing
+-- `envelope_ref`/identity/amount already does - see
+-- `assertReplayMatchesOriginalRequest` in `execution-quota-admission.ts`.
 
 CREATE TABLE IF NOT EXISTS quota_reservation_events (
     id                  BIGSERIAL PRIMARY KEY,
@@ -54,6 +63,7 @@ CREATE TABLE IF NOT EXISTS quota_reservation_events (
     attempt_ref         TEXT NOT NULL,
     idempotency_key     TEXT NOT NULL,
     envelope_ref        TEXT NOT NULL,
+    source_fingerprint  TEXT NOT NULL,
     type                TEXT NOT NULL,
     occurred_at         TEXT NOT NULL,
     amount_minor_units  BIGINT,

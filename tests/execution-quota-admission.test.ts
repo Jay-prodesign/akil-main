@@ -11,6 +11,7 @@ import {
   releaseQuotaReservation,
   projectQuotaScopeUsage,
   projectQuotaReadModel,
+  quotaScopeKey,
   deriveQuotaReservationEventId,
   validatePersistedQuotaReservationEvent,
   EMPTY_QUOTA_LEDGER,
@@ -499,5 +500,68 @@ test("Q21 (Rev176, rejected-then-later-admissible recovery): a REJECTED decision
   });
   assert.equal(replayed.outcome.status, "RESERVED");
   assert.deepEqual(replayed.ledger, nowAdmitted.ledger);
+});
+
+test("Q22 (Rev177 F1, collision-safe scope key): two distinct scopes whose caller-controlled identifiers happen to contain the `::` delimiter never collide into the same quotaScopeKey, and their allowance accounting stays fully isolated", () => {
+  // Under the old `::`-join encoding, these two distinct (customerId, projectId)
+  // pairs produced the IDENTICAL scope key: "a::b" joined with "c" gives
+  // "a::b::c", and "a" joined with "b::c" ALSO gives "a::b::c".
+  const scopeA = scope({ customerId: "a::b", projectId: "c" });
+  const scopeB = scope({ customerId: "a", projectId: "b::c" });
+  assert.notEqual(quotaScopeKey(scopeA), quotaScopeKey(scopeB), "distinct scopes must never derive the same scope key merely because an identifier contains the delimiter");
+
+  const envA = envelope(100, { scopeOverrides: { customerId: "a::b", projectId: "c" } });
+  const envB = envelope(100, { scopeOverrides: { customerId: "a", projectId: "b::c" } });
+  const idA = identity({ scope: scopeA });
+  const idB = identity({ scope: scopeB });
+
+  const admittedA = admitQuotaReservation({
+    ledger: EMPTY_QUOTA_LEDGER, envelope: envA, identity: idA, idempotencyKey: "key-a",
+    requestedAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }, occurredAt: "2026-09-29T00:00:00.000Z",
+  });
+  assert.equal(admittedA.outcome.status, "RESERVED");
+
+  // scopeB's full, independent allowance must be completely untouched by
+  // scopeA's own full reservation - if the two scope keys collided, this
+  // would incorrectly see scopeA's usage and reject.
+  const admittedB = admitQuotaReservation({
+    ledger: admittedA.ledger, envelope: envB, identity: idB, idempotencyKey: "key-b",
+    requestedAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }, occurredAt: "2026-09-29T00:00:01.000Z",
+  });
+  assert.equal(admittedB.outcome.status, "RESERVED", "scopeB's allowance must be fully isolated from scopeA's, even though their identifiers collide under a naive delimiter join");
+});
+
+test("Q23 (Rev177 F1, collision-safe eventId): two distinct reservation identities whose jobId/runId contain the `::` delimiter never derive the same eventId", () => {
+  // Under the old `::`-join encoding, jobId="a::b"/runId="c" and jobId="a"/
+  // runId="b::c" (same attemptRef) derived the IDENTICAL eventId.
+  const idA = identity({ jobId: "a::b", runId: "c", attemptRef: "1" });
+  const idB = identity({ jobId: "a", runId: "b::c", attemptRef: "1" });
+  assert.notEqual(
+    deriveQuotaReservationEventId(idA, "key-1", "RESERVED"),
+    deriveQuotaReservationEventId(idB, "key-1", "RESERVED"),
+    "distinct reservation identities must never derive the same eventId merely because jobId/runId contain the delimiter",
+  );
+});
+
+test("Q24 (Rev177 F2, sourceFingerprint conflict): a same-idempotencyKey replay under a DIFFERENT envelope sourceFingerprint fails closed exactly like a differing envelopeRef/identity/amount already does", () => {
+  const envOriginal = envelope(1000, { sourceFingerprint: "qfp-original" });
+  const envChanged = envelope(1000, { sourceFingerprint: "qfp-changed" });
+  const id = identity();
+  const admitted = admitQuotaReservation({
+    ledger: EMPTY_QUOTA_LEDGER, envelope: envOriginal, identity: id, idempotencyKey: "key-1",
+    requestedAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }, occurredAt: "2026-09-29T00:00:00.000Z",
+  });
+  assert.equal(admitted.outcome.status, "RESERVED");
+  assert.equal(admitted.outcome.event.sourceFingerprint, "qfp-original", "the reservation must durably record the exact envelope version it was admitted against");
+
+  assert.throws(
+    () =>
+      admitQuotaReservation({
+        ledger: admitted.ledger, envelope: envChanged, identity: id, idempotencyKey: "key-1",
+        requestedAmount: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" }, occurredAt: "2026-09-29T00:00:01.000Z",
+      }),
+    QuotaReservationConflictError,
+    "a same-idempotencyKey replay under a different envelope version (sourceFingerprint) must fail closed, never silently authorize under the new policy without a fresh idempotencyKey",
+  );
 });
 

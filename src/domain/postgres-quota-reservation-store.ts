@@ -4,6 +4,8 @@ import {
   releaseQuotaReservation,
   projectQuotaReadModel,
   validatePersistedQuotaReservationEvent,
+  assertReplayMatchesOriginalRequest,
+  deriveQuotaReservationEventId,
   quotaScopeKey,
   type QuotaAdmissionScope,
   type QuotaEnvelope,
@@ -16,6 +18,7 @@ import {
   type QuotaReadModel,
   InvalidQuotaAdmissionError,
 } from "./execution-quota-admission.js";
+import { createCostAmount } from "./execution-economics-attribution.js";
 import type { AsyncQuotaReservationStore } from "../ports/async-quota-reservation-store.js";
 import type { SqlClient } from "../ports/sql-client.js";
 
@@ -39,6 +42,7 @@ interface RawQuotaReservationRow {
   readonly attempt_ref: unknown;
   readonly idempotency_key: unknown;
   readonly envelope_ref: unknown;
+  readonly source_fingerprint: unknown;
   readonly type: unknown;
   readonly occurred_at: unknown;
   readonly amount_minor_units: unknown;
@@ -81,6 +85,7 @@ function rowToRecord(row: RawQuotaReservationRow, expectedScope: QuotaAdmissionS
     },
     idempotencyKey: row.idempotency_key,
     envelopeRef: row.envelope_ref,
+    sourceFingerprint: row.source_fingerprint,
     type: row.type,
     occurredAt: row.occurred_at,
     amount,
@@ -161,6 +166,16 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
       );
     }
     const scopeKey = quotaScopeKey(scope);
+    // Rev177 F1: candidate eventIds are computed HERE in TypeScript (the one
+    // canonical `deriveQuotaReservationEventId` derivation) and passed to SQL
+    // as plain parameters - the SQL below never reconstructs an eventId
+    // itself (it previously did, via ad-hoc `||` string concatenation of a
+    // `::`-delimited convention that was never collision-safe to begin
+    // with). This exactly mirrors `PostgresOutcomeJobExecutionStore`'s own
+    // established convention: a store receives `event.eventId`, it never
+    // recomputes one.
+    const candidateReservedEventId = deriveQuotaReservationEventId(input.identity, input.idempotencyKey, "RESERVED");
+    const candidateRejectedEventId = deriveQuotaReservationEventId(input.identity, input.idempotencyKey, "REJECTED");
     const result = await this.client.query<RawQuotaReservationRow>(
       `WITH scope_lock AS (
          SELECT pg_advisory_xact_lock(hashtext($1 || ':' || $2)) AS locked
@@ -215,11 +230,13 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
        ),
        inserted AS (
          INSERT INTO quota_reservation_events
-           (tenant_id, event_id, scope_key, customer_id, project_id, plan_id, plan_version, job_id, run_id, attempt_ref, idempotency_key, envelope_ref, type, occurred_at, amount_minor_units, amount_presence, currency, reason)
+           (tenant_id, event_id, scope_key, customer_id, project_id, plan_id, plan_version, job_id, run_id, attempt_ref, idempotency_key, envelope_ref, source_fingerprint, type, occurred_at, amount_minor_units, amount_presence, currency, reason)
          SELECT
            $1,
-           $2 || '::' || $7 || '::' || $8 || '::' || $9 || '::' || $10 || '::' || d.decided_type,
-           $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, d.decided_type, $15,
+           -- Rev177 F1: select the precomputed candidate eventId for the
+           -- decided type - never reconstruct one from parts here.
+           CASE WHEN d.decided_type = 'RESERVED' THEN $17 ELSE $18 END,
+           $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $19, d.decided_type, $15,
            CASE WHEN $12 = 'UNKNOWN' THEN NULL ELSE $13::bigint END,
            $12,
            CASE WHEN $12 = 'UNKNOWN' THEN NULL ELSE $16 END,
@@ -261,6 +278,9 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
         input.envelope.limit.amountMinorUnits,
         input.occurredAt,
         currency,
+        candidateReservedEventId,
+        candidateRejectedEventId,
+        input.envelope.sourceFingerprint,
       ],
     );
     const row = result.rows[0];
@@ -268,6 +288,25 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
       throw new InvalidQuotaAdmissionError("internal error: admit() produced no row - neither a replay nor a fresh decision");
     }
     const event = rowToRecord(row, scope);
+    // Rev177 F2: whatever row this query returned - fresh insert OR a
+    // replayed already_reserved/existing_rejected row - must match the
+    // CURRENT caller's own identity/envelopeRef/sourceFingerprint/amount
+    // exactly like the pure `admitQuotaReservation` ledger fold already
+    // requires. For a fresh insert this is a tautology (the row IS what was
+    // just inserted from these same inputs); for a replay, this is the
+    // actual enforcement point - the prior SQL silently returned ANY row
+    // matching only (tenant_id, idempotency_key, type), with no check that
+    // this caller's request content still agrees with it.
+    assertReplayMatchesOriginalRequest(
+      event,
+      {
+        identity: input.identity,
+        envelopeRef: input.envelope.envelopeRef,
+        sourceFingerprint: input.envelope.sourceFingerprint,
+        requestedAmount: createCostAmount(input.requestedAmount),
+      },
+      input.idempotencyKey,
+    );
     return event.type === "RESERVED" ? { status: "RESERVED", event } : { status: "REJECTED", event };
   }
 
@@ -346,8 +385,8 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
   private async insertEventIfAbsent(event: QuotaReservationEvent): Promise<boolean> {
     const result = await this.client.query(
       `INSERT INTO quota_reservation_events
-         (tenant_id, event_id, scope_key, customer_id, project_id, plan_id, plan_version, job_id, run_id, attempt_ref, idempotency_key, envelope_ref, type, occurred_at, amount_minor_units, amount_presence, currency, reason, worker_ref, provider_ref, model_ref, route_ref)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+         (tenant_id, event_id, scope_key, customer_id, project_id, plan_id, plan_version, job_id, run_id, attempt_ref, idempotency_key, envelope_ref, source_fingerprint, type, occurred_at, amount_minor_units, amount_presence, currency, reason, worker_ref, provider_ref, model_ref, route_ref)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
        ON CONFLICT (tenant_id, event_id) DO NOTHING
        RETURNING event_id`,
       [
@@ -363,6 +402,7 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
         event.identity.attemptRef,
         event.idempotencyKey,
         event.envelopeRef,
+        event.sourceFingerprint,
         event.type,
         event.occurredAt,
         event.amount?.amountMinorUnits ?? null,

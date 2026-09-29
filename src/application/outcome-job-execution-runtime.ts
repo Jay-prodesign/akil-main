@@ -20,10 +20,13 @@ import { invokeSafely, type WorkerInvoker, type InvokeOutcome } from "../domain/
 import {
   assertCurrentQuotaEnvelope,
   createQuotaReservationIdentity,
+  quotaScopeKey,
+  type QuotaAdmissionScope,
   type QuotaEnvelope,
   type QuotaReservationIdentity,
   type QuotaAdmissionOutcome,
   type QuotaCommitOutcome,
+  type QuotaReleaseOutcome,
 } from "../domain/execution-quota-admission.js";
 
 export class InvalidOutcomeJobExecutionRuntimeError extends Error {
@@ -153,6 +156,36 @@ export interface QuotaAdmissionPort {
     readonly actualAmount: { presence: unknown; amountMinorUnits?: unknown; currency?: unknown };
     readonly occurredAt: unknown;
   }): QuotaCommitOutcome | Promise<QuotaCommitOutcome>;
+  /**
+   * OS-V0-07 (Rev177 F3): required so a reservation whose envelope proves
+   * stale immediately before invocation (see `resolveCurrentQuotaEnvelope`
+   * below) can be safely returned to the pool - zero worker/provider effect
+   * is ever invoked against it, and the allowance it claimed becomes
+   * available again for a later, freshly re-admitted retry.
+   */
+  release(input: {
+    readonly identity: QuotaReservationIdentity;
+    readonly idempotencyKey: unknown;
+    readonly occurredAt: unknown;
+    readonly reason?: unknown;
+  }): QuotaReleaseOutcome | Promise<QuotaReleaseOutcome>;
+}
+
+/**
+ * OS-V0-07 (Rev177 F3): "currentness checked once at entry is insufficient
+ * ... re-resolve immediately before invokeSafely." A zero-argument callback
+ * (never a scope parameter) - the caller closes over this exact call's own
+ * scope when constructing it, exactly like `currentFingerprint`/
+ * `expectedFingerprint` are already caller-resolved values rather than
+ * runtime-driven lookups. Invoked exactly once, by `dispatchOutcomeJobExecutionRun`/
+ * `retryOutcomeJobExecutionAttempt` themselves, immediately before
+ * `invokeSafely` - never earlier, and never by any other caller - so its
+ * return is guaranteed to reflect the current envelope at the LATEST
+ * possible moment before real effect, not a value resolved before the
+ * ACCEPTED/admission/ATTEMPT_STARTED durable work that precedes it.
+ */
+export interface CurrentQuotaEnvelopeResolver {
+  resolveCurrentQuotaEnvelope(): QuotaEnvelope | Promise<QuotaEnvelope>;
 }
 
 interface QuotaAdmissionInput {
@@ -160,6 +193,7 @@ interface QuotaAdmissionInput {
   readonly quotaEnvelope: QuotaEnvelope;
   readonly currentQuotaSourceFingerprint: string;
   readonly estimatedCost: { presence: unknown; amountMinorUnits?: unknown; currency?: unknown };
+  readonly quotaEnvelopeResolver: CurrentQuotaEnvelopeResolver;
 }
 
 /**
@@ -182,7 +216,12 @@ interface QuotaAdmissionInput {
  * exact same reservation without re-deriving it.
  */
 async function admitQuotaForAttempt(
-  input: QuotaAdmissionInput & { readonly jobId: string; readonly runId: string; readonly attempt: number; readonly now: unknown },
+  input: Omit<QuotaAdmissionInput, "quotaEnvelopeResolver"> & {
+    readonly jobId: string;
+    readonly runId: string;
+    readonly attempt: number;
+    readonly now: unknown;
+  },
 ): Promise<{
   readonly identity: QuotaReservationIdentity;
   readonly idempotencyKey: string;
@@ -194,7 +233,12 @@ async function admitQuotaForAttempt(
     runId: input.runId,
     attemptRef: String(input.attempt),
   });
-  const idempotencyKey = `${input.jobId}::${input.runId}::${input.attempt}`;
+  // Rev177 F1: `JSON.stringify` of the ordered tuple, not a `::`-delimited
+  // template string - a plain join was not collision-safe (e.g.
+  // `jobId="a::b"`/`runId="c"` colliding with `jobId="a"`/`runId="b::c"`),
+  // exactly the same fix `quotaScopeKey`/`deriveQuotaReservationEventId`
+  // already apply in `execution-quota-admission.ts`.
+  const idempotencyKey = JSON.stringify([input.jobId, input.runId, input.attempt]);
   const decision = await input.quotaAdmission.admit({
     envelope: input.quotaEnvelope,
     identity,
@@ -226,6 +270,63 @@ async function commitQuotaForAttempt(
     actualAmount: { presence: "UNKNOWN" },
     occurredAt: now,
   });
+}
+
+/**
+ * OS-V0-07 (Rev177 F3): "currentness checked too early, not immediately
+ * before effect." A single entry-point check (`assertCurrentQuotaEnvelope`
+ * above, still run before ACCEPTED/admission/ATTEMPT_STARTED) proves the
+ * envelope was current at THAT moment - it says nothing about whether it is
+ * STILL current after the durable admission/ATTEMPT_STARTED work that
+ * follows it, which can take real wall-clock time and race a policy change.
+ * Called exactly once, by the caller who just won the `ATTEMPT_STARTED`
+ * claim, immediately before `invokeSafely` - the latest possible moment
+ * before real effect.
+ *
+ * Compares the FRESHLY resolved current envelope against the exact envelope
+ * this reservation was durably admitted against (`quota.decision.event`'s
+ * own recorded `envelopeRef`/`sourceFingerprint`/scope - Rev177 F2's newly
+ * persisted `sourceFingerprint` is what makes this comparison possible),
+ * never against the caller's original, possibly now-stale, `quotaEnvelope`
+ * input. `quotaScopeKey` (Rev177 F1: collision-safe) compares the full
+ * scope tuple in one call.
+ *
+ * On a mismatch: releases the reservation (safe/idempotent - see
+ * `releaseQuotaReservation`) so the allowance it claimed becomes available
+ * again, and reports `current: false` so the caller can transition the
+ * already-started attempt to an explicit, truthful, retryable state without
+ * ever invoking the worker. Never invents a second policy system - a later
+ * genuine retry simply re-admits under whatever the resolver returns THEN,
+ * as its own new attempt.
+ */
+async function assertQuotaStillCurrentBeforeEffect(input: {
+  readonly quotaAdmission: QuotaAdmissionPort;
+  readonly quotaEnvelopeResolver: CurrentQuotaEnvelopeResolver;
+  readonly reservedScope: QuotaAdmissionScope;
+  readonly reservedEnvelopeRef: string;
+  readonly reservedSourceFingerprint: string;
+  readonly identity: QuotaReservationIdentity;
+  readonly idempotencyKey: string;
+  readonly now: unknown;
+}): Promise<{ readonly current: true } | { readonly current: false; readonly reason: string }> {
+  const freshEnvelope = await input.quotaEnvelopeResolver.resolveCurrentQuotaEnvelope();
+  const stillCurrent =
+    quotaScopeKey(freshEnvelope.scope) === quotaScopeKey(input.reservedScope) &&
+    freshEnvelope.envelopeRef === input.reservedEnvelopeRef &&
+    freshEnvelope.sourceFingerprint === input.reservedSourceFingerprint;
+  if (stillCurrent) {
+    return { current: true };
+  }
+  await input.quotaAdmission.release({
+    identity: input.identity,
+    idempotencyKey: input.idempotencyKey,
+    occurredAt: input.now,
+    reason: "quota envelope changed between admission and invocation (Rev177 F3 pre-effect recheck) - zero worker effect; reservation released for a later retry to re-admit under current policy",
+  });
+  return {
+    current: false,
+    reason: "quota envelope became stale immediately before invocation - zero effect; reservation released, retry will re-admit under current policy",
+  };
 }
 
 /**
@@ -470,6 +571,38 @@ export async function dispatchOutcomeJobExecutionRun(
     return { state, invoked: false };
   }
 
+  // OS-V0-07 (Rev177 F3): re-resolve current quota envelope truth
+  // immediately before invocation - the ONLY point that actually matters,
+  // since real wall-clock time (the ACCEPTED/admission/ATTEMPT_STARTED
+  // durable work above) has passed since the entry-point currentness check.
+  const quotaRecheck = await assertQuotaStillCurrentBeforeEffect({
+    quotaAdmission: input.quotaAdmission,
+    quotaEnvelopeResolver: input.quotaEnvelopeResolver,
+    reservedScope: quota.decision.event.identity.scope,
+    reservedEnvelopeRef: quota.decision.event.envelopeRef,
+    reservedSourceFingerprint: quota.decision.event.sourceFingerprint,
+    identity: quota.identity,
+    idempotencyKey: quota.idempotencyKey,
+    now: input.now,
+  });
+  if (!quotaRecheck.current) {
+    const blockedEvent = createOutcomeJobExecutionEvent({
+      tenantScope: input.tenantScope,
+      customer: input.customer,
+      project: input.project,
+      job: input.job,
+      runId: acceptedEvent.runId,
+      correlationId: acceptedEvent.correlationId,
+      attempt: 1,
+      sequence: 2,
+      type: "BLOCKED",
+      occurredAt: input.now,
+      reason: quotaRecheck.reason,
+    });
+    ({ state } = await appendAndGetState(input.store, blockedEvent));
+    return { state, invoked: false };
+  }
+
   const invocationOutcome = await invokeSafely(input.invoker, {
     taskId: input.taskId,
     branch: input.branch,
@@ -622,6 +755,37 @@ export async function retryOutcomeJobExecutionAttempt(
   // decides who may commit/release the reservation every racer already
   // independently, idempotently agreed on above.
   if (!started.created) {
+    return { state, invoked: false };
+  }
+
+  // OS-V0-07 (Rev177 F3): identical re-resolution gate as
+  // `dispatchOutcomeJobExecutionRun` - see that function's own call site for
+  // the full rationale.
+  const quotaRecheck = await assertQuotaStillCurrentBeforeEffect({
+    quotaAdmission: input.quotaAdmission,
+    quotaEnvelopeResolver: input.quotaEnvelopeResolver,
+    reservedScope: quota.decision.event.identity.scope,
+    reservedEnvelopeRef: quota.decision.event.envelopeRef,
+    reservedSourceFingerprint: quota.decision.event.sourceFingerprint,
+    identity: quota.identity,
+    idempotencyKey: quota.idempotencyKey,
+    now: input.now,
+  });
+  if (!quotaRecheck.current) {
+    const blockedEvent = createOutcomeJobExecutionEvent({
+      tenantScope: input.tenantScope,
+      customer: input.customer,
+      project: input.project,
+      job: input.job,
+      runId: startedEvent.runId,
+      correlationId: startedEvent.correlationId,
+      attempt: nextAttempt,
+      sequence: 2,
+      type: "BLOCKED",
+      occurredAt: input.now,
+      reason: quotaRecheck.reason,
+    });
+    ({ state } = await appendAndGetState(input.store, blockedEvent));
     return { state, invoked: false };
   }
 

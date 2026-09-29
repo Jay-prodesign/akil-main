@@ -131,17 +131,30 @@ function scopesEqual(a: QuotaAdmissionScope, b: QuotaAdmissionScope): boolean {
 }
 
 /**
- * Injective over the full scope tuple for any realistic identifier value
- * (mirrors every other `*Key` helper in this codebase, e.g.
- * `executionRunKey`). Deliberately a plain `::`-delimited string rather than
- * `JSON.stringify(...)`, unlike this codebase's other `*Key` helpers - this
- * exact key is also re-derived inside `postgres-quota-reservation-store.ts`'s
- * own SQL text (as a plain `||` string concatenation) to compute `event_id`
- * for its single atomic admission statement, and a delimited string is
- * trivially reproducible there while a JSON array literal is not.
+ * Injective over the full scope tuple for any realistic identifier value -
+ * `JSON.stringify` of the ordered tuple, exactly the same collision-safe
+ * convention `deriveOutcomeJobExecutionEventId` already establishes for this
+ * codebase (`outcome-job-execution-event.ts`), and every other `*Key` helper
+ * (`executionRunKey` et al.) already follows.
+ *
+ * Rev177 F1: a plain `::`-delimited join (this function's original
+ * implementation) is NOT injective - caller-controlled opaque identifiers are
+ * legal to contain `::` themselves, so e.g. `(customerId="a::b", projectId="c")`
+ * and `(customerId="a", projectId="b::c")` produced the IDENTICAL scope key
+ * under the old encoding despite being genuinely distinct scopes, which could
+ * merge two different customers'/projects' allowance accounting into one
+ * bucket. `JSON.stringify` escapes embedded quote/delimiter characters inside
+ * each element, so no legal identifier value can ever produce a colliding
+ * encoding for a different tuple. Identifiers themselves remain fully
+ * unrestricted (never banned/sanitized/escaped) - only the KEY DERIVATION
+ * changed. `postgres-quota-reservation-store.ts` never reconstructs this key
+ * itself; it always receives the value this function returns as a plain
+ * query parameter, exactly like every other Postgres store in this
+ * repository already does for its own eventId (see
+ * `PostgresOutcomeJobExecutionStore`).
  */
 export function quotaScopeKey(scope: QuotaAdmissionScope): string {
-  return [scope.tenantId, scope.customerId, scope.projectId, scope.planId, String(scope.planVersion)].join("::");
+  return JSON.stringify([scope.tenantId, scope.customerId, scope.projectId, scope.planId, scope.planVersion]);
 }
 
 /**
@@ -265,11 +278,26 @@ export type QuotaReservationEventType = "RESERVED" | "REJECTED" | "COMMITTED" | 
  * mirrors `ExecutionEconomicsEvent`/`OutcomeJobExecutionEvent`'s own
  * event-sourced discipline rather than a single mutable record.
  */
+/**
+ * Rev177 F2: `sourceFingerprint` is the exact envelope/policy VERSION this
+ * reservation was admitted (or rejected) against - captured once, durably,
+ * at admission time, and carried forward unchanged onto every later
+ * COMMITTED/RELEASED/RECONCILIATION_REQUIRED transition of the SAME
+ * reservation (mirroring how `envelopeRef` already propagates). Rev174
+ * required reservation identity/content to bind the exact current envelope
+ * version, not merely its `envelopeRef` name - two envelopes can share an
+ * `envelopeRef` across a policy edit while genuinely differing in effective
+ * limit/terms, and only `sourceFingerprint` proves which exact version was
+ * actually in force. A conflicting replay (same idempotencyKey, different
+ * sourceFingerprint) fails closed exactly like a differing envelopeRef/
+ * amount/identity already does (see `assertReplayMatchesOriginalRequest`).
+ */
 export interface QuotaReservationEvent {
   readonly eventId: string;
   readonly identity: QuotaReservationIdentity;
   readonly idempotencyKey: string;
   readonly envelopeRef: string;
+  readonly sourceFingerprint: string;
   readonly type: QuotaReservationEventType;
   readonly occurredAt: string;
   readonly amount?: CostAmount;
@@ -284,9 +312,18 @@ export interface QuotaReservationEvent {
  * insertion order. Including `type` distinguishes RESERVED/REJECTED (the
  * ADMISSION decision, unique per `idempotencyKey`) from a later COMMITTED/
  * RELEASED/RECONCILIATION_REQUIRED transition of that same reservation.
+ *
+ * Rev177 F1: `JSON.stringify` of the ordered tuple, not a `::`-delimited
+ * join - the same collision-safety fix as `quotaScopeKey` above, for exactly
+ * the same reason (`jobId="a::b"`/`runId="c"` colliding with `jobId="a"`/
+ * `runId="b::c"` under the old encoding). `quotaScopeKey(identity.scope)`'s
+ * own return value is embedded as ONE opaque string element here - nesting a
+ * `JSON.stringify` result inside another `JSON.stringify` call remains
+ * collision-safe, since the outer call re-escapes the inner string's own
+ * quote characters, so no ambiguity is introduced by nesting.
  */
 export function deriveQuotaReservationEventId(identity: QuotaReservationIdentity, idempotencyKey: string, type: QuotaReservationEventType): string {
-  return [quotaScopeKey(identity.scope), identity.jobId, identity.runId, identity.attemptRef, idempotencyKey, type].join("::");
+  return JSON.stringify([quotaScopeKey(identity.scope), identity.jobId, identity.runId, identity.attemptRef, idempotencyKey, type]);
 }
 
 export interface QuotaLedger {
@@ -392,6 +429,37 @@ export type QuotaAdmissionOutcome =
   | { readonly status: "REJECTED"; readonly event: QuotaReservationEvent };
 
 /**
+ * Rev177 F2: the ONE conflicting-replay check, extracted so every adapter
+ * that decides admission outside the pure ledger fold (currently only
+ * `PostgresQuotaReservationStore.admit()`, which must issue a single atomic
+ * SQL statement rather than call this function directly) can enforce the
+ * IDENTICAL fail-closed contract `admitQuotaReservation` enforces below,
+ * rather than drifting into a weaker, independently-reimplemented check.
+ * Throws `QuotaReservationConflictError` the moment a same-idempotencyKey
+ * replay's identity, envelopeRef, sourceFingerprint, or requestedAmount
+ * differs from what `existing` already durably recorded.
+ */
+export function assertReplayMatchesOriginalRequest(
+  existing: QuotaReservationEvent,
+  request: {
+    readonly identity: QuotaReservationIdentity;
+    readonly envelopeRef: string;
+    readonly sourceFingerprint: string;
+    readonly requestedAmount: CostAmount;
+  },
+  idempotencyKey: string,
+): void {
+  if (
+    !identitiesEqual(existing.identity, request.identity) ||
+    existing.envelopeRef !== request.envelopeRef ||
+    existing.sourceFingerprint !== request.sourceFingerprint ||
+    !amountsEqual(existing.amount, request.requestedAmount)
+  ) {
+    throw new QuotaReservationConflictError(idempotencyKey, "identity, envelopeRef, sourceFingerprint, or requestedAmount differs from the original request");
+  }
+}
+
+/**
  * The one atomic decision point (G1/G3). Pure function over an immutable
  * ledger snapshot - real cross-caller atomicity is the STORE's
  * responsibility (see `durable-quota-reservation-store.ts`/
@@ -439,13 +507,11 @@ export function admitQuotaReservation(input: {
 
   const existing = findAdmissionEvent(input.ledger, input.identity.scope.tenantId, idempotencyKey);
   if (existing !== undefined) {
-    if (
-      !identitiesEqual(existing.identity, input.identity) ||
-      existing.envelopeRef !== input.envelope.envelopeRef ||
-      !amountsEqual(existing.amount, requestedAmount)
-    ) {
-      throw new QuotaReservationConflictError(idempotencyKey, "identity, envelopeRef, or requestedAmount differs from the original request");
-    }
+    assertReplayMatchesOriginalRequest(
+      existing,
+      { identity: input.identity, envelopeRef: input.envelope.envelopeRef, sourceFingerprint: input.envelope.sourceFingerprint, requestedAmount },
+      idempotencyKey,
+    );
     if (existing.type === "RESERVED") {
       return { ledger: input.ledger, outcome: { status: "RESERVED", event: existing } };
     }
@@ -466,6 +532,7 @@ export function admitQuotaReservation(input: {
       identity: input.identity,
       idempotencyKey,
       envelopeRef: input.envelope.envelopeRef,
+      sourceFingerprint: input.envelope.sourceFingerprint,
       type: "REJECTED",
       occurredAt,
       reason: "an UNKNOWN estimated cost cannot be admitted against a monetary ceiling - it is never treated as zero",
@@ -494,6 +561,7 @@ export function admitQuotaReservation(input: {
       identity: input.identity,
       idempotencyKey,
       envelopeRef: input.envelope.envelopeRef,
+      sourceFingerprint: input.envelope.sourceFingerprint,
       type: "REJECTED",
       occurredAt,
       amount: requestedAmount,
@@ -507,6 +575,7 @@ export function admitQuotaReservation(input: {
     identity: input.identity,
     idempotencyKey,
     envelopeRef: input.envelope.envelopeRef,
+    sourceFingerprint: input.envelope.sourceFingerprint,
     type: "RESERVED",
     occurredAt,
     amount: requestedAmount,
@@ -584,6 +653,7 @@ export function commitQuotaUsage(input: {
     identity: input.identity,
     idempotencyKey,
     envelopeRef: reservation.envelopeRef,
+    sourceFingerprint: reservation.sourceFingerprint,
     type,
     occurredAt,
     amount: actualAmount,
@@ -637,6 +707,7 @@ export function releaseQuotaReservation(input: {
     identity: input.identity,
     idempotencyKey,
     envelopeRef: reservation.envelopeRef,
+    sourceFingerprint: reservation.sourceFingerprint,
     type: "RELEASED",
     occurredAt,
     ...(reservation.amount !== undefined ? { amount: reservation.amount } : {}),
@@ -710,6 +781,7 @@ export function validatePersistedQuotaReservationEvent(raw: unknown, expectedSco
     identity?: { scope?: unknown; jobId?: unknown; runId?: unknown; attemptRef?: unknown };
     idempotencyKey?: unknown;
     envelopeRef?: unknown;
+    sourceFingerprint?: unknown;
     type?: unknown;
     occurredAt?: unknown;
     amount?: unknown;
@@ -741,6 +813,7 @@ export function validatePersistedQuotaReservationEvent(raw: unknown, expectedSco
   };
   const idempotencyKey = requireNonEmptyString(candidate.idempotencyKey, "idempotencyKey");
   const envelopeRef = requireNonEmptyString(candidate.envelopeRef, "envelopeRef");
+  const sourceFingerprint = requireNonEmptyString(candidate.sourceFingerprint, "sourceFingerprint");
   const occurredAt = requireValidTimestamp(candidate.occurredAt, "occurredAt");
   const type = candidate.type as QuotaReservationEventType;
   const expectedEventId = deriveQuotaReservationEventId(identity, idempotencyKey, type);
@@ -760,6 +833,7 @@ export function validatePersistedQuotaReservationEvent(raw: unknown, expectedSco
     identity,
     idempotencyKey,
     envelopeRef,
+    sourceFingerprint,
     type,
     occurredAt,
     ...(amount !== undefined ? { amount } : {}),
