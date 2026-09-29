@@ -17,6 +17,14 @@ import {
 import type { AuthorityContext } from "../domain/authority.js";
 import { requireSameTenant, requirePermission, requireProtectedActionAuthorization } from "../domain/authority.js";
 import { invokeSafely, type WorkerInvoker, type InvokeOutcome } from "../domain/worker-invoker.js";
+import {
+  assertCurrentQuotaEnvelope,
+  createQuotaReservationIdentity,
+  type QuotaEnvelope,
+  type QuotaReservationIdentity,
+  type QuotaAdmissionOutcome,
+  type QuotaCommitOutcome,
+} from "../domain/execution-quota-admission.js";
 
 export class InvalidOutcomeJobExecutionRuntimeError extends Error {
   constructor(reason: string) {
@@ -125,6 +133,97 @@ export interface ExecutionEventStore {
 }
 
 /**
+ * OS-V0-07 (Rev174): store-shape this runtime depends on for pre-effect
+ * budget/quota admission - satisfied structurally by both
+ * `FileDurableQuotaReservationStore` (sync) and
+ * `PostgresQuotaReservationStore` (async), exactly mirroring
+ * `ExecutionEventStore`'s own sync/async structural-typing trick above.
+ */
+export interface QuotaAdmissionPort {
+  admit(input: {
+    readonly envelope: QuotaEnvelope;
+    readonly identity: QuotaReservationIdentity;
+    readonly idempotencyKey: unknown;
+    readonly requestedAmount: { presence: unknown; amountMinorUnits?: unknown; currency?: unknown };
+    readonly occurredAt: unknown;
+  }): QuotaAdmissionOutcome | Promise<QuotaAdmissionOutcome>;
+  commit(input: {
+    readonly identity: QuotaReservationIdentity;
+    readonly idempotencyKey: unknown;
+    readonly actualAmount: { presence: unknown; amountMinorUnits?: unknown; currency?: unknown };
+    readonly occurredAt: unknown;
+  }): QuotaCommitOutcome | Promise<QuotaCommitOutcome>;
+}
+
+interface QuotaAdmissionInput {
+  readonly quotaAdmission: QuotaAdmissionPort;
+  readonly quotaEnvelope: QuotaEnvelope;
+  readonly currentQuotaSourceFingerprint: string;
+  readonly estimatedCost: { presence: unknown; amountMinorUnits?: unknown; currency?: unknown };
+}
+
+/**
+ * G1/G3 (Rev174 MISSION): the one load-bearing pre-effect admission point,
+ * called ONLY by whichever caller already durably won the exact ATTEMPT_STARTED
+ * claim (Rev145 F1) - a losing concurrent racer returns before ever reaching
+ * this function, so it never wastes/double-consumes allowance for the same
+ * attempt. Authority/activation currentness and worker-routing eligibility
+ * (both already enforced above every call site of this function) remain
+ * strictly higher-priority gates than budget (Minimum Adversarial Evidence
+ * #15) - this function is never reached at all when those already failed.
+ *
+ * Returns the derived `QuotaReservationIdentity`/`idempotencyKey` alongside
+ * the decision so the caller can later `commit` actual usage against the
+ * exact same reservation without re-deriving it.
+ */
+async function admitQuotaForAttempt(
+  input: QuotaAdmissionInput & { readonly jobId: string; readonly runId: string; readonly attempt: number; readonly now: unknown },
+): Promise<{
+  readonly identity: QuotaReservationIdentity;
+  readonly idempotencyKey: string;
+  readonly decision: QuotaAdmissionOutcome;
+}> {
+  const identity = createQuotaReservationIdentity({
+    scope: input.quotaEnvelope.scope,
+    jobId: input.jobId,
+    runId: input.runId,
+    attemptRef: String(input.attempt),
+  });
+  const idempotencyKey = `${input.jobId}::${input.runId}::${input.attempt}`;
+  const decision = await input.quotaAdmission.admit({
+    envelope: input.quotaEnvelope,
+    identity,
+    idempotencyKey,
+    requestedAmount: input.estimatedCost,
+    occurredAt: input.now,
+  });
+  return { identity, idempotencyKey, decision };
+}
+
+/**
+ * G5/G6: commits actual usage after invocation, regardless of ACCEPTED or
+ * TEMPORARY_FAILURE - a failed/unknown provider response may still have
+ * consumed real units (Minimum Adversarial Evidence #10). The activated
+ * `WorkerInvoker` boundary reports no token/cost metrics at all (Rev174's
+ * own ACTUAL USAGE constraint: "do not fabricate actual provider usage"),
+ * so the actual committed here is honestly `UNKNOWN`, never a fabricated
+ * echo of the estimate.
+ */
+async function commitQuotaForAttempt(
+  quotaAdmission: QuotaAdmissionPort,
+  identity: QuotaReservationIdentity,
+  idempotencyKey: string,
+  now: unknown,
+): Promise<QuotaCommitOutcome> {
+  return quotaAdmission.commit({
+    identity,
+    idempotencyKey,
+    actualAmount: { presence: "UNKNOWN" },
+    occurredAt: now,
+  });
+}
+
+/**
  * Package Contract I currentness gate. Pure comparison - the caller is
  * responsible for actually re-resolving `currentFingerprint` from
  * `resolveEffectiveConfigurationPolicy`/`compileProjectActivationProfile`
@@ -220,20 +319,21 @@ export interface DispatchOutcomeJobExecutionResult {
  * state rather than assume a fresh dispatch happened.
  */
 export async function dispatchOutcomeJobExecutionRun(
-  input: ScopeInput & {
-    readonly authority: AuthorityContext;
-    readonly runId: unknown;
-    readonly correlationId: unknown;
-    readonly now: unknown;
-    readonly executorKind: unknown;
-    readonly expectedFingerprint: string;
-    readonly currentFingerprint: string;
-    readonly store: ExecutionEventStore;
-    readonly invoker: WorkerInvoker;
-    readonly taskId: string;
-    readonly branch: string;
-    readonly checkpointSha: string;
-  },
+  input: ScopeInput &
+    QuotaAdmissionInput & {
+      readonly authority: AuthorityContext;
+      readonly runId: unknown;
+      readonly correlationId: unknown;
+      readonly now: unknown;
+      readonly executorKind: unknown;
+      readonly expectedFingerprint: string;
+      readonly currentFingerprint: string;
+      readonly store: ExecutionEventStore;
+      readonly invoker: WorkerInvoker;
+      readonly taskId: string;
+      readonly branch: string;
+      readonly checkpointSha: string;
+    },
 ): Promise<DispatchOutcomeJobExecutionResult> {
   requireSameTenant(input.authority, input.tenantScope.tenantId);
   requirePermission(input.authority, "EXECUTE");
@@ -266,6 +366,11 @@ export async function dispatchOutcomeJobExecutionRun(
   }
 
   assertCurrentActivation(input.expectedFingerprint, input.currentFingerprint);
+  // OS-V0-07 (Rev174) Minimum Adversarial Evidence #7: a stale quota
+  // envelope/policy snapshot cannot authorize anything - checked here,
+  // alongside activation currentness and before any event is ever appended,
+  // exactly mirroring `assertCurrentActivation`'s own placement.
+  assertCurrentQuotaEnvelope(input.quotaEnvelope, input.currentQuotaSourceFingerprint);
 
   const acceptedEvent = createOutcomeJobExecutionEvent({
     tenantScope: input.tenantScope,
@@ -317,6 +422,41 @@ export async function dispatchOutcomeJobExecutionRun(
     return { state, invoked: false };
   }
 
+  // OS-V0-07 (Rev174) G1/G3: pre-effect budget/quota admission, reached ONLY
+  // by this exact claim's winner - authority/activation currentness and
+  // worker-routing eligibility (both already enforced above) remain
+  // strictly higher-priority gates than budget (Minimum Adversarial Evidence
+  // #15). A REJECTED admission never invokes the worker at all; it records
+  // the existing, retryable `BLOCKED` execution-runtime status instead of
+  // inventing a new terminal vocabulary.
+  const quota = await admitQuotaForAttempt({
+    quotaAdmission: input.quotaAdmission,
+    quotaEnvelope: input.quotaEnvelope,
+    currentQuotaSourceFingerprint: input.currentQuotaSourceFingerprint,
+    estimatedCost: input.estimatedCost,
+    jobId: input.job.jobId,
+    runId: acceptedEvent.runId,
+    attempt: 1,
+    now: input.now,
+  });
+  if (quota.decision.status === "REJECTED") {
+    const blockedEvent = createOutcomeJobExecutionEvent({
+      tenantScope: input.tenantScope,
+      customer: input.customer,
+      project: input.project,
+      job: input.job,
+      runId: acceptedEvent.runId,
+      correlationId: acceptedEvent.correlationId,
+      attempt: 1,
+      sequence: 2,
+      type: "BLOCKED",
+      occurredAt: input.now,
+      reason: quota.decision.event.reason ?? "quota admission rejected",
+    });
+    ({ state } = await appendAndGetState(input.store, blockedEvent));
+    return { state, invoked: false };
+  }
+
   const invocationOutcome = await invokeSafely(input.invoker, {
     taskId: input.taskId,
     branch: input.branch,
@@ -331,6 +471,10 @@ export async function dispatchOutcomeJobExecutionRun(
       attempt: 1,
     },
   });
+
+  // G5/G6: actual usage is committed once invocation has been attempted,
+  // regardless of outcome - see `commitQuotaForAttempt`'s own doc comment.
+  await commitQuotaForAttempt(input.quotaAdmission, quota.identity, quota.idempotencyKey, input.now);
 
   if (invocationOutcome.status === "TEMPORARY_FAILURE") {
     const failedEvent = createOutcomeJobExecutionEvent({
@@ -371,19 +515,20 @@ const RETRYABLE_ATTEMPT_STATUSES: ReadonlySet<string> = new Set([
  * never authorizes anything the store's real current state disagrees with.
  */
 export async function retryOutcomeJobExecutionAttempt(
-  input: ScopeInput & {
-    readonly authority: AuthorityContext;
-    readonly currentState: OutcomeJobExecutionRunState;
-    readonly now: unknown;
-    readonly executorKind: unknown;
-    readonly expectedFingerprint: string;
-    readonly currentFingerprint: string;
-    readonly store: ExecutionEventStore;
-    readonly invoker: WorkerInvoker;
-    readonly taskId: string;
-    readonly branch: string;
-    readonly checkpointSha: string;
-  },
+  input: ScopeInput &
+    QuotaAdmissionInput & {
+      readonly authority: AuthorityContext;
+      readonly currentState: OutcomeJobExecutionRunState;
+      readonly now: unknown;
+      readonly executorKind: unknown;
+      readonly expectedFingerprint: string;
+      readonly currentFingerprint: string;
+      readonly store: ExecutionEventStore;
+      readonly invoker: WorkerInvoker;
+      readonly taskId: string;
+      readonly branch: string;
+      readonly checkpointSha: string;
+    },
 ): Promise<DispatchOutcomeJobExecutionResult> {
   requireSameTenant(input.authority, input.tenantScope.tenantId);
   requirePermission(input.authority, "EXECUTE");
@@ -404,6 +549,11 @@ export async function retryOutcomeJobExecutionAttempt(
   }
 
   assertCurrentActivation(input.expectedFingerprint, input.currentFingerprint);
+  // OS-V0-07 (Rev174) Minimum Adversarial Evidence #7: a stale quota
+  // envelope/policy snapshot cannot authorize anything - checked here,
+  // alongside activation currentness and before any event is ever appended,
+  // exactly mirroring `assertCurrentActivation`'s own placement.
+  assertCurrentQuotaEnvelope(input.quotaEnvelope, input.currentQuotaSourceFingerprint);
 
   const nextAttempt = freshState.currentAttempt + 1;
   const startedEvent = createOutcomeJobExecutionEvent({
@@ -430,6 +580,39 @@ export async function retryOutcomeJobExecutionAttempt(
     return { state, invoked: false };
   }
 
+  // OS-V0-07 (Rev174) Design D: a retry re-admits under current policy/quota
+  // for its OWN new attempt - it never reuses attempt N's reservation, and
+  // (since each attempt has a distinct attemptRef) never double-reserves the
+  // SAME already-reserved effect either. See `dispatchOutcomeJobExecutionRun`'s
+  // identical gate for the full rationale.
+  const quota = await admitQuotaForAttempt({
+    quotaAdmission: input.quotaAdmission,
+    quotaEnvelope: input.quotaEnvelope,
+    currentQuotaSourceFingerprint: input.currentQuotaSourceFingerprint,
+    estimatedCost: input.estimatedCost,
+    jobId: input.job.jobId,
+    runId: startedEvent.runId,
+    attempt: nextAttempt,
+    now: input.now,
+  });
+  if (quota.decision.status === "REJECTED") {
+    const blockedEvent = createOutcomeJobExecutionEvent({
+      tenantScope: input.tenantScope,
+      customer: input.customer,
+      project: input.project,
+      job: input.job,
+      runId: startedEvent.runId,
+      correlationId: startedEvent.correlationId,
+      attempt: nextAttempt,
+      sequence: 2,
+      type: "BLOCKED",
+      occurredAt: input.now,
+      reason: quota.decision.event.reason ?? "quota admission rejected",
+    });
+    ({ state } = await appendAndGetState(input.store, blockedEvent));
+    return { state, invoked: false };
+  }
+
   const invocationOutcome = await invokeSafely(input.invoker, {
     taskId: input.taskId,
     branch: input.branch,
@@ -444,6 +627,8 @@ export async function retryOutcomeJobExecutionAttempt(
       attempt: nextAttempt,
     },
   });
+
+  await commitQuotaForAttempt(input.quotaAdmission, quota.identity, quota.idempotencyKey, input.now);
 
   if (invocationOutcome.status === "TEMPORARY_FAILURE") {
     const failedEvent = createOutcomeJobExecutionEvent({
