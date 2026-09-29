@@ -630,6 +630,79 @@ test("P4 (OS-V0-06 Rev172 F1, restart-safety): a fresh store instance over the s
   }
 });
 
+test("P5 (OS-V0-06 Rev173 F2, isolation): a versioned update to ONE prototype-shaped binding id increments only that record - co-resident \"constructor\" and an ordinary record are untouched, both before and after a simulated restart", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableConnectorConnectionStore(dir);
+    const descriptor = githubDescriptor();
+    const requirement = requirementFor(descriptor, ownership("p5"));
+
+    const protoInstance = requestConnectorConnection({
+      requirement,
+      connectorDescriptor: descriptor,
+      connectionBindingId: "__proto__",
+      workspaceRef: "workspace-__proto__",
+      integrationInstanceRef: "instance-__proto__",
+      delegatedScope: [],
+      authMode: "OAUTH2",
+    });
+    const constructorInstance = requestConnectorConnection({
+      requirement,
+      connectorDescriptor: descriptor,
+      connectionBindingId: "constructor",
+      workspaceRef: "workspace-constructor",
+      integrationInstanceRef: "instance-constructor",
+      delegatedScope: [],
+      authMode: "OAUTH2",
+    });
+    const ordinaryInstance = requestConnectorConnection({
+      requirement,
+      connectorDescriptor: descriptor,
+      connectionBindingId: "ordinary-key",
+      workspaceRef: "workspace-ordinary-key",
+      integrationInstanceRef: "instance-ordinary-key",
+      delegatedScope: [],
+      authMode: "OAUTH2",
+    });
+
+    // Create all three at version 1 in the same tenant.
+    const protoCreated = store.save(protoInstance);
+    const constructorCreated = store.save(constructorInstance);
+    const ordinaryCreated = store.save(ordinaryInstance);
+    assert.equal(protoCreated.version, 1);
+    assert.equal(constructorCreated.version, 1);
+    assert.equal(ordinaryCreated.version, 1);
+
+    // Update ONLY "__proto__" once with its correct expectedVersion.
+    const protoUnverified = transitionConnectorConnection(protoInstance, "CONNECTED_UNVERIFIED");
+    const protoUpdated = store.save(protoUnverified, protoCreated.version);
+    assert.equal(protoUpdated.version, 2);
+    assert.equal(protoUpdated.instance.binding.connectionState, "CONNECTED_UNVERIFIED");
+
+    // The two co-resident records must be completely untouched.
+    const constructorAfter = store.get(requirement.ownership.tenantId, constructorInstance.binding.connectionBindingId);
+    const ordinaryAfter = store.get(requirement.ownership.tenantId, ordinaryInstance.binding.connectionBindingId);
+    assert.equal(constructorAfter?.version, 1);
+    assert.deepEqual(constructorAfter, constructorCreated);
+    assert.equal(ordinaryAfter?.version, 1);
+    assert.deepEqual(ordinaryAfter, ordinaryCreated);
+
+    // The same isolated result must persist after a simulated restart.
+    const storeAfterRestart = new FileDurableConnectorConnectionStore(dir);
+    const protoReloaded = storeAfterRestart.get(requirement.ownership.tenantId, protoInstance.binding.connectionBindingId);
+    const constructorReloaded = storeAfterRestart.get(requirement.ownership.tenantId, constructorInstance.binding.connectionBindingId);
+    const ordinaryReloaded = storeAfterRestart.get(requirement.ownership.tenantId, ordinaryInstance.binding.connectionBindingId);
+    assert.equal(protoReloaded?.version, 2);
+    assert.equal(protoReloaded?.instance.binding.connectionState, "CONNECTED_UNVERIFIED");
+    assert.equal(constructorReloaded?.version, 1);
+    assert.deepEqual(constructorReloaded, constructorCreated);
+    assert.equal(ordinaryReloaded?.version, 1);
+    assert.deepEqual(ordinaryReloaded, ordinaryCreated);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("M15 (positive replay): legitimate persisted state with every field populated (serviceRef, secretRef, verificationEvidenceRef) still reconstructs correctly after restart", () => {
   const dir = freshStoreDir();
   try {
