@@ -365,6 +365,21 @@ function eventsAreIdenticalReplay(a: ExecutionEconomicsEvent, b: ExecutionEconom
 }
 
 /**
+ * Rev180 F14 (mandatory conflict witness): a differing `capturedAt` alone
+ * is legitimate restart/replay drift - real wall-clock time genuinely moves
+ * on between an original call and a post-crash restart replaying the SAME
+ * settled attempt - so it must never itself be treated as a conflict.
+ * Every OTHER field difference under the same idempotencyKey is still a
+ * genuine conflict, exactly like `eventsAreIdenticalReplay`'s own full
+ * equality: this never silently tolerates materially different content
+ * (usageSource/costBuckets/attribution/time/lineage) merely because it
+ * happens to share an idempotencyKey.
+ */
+function eventsAreIdenticalReplayIgnoringCapturedAt(a: ExecutionEconomicsEvent, b: ExecutionEconomicsEvent): boolean {
+  return JSON.stringify({ ...a, capturedAt: "IGNORED" }) === JSON.stringify({ ...b, capturedAt: "IGNORED" });
+}
+
+/**
  * "Record events idempotently with durable event/idempotency identity
  * semantics so replay/duplicate delivery cannot double-count usage, time
  * or cost." An identical replay of an already-recorded `idempotencyKey`
@@ -389,6 +404,40 @@ export function appendExecutionEconomicsEvent(
   );
   if (existing !== undefined) {
     if (eventsAreIdenticalReplay(existing, event)) {
+      return ledger;
+    }
+    throw new DuplicateIdempotencyKeyConflictError(event.idempotencyKey);
+  }
+  return { events: [...ledger.events, event] };
+}
+
+/**
+ * Rev180 F14 (mandatory conflict witness): the ONE genuine deviation this
+ * module's port-level contract requires from `appendExecutionEconomicsEvent`'s
+ * own full-equality replay check - a restart/replay of the identical settled
+ * attempt may legitimately carry a different wall-clock `capturedAt` than
+ * the original call (see `recordExecutionEconomicsForSettledAttempt`'s own
+ * doc comment in the runtime), and that alone must remain a safe no-op.
+ * Every other field is still compared for exact equality: a same-key event
+ * differing in usageSource/costBuckets/attribution/time/lineage still fails
+ * closed via `DuplicateIdempotencyKeyConflictError`, never silently
+ * swallowed merely because the idempotencyKey matches. Reuses the exact
+ * same tenant+customer+idempotencyKey lookup as `appendExecutionEconomicsEvent`
+ * itself, so the two functions can never drift on WHICH existing event they
+ * compare against - only on HOW they compare it.
+ */
+export function appendExecutionEconomicsEventAllowingCapturedAtDrift(
+  ledger: ExecutionEconomicsLedger,
+  event: ExecutionEconomicsEvent,
+): ExecutionEconomicsLedger {
+  const existing = ledger.events.find(
+    (e) =>
+      e.lineage.tenantId === event.lineage.tenantId &&
+      e.lineage.customerId === event.lineage.customerId &&
+      e.idempotencyKey === event.idempotencyKey,
+  );
+  if (existing !== undefined) {
+    if (eventsAreIdenticalReplayIgnoringCapturedAt(existing, event)) {
       return ledger;
     }
     throw new DuplicateIdempotencyKeyConflictError(event.idempotencyKey);

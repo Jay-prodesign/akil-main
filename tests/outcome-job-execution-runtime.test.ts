@@ -31,7 +31,8 @@ import {
   type QuotaReleaseOutcome,
 } from "../src/domain/execution-quota-admission.js";
 import {
-  appendExecutionEconomicsEvent,
+  appendExecutionEconomicsEventAllowingCapturedAtDrift,
+  DuplicateIdempotencyKeyConflictError,
   EMPTY_EXECUTION_ECONOMICS_LEDGER,
   type ExecutionEconomicsEvent,
   type ExecutionEconomicsLedger,
@@ -244,11 +245,12 @@ class InMemoryQuotaAdmissionStore {
 class InMemoryExecutionEconomicsStore implements ExecutionEconomicsPort {
   private ledger: ExecutionEconomicsLedger = EMPTY_EXECUTION_ECONOMICS_LEDGER;
 
+  // Rev180 F14: reuses the domain's own capturedAt-drift-tolerant replay
+  // check (see its own doc comment) instead of an ad hoc "idempotencyKey
+  // presence alone" no-op, which used to silently swallow a materially
+  // conflicting same-key event.
   recordSettledAttempt(event: ExecutionEconomicsEvent): void {
-    if (this.ledger.events.some((e) => e.lineage.tenantId === event.lineage.tenantId && e.idempotencyKey === event.idempotencyKey)) {
-      return;
-    }
-    this.ledger = appendExecutionEconomicsEvent(this.ledger, event);
+    this.ledger = appendExecutionEconomicsEventAllowingCapturedAtDrift(this.ledger, event);
   }
 
   ledgerSnapshot(): ExecutionEconomicsLedger {
@@ -2716,4 +2718,109 @@ test("QI-F14-no-recovery-blocked (Rev179 F14, load-bearing): an F3 pre-effect st
   assert.equal(second.invoked, false);
   assert.equal(invokeCount, 0, "the reservation was released, never committed - a repeat dispatch must never invoke the worker");
   assert.equal(economics.ledgerSnapshot().events.length, 0, "a released (never-invoked) reservation's canonical latest disposition is RELEASED, not COMMITTED - peekSettlement must report settled: false");
+});
+
+// ---------------------------------------------------------------------------
+// OS-V0-07 Rev180: two residual F14 gaps found on independent exact-head
+// review of the Rev179 correction - (1) the economics port's replay check
+// tolerated ANY same-key event, not only a differing-capturedAt one, so a
+// materially conflicting event under the same idempotencyKey was silently
+// swallowed instead of failing closed; (2) only a pre-persist crash
+// (economics sink throws BEFORE durably recording) was witnessed - the
+// complementary persist-then-throw case (durably recorded, but the
+// caller's acknowledgement is lost) had no witness proving safe recovery.
+// ---------------------------------------------------------------------------
+
+test("QI-F14-conflict-fails-closed (Rev180 F14, load-bearing, mandatory conflict witness): a materially conflicting event under the same idempotencyKey fails closed, never silently swallowed merely because the key matches", () => {
+  const economics = new InMemoryExecutionEconomicsStore();
+  const lineage = {
+    tenantId: tenantScope.tenantId, customerId: customer.customerId, projectId: project.projectId,
+    planId: "plan-runtime", planVersion: 1, jobId: "job-conflict", taskRef: "task-ref-1", runRef: "run-conflict", attemptRef: "1",
+  };
+  const idempotencyKey = JSON.stringify([lineage.tenantId, lineage.customerId, lineage.projectId, lineage.planId, lineage.planVersion, lineage.jobId, lineage.taskRef, lineage.runRef, lineage.attemptRef]);
+  const original: ExecutionEconomicsEvent = {
+    lineage, idempotencyKey, usageSource: "OTHER_ADMITTED",
+    costBuckets: [{ kind: "MARGINAL_CASH", amount: { presence: "UNKNOWN" } }],
+    attribution: { workerRef: "CLAUDE_PRIMARY_ENGINEER" },
+    time: {},
+    capturedAt: "2026-09-26T00:00:00.000Z",
+  };
+  economics.recordSettledAttempt(original);
+  assert.equal(economics.ledgerSnapshot().events.length, 1);
+
+  // A legitimate restart replay (capturedAt alone differs) must still be a safe no-op.
+  economics.recordSettledAttempt({ ...original, capturedAt: "2026-09-26T00:05:00.000Z" });
+  assert.equal(economics.ledgerSnapshot().events.length, 1, "capturedAt-only drift must remain a safe no-op");
+
+  // A materially conflicting event under the SAME idempotencyKey - different
+  // usageSource - must fail closed, never silently no-op merely because the
+  // idempotencyKey matches.
+  assert.throws(
+    () => economics.recordSettledAttempt({ ...original, usageSource: "API_PAYG", capturedAt: "2026-09-26T00:10:00.000Z" }),
+    DuplicateIdempotencyKeyConflictError,
+  );
+  assert.equal(economics.ledgerSnapshot().events.length, 1, "a rejected conflicting event must never be appended");
+
+  // Same probe, but conflicting on attribution instead of usageSource -
+  // proves the check compares full content, not merely one field.
+  assert.throws(
+    () => economics.recordSettledAttempt({ ...original, attribution: { workerRef: "SOME_OTHER_WORKER" }, capturedAt: "2026-09-26T00:15:00.000Z" }),
+    DuplicateIdempotencyKeyConflictError,
+  );
+  assert.equal(economics.ledgerSnapshot().events.length, 1);
+});
+
+class PersistThenThrowExecutionEconomics implements ExecutionEconomicsPort {
+  private armed = true;
+  constructor(private readonly inner: InMemoryExecutionEconomicsStore) {}
+
+  // Rev180 F14: unlike `CrashOnceExecutionEconomics` (which throws BEFORE
+  // ever reaching the inner store, simulating the event never landing at
+  // all), this durably persists to the inner store FIRST and only THEN
+  // throws - simulating a sink that commits the write but loses the
+  // acknowledgement/return to the caller (e.g. a network partition
+  // immediately after a durable write completes).
+  recordSettledAttempt(event: ExecutionEconomicsEvent): void {
+    this.inner.recordSettledAttempt(event);
+    if (this.armed) {
+      this.armed = false;
+      throw new Error("simulated crash: the economics event was durably persisted, but the process died before the caller ever received acknowledgement");
+    }
+  }
+
+  ledgerSnapshot(): ExecutionEconomicsLedger {
+    return this.inner.ledgerSnapshot();
+  }
+}
+
+test("QI-F14-recover-persist-then-throw (Rev180 F14, load-bearing): the economics sink durably persists before throwing (ack lost) - a later re-dispatch recovers to exactly one canonical event, without re-invoking the worker or creating a duplicate", async () => {
+  const job = freshJob("job-qi-f14-persist-then-throw");
+  const store = new InMemoryExecutionEventStore();
+  const quota = new InMemoryQuotaAdmissionStore();
+  const economicsInner = new InMemoryExecutionEconomicsStore();
+  const economics = new PersistThenThrowExecutionEconomics(economicsInner);
+  let invokeCount = 0;
+  const invoker: WorkerInvoker = { role: "CLAUDE_PRIMARY_ENGINEER", invoke: async () => { invokeCount += 1; return { accepted: true }; } };
+
+  await assert.rejects(
+    () =>
+      dispatchOutcomeJobExecutionRun({
+        ...baseDispatch, job, authority, runId: "run-qi-f14-persist-then-throw", correlationId: "corr-qi-f14-persist-then-throw",
+        store, invoker, quotaAdmission: quota, economicsPort: economics,
+      }),
+    /simulated crash/,
+  );
+  assert.equal(invokeCount, 1, "the worker was genuinely invoked once before the simulated ack-loss crash");
+  assert.equal(economics.ledgerSnapshot().events.length, 1, "unlike a pre-persist crash, the economics event WAS durably recorded before the throw");
+
+  // Recovery uses a genuinely different `now` - proving the capturedAt-drift
+  // tolerance and the persist-then-throw recovery path work together, not
+  // merely that a byte-identical re-call happens to match.
+  const recovered = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-qi-f14-persist-then-throw", correlationId: "corr-qi-f14-persist-then-throw",
+    now: "2026-09-26T00:05:00.000Z", store, invoker, quotaAdmission: quota, economicsPort: economics,
+  });
+  assert.equal(recovered.invoked, false, "recovery never invokes the worker");
+  assert.equal(invokeCount, 1, "the worker must never be invoked a second time for an attempt that already genuinely ran");
+  assert.equal(economics.ledgerSnapshot().events.length, 1, "the recovery retry must recognize the already-durably-recorded event (differing only by capturedAt) as a safe no-op, never a second ledger entry");
 });
