@@ -6,6 +6,7 @@ import {
   validatePersistedQuotaReservationEvent,
   assertReplayMatchesOriginalRequest,
   deriveQuotaReservationEventId,
+  findCanonicalLatestForIdempotencyKey,
   quotaScopeKey,
   type QuotaAdmissionScope,
   type QuotaEnvelope,
@@ -17,12 +18,17 @@ import {
   type QuotaReleaseOutcome,
   type QuotaReadModel,
   InvalidQuotaAdmissionError,
+  QuotaReservationAlreadySettledError,
 } from "./execution-quota-admission.js";
-// Rev177 F4 note: `QuotaReservationAlreadySettledError`/`QuotaReservationConflictError`
-// are never caught or constructed here directly - `claimFirstTerminalDisposition`'s
-// callers reconcile a lost race by re-invoking the SAME pure `commitQuotaUsage`/
+// Rev177 F4 note: `QuotaReservationConflictError` is never caught or
+// constructed here directly - `claimFirstTerminalDisposition`'s callers
+// reconcile a lost race by re-invoking the SAME pure `commitQuotaUsage`/
 // `releaseQuotaReservation` reducers against the real winning ledger state,
 // which already throw/return the correct outcome (Rev177 F7).
+// Rev179 F12: `admit()` itself DOES construct `QuotaReservationAlreadySettledError`
+// directly, once its own atomic SQL confirms the canonical latest event for
+// this idempotencyKey has already reached a genuine terminal disposition -
+// see the `already_settled_terminal` branch below.
 import { createCostAmount } from "./execution-economics-attribution.js";
 import type { AsyncQuotaReservationStore } from "../ports/async-quota-reservation-store.js";
 import type { SqlClient } from "../ports/sql-client.js";
@@ -185,19 +191,43 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
       `WITH scope_lock AS (
          SELECT pg_advisory_xact_lock(hashtext($1 || ':' || $2)) AS locked
        ),
+       canonical_latest AS (
+         -- Rev179 F12: the ONE canonical latest event for this exact
+         -- idempotencyKey (across ALL types, ordered by the database-assigned
+         -- id - never caller-supplied occurred_at), mirroring the pure
+         -- findCanonicalLatestForIdempotencyKey reducer this store must stay
+         -- in parity with. This store is strictly append-only: a reservation's
+         -- ORIGINAL RESERVED row is never deleted once it later transitions to
+         -- COMMITTED/RELEASED/RECONCILIATION_REQUIRED, so a query for "any row
+         -- with type = RESERVED" (this CTE's prior shape) would keep matching
+         -- that stale row forever, resurrecting an already-settled reservation
+         -- as if it were still current. Selecting only the single latest row
+         -- closes that gap structurally.
+         SELECT e.* FROM quota_reservation_events e, scope_lock
+         WHERE e.tenant_id = $1 AND e.idempotency_key = $10
+         ORDER BY e.id DESC
+         LIMIT 1
+       ),
        already_reserved AS (
          -- Rev176 "rejected-then-later-admissible recovery": only an existing
          -- RESERVED decision is permanent and blocks re-evaluation - it
          -- already durably consumed real allowance. A REJECTED-only history
          -- consumed nothing, so it must not permanently block this
          -- idempotencyKey from ever being re-evaluated once circumstances
-         -- change.
-         SELECT e.* FROM quota_reservation_events e, scope_lock
-         WHERE e.tenant_id = $1 AND e.idempotency_key = $10 AND e.type = 'RESERVED'
+         -- change. Rev179 F12: this is the canonical latest row, not merely
+         -- any historical RESERVED row - see canonical_latest above.
+         SELECT * FROM canonical_latest WHERE type = 'RESERVED'
+       ),
+       already_settled_terminal AS (
+         -- Rev179 F12: the canonical latest event has already moved on to a
+         -- genuine terminal disposition - this idempotencyKey can never be
+         -- re-admitted, resurrected, or transitioned to a different terminal
+         -- state (mirrors the pure QuotaReservationAlreadySettledError
+         -- contract exactly).
+         SELECT * FROM canonical_latest WHERE type IN ('COMMITTED', 'RELEASED', 'RECONCILIATION_REQUIRED')
        ),
        existing_rejected AS (
-         SELECT e.* FROM quota_reservation_events e, scope_lock
-         WHERE e.tenant_id = $1 AND e.idempotency_key = $10 AND e.type = 'REJECTED'
+         SELECT * FROM canonical_latest WHERE type = 'REJECTED'
        ),
        latest_per_reservation AS (
          -- Rev176: this store is strictly append-only - a COMMITTED or
@@ -234,6 +264,7 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
          SELECT
            CASE
              WHEN EXISTS (SELECT 1 FROM already_reserved) THEN NULL
+             WHEN EXISTS (SELECT 1 FROM already_settled_terminal) THEN NULL
              WHEN (SELECT unit_count FROM current_usage) + 1 > $20::bigint THEN 'REJECTED'
              WHEN $14::bigint IS NULL THEN 'RESERVED'
              WHEN (SELECT has_unknown_committed FROM current_usage) THEN 'REJECTED'
@@ -279,10 +310,12 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
        )
        SELECT * FROM already_reserved
        UNION ALL
+       SELECT * FROM already_settled_terminal
+       UNION ALL
        SELECT * FROM inserted
        UNION ALL
        SELECT * FROM existing_rejected
-         WHERE NOT EXISTS (SELECT 1 FROM already_reserved) AND NOT EXISTS (SELECT 1 FROM inserted)`,
+         WHERE NOT EXISTS (SELECT 1 FROM already_reserved) AND NOT EXISTS (SELECT 1 FROM already_settled_terminal) AND NOT EXISTS (SELECT 1 FROM inserted)`,
       [
         scope.tenantId,
         scopeKey,
@@ -311,6 +344,14 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
       throw new InvalidQuotaAdmissionError("internal error: admit() produced no row - neither a replay nor a fresh decision");
     }
     const event = rowToRecord(row, scope);
+    // Rev179 F12: the canonical latest event for this idempotencyKey has
+    // already reached a genuine terminal disposition - fail closed BEFORE
+    // any replay-match content comparison (a resurrected terminal row could
+    // otherwise legitimately match the original request's own content and
+    // slip through `assertReplayMatchesOriginalRequest` unnoticed).
+    if (event.type === "COMMITTED" || event.type === "RELEASED" || event.type === "RECONCILIATION_REQUIRED") {
+      throw new QuotaReservationAlreadySettledError(event.idempotencyKey, event.type);
+    }
     // Rev177 F2: whatever row this query returned - fresh insert OR a
     // replayed already_reserved/existing_rejected row - must match the
     // CURRENT caller's own identity/envelopeRef/sourceFingerprint/amount
@@ -424,6 +465,27 @@ export class PostgresQuotaReservationStore implements AsyncQuotaReservationStore
     );
     const events = result.rows.map((row) => rowToRecord(row, envelope.scope));
     return projectQuotaReadModel({ events }, envelope);
+  }
+
+  /**
+   * Rev179 F14: a pure, non-mutating read - reuses the exact same
+   * `readReservationLedger()` query `commit()`/`release()` already use, then
+   * the SAME canonical-latest lookup the pure domain reducers rely on. Never
+   * appends, never fabricates a commit that did not really happen.
+   */
+  async peekSettlement(input: {
+    readonly identity: QuotaReservationIdentity;
+    readonly idempotencyKey: unknown;
+  }): Promise<{ readonly settled: true; readonly event: QuotaReservationEvent } | { readonly settled: false }> {
+    if (typeof input.idempotencyKey !== "string" || input.idempotencyKey.trim().length === 0) {
+      throw new InvalidQuotaAdmissionError("idempotencyKey must be a non-empty string");
+    }
+    const ledger = await this.readReservationLedger(input.identity, input.idempotencyKey);
+    const latest = findCanonicalLatestForIdempotencyKey(ledger, input.identity.scope.tenantId, input.idempotencyKey);
+    if (latest !== undefined && (latest.type === "COMMITTED" || latest.type === "RECONCILIATION_REQUIRED")) {
+      return { settled: true, event: latest };
+    }
+    return { settled: false };
   }
 
   private async readReservationLedger(identity: QuotaReservationIdentity, idempotencyKey: unknown): Promise<QuotaLedger> {

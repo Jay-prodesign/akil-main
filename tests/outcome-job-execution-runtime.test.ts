@@ -20,6 +20,7 @@ import {
   admitQuotaReservation,
   commitQuotaUsage,
   releaseQuotaReservation,
+  findCanonicalLatestForIdempotencyKey,
   EMPTY_QUOTA_LEDGER,
   StaleQuotaEnvelopeError,
   type QuotaEnvelope,
@@ -53,6 +54,7 @@ import {
   type ControlOperationInvoker,
   type CurrentQuotaEnvelopeResolver,
   type ExecutionEconomicsPort,
+  type QuotaSettlementPeek,
 } from "../src/application/outcome-job-execution-runtime.js";
 
 class InMemoryExecutionEventStore implements ExecutionEventStore {
@@ -218,6 +220,17 @@ class InMemoryQuotaAdmissionStore {
   ledgerSnapshot(): QuotaLedger {
     return this.ledger;
   }
+
+  peekSettlement(input: { identity: QuotaReservationIdentity; idempotencyKey: unknown }): QuotaSettlementPeek {
+    if (typeof input.idempotencyKey !== "string") {
+      throw new Error("idempotencyKey must be a string");
+    }
+    const latest = findCanonicalLatestForIdempotencyKey(this.ledger, input.identity.scope.tenantId, input.idempotencyKey);
+    if (latest !== undefined && (latest.type === "COMMITTED" || latest.type === "RECONCILIATION_REQUIRED")) {
+      return { settled: true, event: latest };
+    }
+    return { settled: false };
+  }
 }
 
 /**
@@ -276,6 +289,9 @@ class NeverCalledQuotaAdmission {
   }
   release(): never {
     throw new Error("quota release must never be invoked for this scenario");
+  }
+  peekSettlement(): never {
+    throw new Error("quota peekSettlement must never be invoked for this scenario");
   }
 }
 
@@ -2110,6 +2126,10 @@ class PersistThenThrowOnceQuotaAdmission {
   }): QuotaReleaseOutcome {
     return this.inner.release(input);
   }
+
+  peekSettlement(input: { identity: QuotaReservationIdentity; idempotencyKey: unknown }): QuotaSettlementPeek {
+    return this.inner.peekSettlement(input);
+  }
 }
 
 test("QI-crash-dispatch (Rev176, load-bearing): a crash immediately after the reservation persists but before ATTEMPT_STARTED is appended is restart-safe - recovery replays the SAME reservation and invokes exactly once", async () => {
@@ -2328,6 +2348,7 @@ test("QI-F3-order (Rev177 F3 SAFE ORDER, load-bearing): the BLOCKED attempt-clos
     release(): never {
       throw new Error("simulated crash: release() never completed after the BLOCKED event was already durably appended");
     }
+    peekSettlement(input: Parameters<InMemoryQuotaAdmissionStore["peekSettlement"]>[0]) { return this.inner.peekSettlement(input); }
   }
   const quotaAdmission = new ReleaseFailsQuotaAdmission(innerQuota);
   let invokeCount = 0;
@@ -2565,4 +2586,134 @@ test("QI-F11-restart-once-only (Rev177 F11, load-bearing): the port's own idempo
   economics.recordSettledAttempt(replay);
   assert.equal(economics.ledgerSnapshot().events.length, 1, "a restart/replay of the identical settled attempt must never create a second ledger entry, even with a different capturedAt");
   assert.equal(economics.ledgerSnapshot().events[0]!.capturedAt, original.capturedAt, "the FIRST durably recorded event wins - a later replay never overwrites it");
+});
+
+// ---------------------------------------------------------------------------
+// OS-V0-07 Rev179 F14: a crash between `commitQuotaForAttempt` and
+// `recordExecutionEconomicsForSettledAttempt` completing must never
+// permanently lose the economics correlation - a later re-dispatch for the
+// SAME already-started attempt must recover it, without ever re-invoking the
+// worker or re-committing quota.
+// ---------------------------------------------------------------------------
+
+class CrashOnceExecutionEconomics implements ExecutionEconomicsPort {
+  private armed = true;
+  constructor(private readonly inner: InMemoryExecutionEconomicsStore) {}
+
+  recordSettledAttempt(event: ExecutionEconomicsEvent): void {
+    if (this.armed) {
+      this.armed = false;
+      throw new Error("simulated crash: quota was already durably committed, but the process died before the economics event could be durably recorded");
+    }
+    this.inner.recordSettledAttempt(event);
+  }
+
+  ledgerSnapshot(): ExecutionEconomicsLedger {
+    return this.inner.ledgerSnapshot();
+  }
+}
+
+test("QI-F14-recover-dispatch (Rev179 F14, load-bearing): a crash between quota commit and economics recording is recovered by a later re-dispatch, without re-invoking the worker or re-committing quota", async () => {
+  const job = freshJob("job-qi-f14-dispatch");
+  const store = new InMemoryExecutionEventStore();
+  const quota = new InMemoryQuotaAdmissionStore();
+  const economicsInner = new InMemoryExecutionEconomicsStore();
+  const economics = new CrashOnceExecutionEconomics(economicsInner);
+  let invokeCount = 0;
+  const invoker: WorkerInvoker = { role: "CLAUDE_PRIMARY_ENGINEER", invoke: async () => { invokeCount += 1; return { accepted: true }; } };
+
+  await assert.rejects(
+    () =>
+      dispatchOutcomeJobExecutionRun({
+        ...baseDispatch, job, authority, runId: "run-qi-f14-dispatch", correlationId: "corr-qi-f14-dispatch",
+        store, invoker, quotaAdmission: quota, economicsPort: economics,
+      }),
+    /simulated crash/,
+  );
+  assert.equal(invokeCount, 1, "the worker was genuinely invoked once before the simulated crash");
+  assert.equal(economics.ledgerSnapshot().events.length, 0, "the crash means the economics event never durably landed");
+
+  const stateAfterCrash = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, "run-qi-f14-dispatch");
+  assert.equal(stateAfterCrash?.currentAttempt, 1, "ATTEMPT_STARTED for attempt 1 is already durable - a repeat dispatch must hit the currentAttempt >= 1 recovery guard, never re-admission");
+
+  const quotaEvents = quota.ledgerSnapshot().events.filter((e) => e.identity.jobId === job.jobId && e.identity.runId === "run-qi-f14-dispatch");
+  assert.equal(quotaEvents.filter((e) => e.type === "COMMITTED").length, 1, "quota was already durably committed before the simulated crash");
+
+  // Simulated restart: a later re-dispatch call for the exact same run.
+  const recovered = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-qi-f14-dispatch", correlationId: "corr-qi-f14-dispatch",
+    store, invoker, quotaAdmission: quota, economicsPort: economics,
+  });
+  assert.equal(recovered.invoked, false, "the currentAttempt >= 1 guard's own pure no-op contract is unchanged - recovery never invokes the worker");
+  assert.equal(invokeCount, 1, "the worker must never be invoked a second time for an attempt that already genuinely ran");
+
+  const quotaEventsAfter = quota.ledgerSnapshot().events.filter((e) => e.identity.jobId === job.jobId && e.identity.runId === "run-qi-f14-dispatch");
+  assert.equal(quotaEventsAfter.length, quotaEvents.length, "quota must never be re-committed - the recovery path only peeks, it never commits");
+
+  const recoveredEvents = economics.ledgerSnapshot().events;
+  assert.equal(recoveredEvents.length, 1, "the missed economics event is recovered by the next dispatch call, exactly once");
+  assert.equal(recoveredEvents[0]!.lineage.runRef, "run-qi-f14-dispatch");
+  assert.equal(recoveredEvents[0]!.lineage.attemptRef, "1");
+
+  // A further repeat dispatch call must remain a safe no-op forever after.
+  const third = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-qi-f14-dispatch", correlationId: "corr-qi-f14-dispatch",
+    store, invoker, quotaAdmission: quota, economicsPort: economics,
+  });
+  assert.equal(third.invoked, false);
+  assert.equal(invokeCount, 1);
+  assert.equal(economics.ledgerSnapshot().events.length, 1, "a further repeat dispatch call must never record a second economics event");
+});
+
+test("QI-F14-no-recovery-rejected (Rev179 F14, load-bearing): a REJECTED admission never triggers a false-positive economics recovery - peekSettlement correctly reports unsettled", async () => {
+  const job = freshJob("job-qi-f14-rejected");
+  const store = new InMemoryExecutionEventStore();
+  const economics = new InMemoryExecutionEconomicsStore();
+  const { store: quota, envelope: smallEnvelope, resolver: smallEnvelopeResolver } = smallLimitQuota(50);
+  let invokeCount = 0;
+  const invoker: WorkerInvoker = { role: "CLAUDE_PRIMARY_ENGINEER", invoke: async () => { invokeCount += 1; return { accepted: true }; } };
+
+  const first = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-qi-f14-rejected", correlationId: "corr-qi-f14-rejected",
+    store, invoker, quotaAdmission: quota, quotaEnvelope: smallEnvelope, quotaEnvelopeResolver: smallEnvelopeResolver,
+    economicsPort: economics, estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
+  });
+  assert.equal(first.invoked, false);
+  assert.equal(invokeCount, 0);
+
+  const second = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-qi-f14-rejected", correlationId: "corr-qi-f14-rejected",
+    store, invoker, quotaAdmission: quota, quotaEnvelope: smallEnvelope, quotaEnvelopeResolver: smallEnvelopeResolver,
+    economicsPort: economics, estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
+  });
+  assert.equal(second.invoked, false);
+  assert.equal(invokeCount, 0, "attempt 1 never started (REJECTED before ATTEMPT_STARTED), so currentAttempt stays 0 and a repeat call must never invoke the worker");
+  assert.equal(economics.ledgerSnapshot().events.length, 0, "a REJECTED admission's own idempotencyKey never reaches a COMMITTED/RECONCILIATION_REQUIRED disposition - peekSettlement must report settled: false, so no economics event is ever fabricated");
+});
+
+test("QI-F14-no-recovery-blocked (Rev179 F14, load-bearing): an F3 pre-effect stale-envelope BLOCKED attempt (released, never invoked) never triggers a false-positive economics recovery", async () => {
+  const job = freshJob("job-qi-f14-blocked");
+  const store = new InMemoryExecutionEventStore();
+  const economics = new InMemoryExecutionEconomicsStore();
+  const quota = new InMemoryQuotaAdmissionStore();
+  const envelopeB = createQuotaEnvelope({
+    scope: quotaScope, envelopeRef: "envelope-runtime-v2", sourceFingerprint: "qfp-2", unitLimit: 1_000_000,
+  });
+  let invokeCount = 0;
+  const invoker: WorkerInvoker = { role: "CLAUDE_PRIMARY_ENGINEER", invoke: async () => { invokeCount += 1; return { accepted: true }; } };
+
+  const first = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-qi-f14-blocked", correlationId: "corr-qi-f14-blocked", store, invoker,
+    quotaAdmission: quota, quotaEnvelopeResolver: { resolveCurrentQuotaEnvelope: () => envelopeB }, economicsPort: economics,
+  });
+  assert.equal(invokeCount, 0);
+  assert.equal(first.state.status, "BLOCKED");
+
+  const second = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-qi-f14-blocked", correlationId: "corr-qi-f14-blocked", store, invoker,
+    quotaAdmission: quota, quotaEnvelopeResolver: { resolveCurrentQuotaEnvelope: () => envelopeB }, economicsPort: economics,
+  });
+  assert.equal(second.invoked, false);
+  assert.equal(invokeCount, 0, "the reservation was released, never committed - a repeat dispatch must never invoke the worker");
+  assert.equal(economics.ledgerSnapshot().events.length, 0, "a released (never-invoked) reservation's canonical latest disposition is RELEASED, not COMMITTED - peekSettlement must report settled: false");
 });

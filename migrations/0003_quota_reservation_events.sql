@@ -102,8 +102,24 @@ CREATE TABLE IF NOT EXISTS quota_reservation_events (
     CONSTRAINT quota_reservation_events_reported_amount_coherent CHECK (
         amount_presence IS DISTINCT FROM 'REPORTED' OR (amount_minor_units IS NOT NULL AND currency IS NOT NULL)
     ),
-    CONSTRAINT quota_reservation_events_reserved_requires_reported CHECK (
-        type != 'RESERVED' OR amount_presence = 'REPORTED'
+    -- Rev179 F13: relaxed from requiring `amount_presence = 'REPORTED'` -
+    -- Rev177 F10 legitimately allows a RESERVED row with UNKNOWN
+    -- amount_presence once the envelope has no monetaryLimit to protect (the
+    -- unit floor alone governs, and a genuinely-unknown cost estimate is no
+    -- longer unconditionally inadmissible in that case). What remains
+    -- structurally impossible truth is a RESERVED row with NO amount_presence
+    -- recorded at all - `admitQuotaReservation` always records SOME presence
+    -- (REPORTED or UNKNOWN) on every RESERVED event it ever constructs.
+    -- Rev179 F13: relaxed from requiring `amount_presence = 'REPORTED'` -
+    -- Rev177 F10 legitimately allows a RESERVED row with UNKNOWN
+    -- amount_presence once the envelope has no monetaryLimit to protect (the
+    -- unit floor alone governs, and a genuinely-unknown cost estimate is no
+    -- longer unconditionally inadmissible in that case). What remains
+    -- structurally impossible truth is a RESERVED row with NO amount_presence
+    -- recorded at all - `admitQuotaReservation` always records SOME presence
+    -- (REPORTED or UNKNOWN) on every RESERVED event it ever constructs.
+    CONSTRAINT quota_reservation_events_reserved_requires_amount_presence CHECK (
+        type != 'RESERVED' OR amount_presence IS NOT NULL
     )
 );
 

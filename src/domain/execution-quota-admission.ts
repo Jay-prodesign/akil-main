@@ -404,7 +404,14 @@ function appendToLedger(ledger: QuotaLedger, event: QuotaReservationEvent): Quot
  * caller tries to re-admit against an idempotencyKey that has already
  * terminally settled, rather than resurrecting or echoing a stale decision.
  */
-function findCanonicalLatestForIdempotencyKey(ledger: QuotaLedger, tenantId: TenantScope["tenantId"], idempotencyKey: string): QuotaReservationEvent | undefined {
+/**
+ * Rev179 F14: exported so a store's own `peekSettlement` (a pure,
+ * non-mutating read of whether a reservation has already reached a genuine
+ * terminal disposition) can reuse the SAME canonical-latest lookup
+ * `admitQuotaReservation`/`commitQuotaUsage` themselves rely on, rather than
+ * risk an independently-reimplemented, possibly-drifted copy.
+ */
+export function findCanonicalLatestForIdempotencyKey(ledger: QuotaLedger, tenantId: TenantScope["tenantId"], idempotencyKey: string): QuotaReservationEvent | undefined {
   let latest: QuotaReservationEvent | undefined;
   for (const event of ledger.events) {
     if (event.identity.scope.tenantId === tenantId && event.idempotencyKey === idempotencyKey) {

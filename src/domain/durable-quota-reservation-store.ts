@@ -6,8 +6,10 @@ import {
   releaseQuotaReservation,
   projectQuotaReadModel,
   validatePersistedQuotaReservationEvent,
+  findCanonicalLatestForIdempotencyKey,
   quotaScopeKey,
   EMPTY_QUOTA_LEDGER,
+  InvalidQuotaAdmissionError,
   type QuotaAdmissionScope,
   type QuotaEnvelope,
   type QuotaReservationIdentity,
@@ -134,5 +136,24 @@ export class FileDurableQuotaReservationStore {
 
   getReadModel(envelope: QuotaEnvelope): QuotaReadModel {
     return projectQuotaReadModel(this.readLedger(envelope.scope), envelope);
+  }
+
+  /**
+   * Rev179 F14: a pure, non-mutating read - never appends, never fabricates
+   * a commit that did not really happen.
+   */
+  peekSettlement(input: {
+    readonly identity: QuotaReservationIdentity;
+    readonly idempotencyKey: unknown;
+  }): { readonly settled: true; readonly event: QuotaReservationEvent } | { readonly settled: false } {
+    if (typeof input.idempotencyKey !== "string" || input.idempotencyKey.trim().length === 0) {
+      throw new InvalidQuotaAdmissionError("idempotencyKey must be a non-empty string");
+    }
+    const ledger = this.readLedger(input.identity.scope);
+    const latest = findCanonicalLatestForIdempotencyKey(ledger, input.identity.scope.tenantId, input.idempotencyKey);
+    if (latest !== undefined && (latest.type === "COMMITTED" || latest.type === "RECONCILIATION_REQUIRED")) {
+      return { settled: true, event: latest };
+    }
+    return { settled: false };
   }
 }

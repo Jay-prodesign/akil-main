@@ -28,6 +28,7 @@ import {
   type QuotaAdmissionOutcome,
   type QuotaCommitOutcome,
   type QuotaReleaseOutcome,
+  type QuotaReservationEvent,
 } from "../domain/execution-quota-admission.js";
 import {
   createExecutionEconomicsLineage,
@@ -197,7 +198,24 @@ export interface QuotaAdmissionPort {
     readonly occurredAt: unknown;
     readonly reason?: unknown;
   }): QuotaReleaseOutcome | Promise<QuotaReleaseOutcome>;
+  /**
+   * Rev179 F14: a PURE, non-mutating read of whether this exact reservation
+   * has already reached a genuine terminal COMMITTED/RECONCILIATION_REQUIRED
+   * disposition - used ONLY to detect a crash between a durable quota commit
+   * and economics correlation, never to decide whether to invoke or commit.
+   * Never fabricates a commit that did not really happen: a RESERVED,
+   * REJECTED, RELEASED, or nonexistent reservation all report
+   * `{ settled: false }`.
+   */
+  peekSettlement(input: {
+    readonly identity: QuotaReservationIdentity;
+    readonly idempotencyKey: unknown;
+  }): QuotaSettlementPeek | Promise<QuotaSettlementPeek>;
 }
+
+export type QuotaSettlementPeek =
+  | { readonly settled: true; readonly event: QuotaReservationEvent }
+  | { readonly settled: false };
 
 /**
  * OS-V0-07 (Rev177 F11): "correlate quota settlement to
@@ -272,6 +290,69 @@ async function recordExecutionEconomicsForSettledAttempt(input: {
     capturedAt: input.now,
   });
   await input.economicsPort.recordSettledAttempt(event);
+}
+
+/**
+ * Rev179 F14: recovers a genuinely-durable-but-uncorrelated economics gap - a
+ * real invocation already durably committed quota (canonical-latest
+ * COMMITTED/RECONCILIATION_REQUIRED - see `peekSettlement`'s own contract)
+ * for this exact reservation, but the process crashed in the window between
+ * `commitQuotaForAttempt` and `recordExecutionEconomicsForSettledAttempt`
+ * completing, so a later re-dispatch/re-retry call hits the pre-existing
+ * `state.currentAttempt >= 1` / `!started.created` early-exit guard and would
+ * otherwise silently no-op forever without ever retrying the economics call.
+ * Never invoked (a pure no-op) when the reservation never reached a genuine
+ * settled disposition - RESERVED, REJECTED, RELEASED, or nonexistent all
+ * report `settled: false` - so this can never fabricate economics for an
+ * attempt that was never truly invoked. `recordExecutionEconomicsForSettledAttempt`
+ * is itself idempotent at the port level, so calling it again on an
+ * already-fully-recorded attempt (the overwhelmingly common case: this runs
+ * on EVERY repeat no-op dispatch/retry call, not only after a genuine crash)
+ * is always a safe no-op, never a duplicate ledger entry.
+ */
+async function recoverMissedEconomicsIfSettled(input: {
+  readonly quotaAdmission: QuotaAdmissionPort;
+  readonly economicsPort: ExecutionEconomicsPort;
+  readonly quotaEnvelope: QuotaEnvelope;
+  readonly tenantScope: TenantScope;
+  readonly customer: Customer;
+  readonly project: Project;
+  readonly job: OutcomeJob;
+  readonly runId: string;
+  readonly attempt: number;
+  readonly currentActivationPlanId: string;
+  readonly currentActivationPlanVersion: number;
+  readonly economicsTaskRef: string;
+  readonly economicsUsageSource: unknown;
+  readonly workerRole: string;
+  readonly now: unknown;
+}): Promise<void> {
+  const identity = createQuotaReservationIdentity({
+    scope: input.quotaEnvelope.scope,
+    jobId: input.job.jobId,
+    runId: input.runId,
+    attemptRef: String(input.attempt),
+  });
+  const idempotencyKey = deriveQuotaReservationIdempotencyKey(identity);
+  const peek = await input.quotaAdmission.peekSettlement({ identity, idempotencyKey });
+  if (!peek.settled) {
+    return;
+  }
+  await recordExecutionEconomicsForSettledAttempt({
+    economicsPort: input.economicsPort,
+    tenantScope: input.tenantScope,
+    customer: input.customer,
+    project: input.project,
+    job: input.job,
+    runId: input.runId,
+    attempt: input.attempt,
+    currentActivationPlanId: input.currentActivationPlanId,
+    currentActivationPlanVersion: input.currentActivationPlanVersion,
+    economicsTaskRef: input.economicsTaskRef,
+    economicsUsageSource: input.economicsUsageSource,
+    workerRole: input.workerRole,
+    now: input.now,
+  });
 }
 
 /**
@@ -700,6 +781,26 @@ export async function dispatchOutcomeJobExecutionRun(
   // made it durable) is unaffected - it falls through to admission exactly
   // as before, since that attempt has NOT yet started.
   if (state.currentAttempt >= 1) {
+    // Rev179 F14: this repeat call may be recovering from a crash between
+    // `commitQuotaForAttempt` and `recordExecutionEconomicsForSettledAttempt`
+    // for attempt 1 - see `recoverMissedEconomicsIfSettled`'s own doc comment.
+    await recoverMissedEconomicsIfSettled({
+      quotaAdmission: input.quotaAdmission,
+      economicsPort: input.economicsPort,
+      quotaEnvelope: input.quotaEnvelope,
+      tenantScope: input.tenantScope,
+      customer: input.customer,
+      project: input.project,
+      job: input.job,
+      runId: acceptedEvent.runId,
+      attempt: 1,
+      currentActivationPlanId: input.currentActivationPlanId,
+      currentActivationPlanVersion: input.currentActivationPlanVersion,
+      economicsTaskRef: input.economicsTaskRef,
+      economicsUsageSource: input.economicsUsageSource,
+      workerRole: input.invoker.role,
+      now: input.now,
+    });
     return { state, invoked: false };
   }
 
@@ -1000,6 +1101,32 @@ export async function retryOutcomeJobExecutionAttempt(
   // decides who may commit/release the reservation every racer already
   // independently, idempotently agreed on above.
   if (!started.created) {
+    // Rev179 F14: defense-in-depth mirror of `dispatchOutcomeJobExecutionRun`'s
+    // identical recovery - see `recoverMissedEconomicsIfSettled`'s own doc
+    // comment. (In practice this specific crash window leaves the attempt
+    // durably RUNNING, which `RETRYABLE_ATTEMPT_STATUSES` already refuses
+    // above before this point is ever reached again for the SAME attempt -
+    // dispatch's own guard is the actually-reachable recovery path for
+    // attempt 1 - but this call is kept here too, both for parity with
+    // Rev179's own explicit two-guard framing and as a safety net against any
+    // future change to the retryability gate.)
+    await recoverMissedEconomicsIfSettled({
+      quotaAdmission: input.quotaAdmission,
+      economicsPort: input.economicsPort,
+      quotaEnvelope: input.quotaEnvelope,
+      tenantScope: input.tenantScope,
+      customer: input.customer,
+      project: input.project,
+      job: input.job,
+      runId: freshState.runId,
+      attempt: nextAttempt,
+      currentActivationPlanId: input.currentActivationPlanId,
+      currentActivationPlanVersion: input.currentActivationPlanVersion,
+      economicsTaskRef: input.economicsTaskRef,
+      economicsUsageSource: input.economicsUsageSource,
+      workerRole: input.invoker.role,
+      now: input.now,
+    });
     return { state, invoked: false };
   }
 

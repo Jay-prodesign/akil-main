@@ -1,11 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createTenantScope } from "../src/domain/tenant-scope.js";
 import {
   createQuotaAdmissionScope,
   createQuotaEnvelope,
   createQuotaReservationIdentity,
   QuotaReservationConflictError,
+  QuotaReservationAlreadySettledError,
 } from "../src/domain/execution-quota-admission.js";
 import { PostgresQuotaReservationStore } from "../src/domain/postgres-quota-reservation-store.js";
 import type { SqlClient } from "../src/ports/sql-client.js";
@@ -105,11 +109,22 @@ class FakeSqlClient implements SqlClient {
         string, number, number | null, string, string | null, string, string, string, number,
       ];
 
-      const alreadyReserved = this.rows.find((r) => r.tenant_id === tenantId && r.idempotency_key === idempotencyKey && r.type === "RESERVED");
+      // Rev179 F12: the canonical LATEST row for this idempotencyKey - not
+      // merely any historical row of a given type, which would let a stale
+      // RESERVED row (still present, since this store is append-only) be
+      // found and replayed even after it has since moved on to a genuine
+      // terminal disposition (COMMITTED/RELEASED/RECONCILIATION_REQUIRED).
+      const canonicalLatest = this.rows
+        .filter((r) => r.tenant_id === tenantId && r.idempotency_key === idempotencyKey)
+        .at(-1);
+      if (canonicalLatest !== undefined && (canonicalLatest.type === "COMMITTED" || canonicalLatest.type === "RELEASED" || canonicalLatest.type === "RECONCILIATION_REQUIRED")) {
+        return { rows: [canonicalLatest] as unknown as ReadonlyArray<Row> };
+      }
+      const alreadyReserved = canonicalLatest?.type === "RESERVED" ? canonicalLatest : undefined;
       if (alreadyReserved !== undefined) {
         return { rows: [alreadyReserved] as unknown as ReadonlyArray<Row> };
       }
-      const existingRejected = this.rows.find((r) => r.tenant_id === tenantId && r.idempotency_key === idempotencyKey && r.type === "REJECTED");
+      const existingRejected = canonicalLatest?.type === "REJECTED" ? canonicalLatest : undefined;
 
       // Rev176/Rev177 F10: this store is append-only - a COMMITTED/RELEASED
       // transition never deletes/updates its reservation's earlier RESERVED
@@ -534,4 +549,90 @@ test("PG15 (Rev177 F6, rescoped, load-bearing): UNKNOWN committed monetary usage
     requestedAmount: { presence: "UNKNOWN" }, occurredAt: "2026-09-29T00:00:05.000Z",
   });
   assert.equal(admittedD.status, "RESERVED", "a unit-floor-only scope has no monetary allowance to protect, so a prior UNKNOWN commit never blocks a later admission");
+});
+
+// ---------------------------------------------------------------------------
+// Rev179 F12: the real atomic admit() SQL must respect the canonical LATEST
+// lifecycle state for an idempotencyKey, not merely whether a RESERVED row
+// exists somewhere in this append-only table's history - a same-key admit()
+// call after the reservation has already moved on to COMMITTED/RELEASED must
+// fail closed as already-settled, never resurrect the stale RESERVED row.
+// ---------------------------------------------------------------------------
+
+test("PG16 (Rev179 F12, load-bearing): a same-idempotencyKey admit() after COMMITTED fails closed through the real atomic SQL, never resurrecting the stale RESERVED row", async () => {
+  const client = new FakeSqlClient();
+  const store = new PostgresQuotaReservationStore(client);
+  const identity = createQuotaReservationIdentity({ scope, jobId: "job-16", runId: "run-16", attemptRef: "1" });
+  const requestedAmount = { presence: "REPORTED" as const, amountMinorUnits: 50, currency: "USD" };
+  const admitted = await store.admit({ envelope, identity, idempotencyKey: "key-1", requestedAmount, occurredAt: "2026-09-29T00:00:00.000Z" });
+  assert.equal(admitted.status, "RESERVED");
+  const committed = await store.commit({ identity, idempotencyKey: "key-1", actualAmount: requestedAmount, occurredAt: "2026-09-29T00:00:01.000Z" });
+  assert.equal(committed.status, "COMMITTED");
+
+  // The reservation's ORIGINAL RESERVED row is still physically present in
+  // this append-only table (client.rows) - only the fix to admit()'s own
+  // canonical-latest lookup prevents it from being found and replayed.
+  assert.equal(client.rows.filter((r) => r.idempotency_key === "key-1" && r.type === "RESERVED").length, 1, "the original RESERVED row must still be physically present, never deleted");
+
+  await assert.rejects(
+    () => store.admit({ envelope, identity, idempotencyKey: "key-1", requestedAmount, occurredAt: "2026-09-29T00:00:02.000Z" }),
+    QuotaReservationAlreadySettledError,
+  );
+  assert.equal(client.rows.filter((r) => r.idempotency_key === "key-1").length, 2, "no new row may be inserted - the settled-terminal check must short-circuit before any insert attempt");
+});
+
+test("PG17 (Rev179 F12, load-bearing): a same-idempotencyKey admit() after RELEASED fails closed through the real atomic SQL, never resurrecting the stale RESERVED row", async () => {
+  const client = new FakeSqlClient();
+  const store = new PostgresQuotaReservationStore(client);
+  const identity = createQuotaReservationIdentity({ scope, jobId: "job-17", runId: "run-17", attemptRef: "1" });
+  const requestedAmount = { presence: "REPORTED" as const, amountMinorUnits: 50, currency: "USD" };
+  const admitted = await store.admit({ envelope, identity, idempotencyKey: "key-1", requestedAmount, occurredAt: "2026-09-29T00:00:00.000Z" });
+  assert.equal(admitted.status, "RESERVED");
+  const released = await store.release({ identity, idempotencyKey: "key-1", occurredAt: "2026-09-29T00:00:01.000Z" });
+  assert.equal(released.status, "RELEASED");
+
+  await assert.rejects(
+    () => store.admit({ envelope, identity, idempotencyKey: "key-1", requestedAmount, occurredAt: "2026-09-29T00:00:02.000Z" }),
+    QuotaReservationAlreadySettledError,
+  );
+  assert.equal(client.rows.filter((r) => r.idempotency_key === "key-1" && r.type === "RESERVED").length, 1, "a RELEASED reservation must never be re-reserved by a later same-key admission");
+});
+
+// ---------------------------------------------------------------------------
+// Rev179 F13: migration 0003's own schema-level CHECK constraint must stay
+// reconciled with Rev177 F10's legitimate RESERVED+UNKNOWN shape (a
+// unit-only admission with no monetaryLimit to protect). This repository has
+// no live database FakeSqlClient can execute a real CHECK constraint
+// against (per this migration's own "not live-applied" doc comment), so this
+// witness reads the migration's actual constraint text and mirrors its exact
+// boolean expression in a small local predicate - the closest available
+// proof, short of a live Postgres, that the schema and the application-level
+// decision it must permit genuinely agree.
+// ---------------------------------------------------------------------------
+
+test("PG18 (Rev179 F13, load-bearing): migration 0003's RESERVED CHECK constraint permits Rev177 F10's legitimate RESERVED+UNKNOWN shape, and still rejects a RESERVED row with no amount_presence at all", () => {
+  const migrationPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "migrations", "0003_quota_reservation_events.sql");
+  const migrationText = readFileSync(migrationPath, "utf8");
+
+  assert.doesNotMatch(
+    migrationText,
+    /CONSTRAINT\s+quota_reservation_events_reserved_requires_reported\s+CHECK\s*\(\s*type\s*!=\s*'RESERVED'\s*OR\s*amount_presence\s*=\s*'REPORTED'\s*\)/,
+    "the old over-strict constraint (RESERVED requires REPORTED) must no longer be present - it would reject Rev177 F10's legitimate RESERVED+UNKNOWN unit-only shape",
+  );
+  assert.match(
+    migrationText,
+    /CONSTRAINT\s+quota_reservation_events_reserved_requires_amount_presence\s+CHECK\s*\(\s*type\s*!=\s*'RESERVED'\s*OR\s*amount_presence\s+IS\s+NOT\s+NULL\s*\)/,
+    "the replacement constraint must require only that a RESERVED row carry SOME amount_presence, never specifically REPORTED",
+  );
+
+  // Mirrors the migration's own CHECK expression exactly:
+  //   type != 'RESERVED' OR amount_presence IS NOT NULL
+  function satisfiesCheck(type: string, amountPresence: string | null): boolean {
+    return type !== "RESERVED" || amountPresence !== null;
+  }
+
+  assert.equal(satisfiesCheck("RESERVED", "REPORTED"), true, "a REPORTED RESERVED row (the ordinary monetary-ceiling-configured shape) must still be permitted");
+  assert.equal(satisfiesCheck("RESERVED", "UNKNOWN"), true, "Rev177 F10's unit-only UNKNOWN RESERVED shape must be permitted by the real schema, not merely by application-level validation");
+  assert.equal(satisfiesCheck("RESERVED", null), false, "a RESERVED row with no amount_presence recorded at all remains structurally impossible truth and must still be rejected");
+  assert.equal(satisfiesCheck("COMMITTED", null), true, "the constraint is scoped to type = RESERVED only - it says nothing about other event types");
 });
