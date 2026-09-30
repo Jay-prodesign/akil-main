@@ -1,4 +1,4 @@
-import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary } from "./internal-os-view-state.js";
+import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, AdminResourceBindingViewState, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary } from "./internal-os-view-state.js";
 
 export interface RenderedInternalOsPage {
   readonly status: number;
@@ -233,6 +233,52 @@ function renderProductsBody(view: ProductsViewState): string {
   </table>`;
 }
 
+const RESOURCE_BINDING_STATE_TONE: Record<"READY" | "ACTION_REQUIRED" | "BLOCKED", "success" | "warning" | "danger"> = {
+  READY: "success",
+  ACTION_REQUIRED: "warning",
+  BLOCKED: "danger",
+};
+
+/**
+ * Rev183 F3: read-only explainability - what is bound, missing/blocked, and
+ * exactly why - never a control. No form, button, or link to change
+ * anything appears here.
+ */
+function renderResourceBindingCard(view: AdminResourceBindingViewState): string {
+  if (view.kind === "NOT_ACTIVE") {
+    return `
+  <section aria-labelledby="admin-resource-binding-heading" class="card">
+    <h2 id="admin-resource-binding-heading">Resource binding</h2>
+    <p class="status status-neutral" role="status">NOT ACTIVE</p>
+    <p>This area is not yet connected to a live data source in this build.</p>
+  </section>`;
+  }
+  if (view.kind === "NOT_BOUND") {
+    return `
+  <section aria-labelledby="admin-resource-binding-heading" class="card">
+    <h2 id="admin-resource-binding-heading">Resource binding</h2>
+    <p class="status status-neutral" role="status">NOT BOUND</p>
+    <p>This organization has not yet been bootstrapped with a resource binding.</p>
+  </section>`;
+  }
+  const tone = RESOURCE_BINDING_STATE_TONE[view.summary.state];
+  const reasonHtml =
+    view.summary.nextRequiredActionReason !== undefined
+      ? `<p>${escapeHtml(view.summary.nextRequiredActionReason)}</p>`
+      : "";
+  const gatesHtml =
+    view.summary.unresolvedGates.length > 0
+      ? `<ul>\n      ${view.summary.unresolvedGates.map((gate) => `<li>${escapeHtml(gate)}</li>`).join("\n      ")}\n    </ul>`
+      : "";
+  return `
+  <section aria-labelledby="admin-resource-binding-heading" class="card">
+    <h2 id="admin-resource-binding-heading">Resource binding</h2>
+    <p class="status status-${tone}" role="status">${escapeHtml(view.summary.state)} — next: ${escapeHtml(view.summary.nextRequiredActor)}</p>
+    ${reasonHtml}
+    ${gatesHtml}
+  </section>`;
+}
+
 function renderAdminBody(view: AdminViewState): string {
   const notActiveItems = view.notActiveConcepts
     .map((concept) => `<li>${escapeHtml(concept)}: <span class="status status-neutral" role="status">NOT ACTIVE</span></li>`)
@@ -240,6 +286,7 @@ function renderAdminBody(view: AdminViewState): string {
   return `
   ${renderOrganizationCard(view.organization)}
   ${renderAccessCard(view.access)}
+  ${renderResourceBindingCard(view.resourceBinding)}
   <section aria-labelledby="admin-not-active-heading" class="card">
     <h2 id="admin-not-active-heading">Not yet active in this build</h2>
     <ul>

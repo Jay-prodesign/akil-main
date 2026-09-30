@@ -38,6 +38,7 @@ export function createInternalOsHttpServer(
     grants: deps.grants,
     ...(deps.projectSource !== undefined ? { projectSource: deps.projectSource } : {}),
     ...(deps.jobSource !== undefined ? { jobSource: deps.jobSource } : {}),
+    ...(deps.resourceBindingSource !== undefined ? { resourceBindingSource: deps.resourceBindingSource } : {}),
   });
 
   return createServer((req, res) => {
