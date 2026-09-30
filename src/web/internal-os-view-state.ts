@@ -4,6 +4,11 @@ import type { Project } from "../domain/project.js";
 import type { OutcomeJob } from "../domain/outcome-job.js";
 import type { Permission } from "../domain/authority.js";
 import type { EffectiveAccessResolution } from "../domain/effective-organization-access.js";
+import type {
+  OrganizationBindingActor,
+  OrganizationBindingState,
+  OrganizationResourceBindingStatus,
+} from "../domain/organization-resource-binding.js";
 import {
   requireInternalOsProjectAccess,
   InternalOsAccessDeniedError,
@@ -384,10 +389,75 @@ export function resolveProductsView(): ProductsViewState {
   };
 }
 
+/**
+ * Rev183 F3: caller-injected read source for the Organization's current
+ * resource-binding status - mirrors `WorkProjectSource`/`WorkJobSource`'s
+ * own established optional-source pattern exactly. No durable
+ * `OrganizationResourceBinding` store is wired into production Admin/shell
+ * composition yet (a separate, later decision - the same discipline
+ * `resolveWorkView` already applies to `WorkProjectSource`), so an absent
+ * source renders `NOT_ACTIVE`, never fabricated content. `resolveStatus`
+ * returning `undefined` means the Organization has genuinely never been
+ * bootstrapped yet (no `OrganizationResourceBinding` exists for it) - a
+ * legitimate, distinct `NOT_BOUND` state, never conflated with `NOT_ACTIVE`
+ * (no source wired) or a fabricated `READY`.
+ */
+export interface OrganizationResourceBindingSource {
+  resolveStatus(organization: Organization): OrganizationResourceBindingStatus | undefined;
+}
+
+export interface AdminResourceBindingSummary {
+  readonly state: OrganizationBindingState;
+  readonly nextRequiredActor: OrganizationBindingActor;
+  readonly nextRequiredActionCode?: string;
+  readonly nextRequiredActionReason?: string;
+  readonly unresolvedGates: ReadonlyArray<string>;
+}
+
+export type AdminResourceBindingViewState =
+  | { readonly kind: "NOT_ACTIVE" }
+  | { readonly kind: "NOT_BOUND" }
+  | { readonly kind: "READY"; readonly summary: AdminResourceBindingSummary };
+
+/**
+ * Rev183 F3: the smallest read-only projection of
+ * `resolveOrganizationResourceBindingStatus`'s own truth - state, next
+ * required actor/action, and unresolved gates only, never a richer or
+ * re-derived status of its own. No mutation affordance is added anywhere;
+ * this function cannot bootstrap, re-bind, or change anything.
+ */
+export function resolveResourceBindingView(
+  organization: Organization,
+  source: OrganizationResourceBindingSource | undefined,
+): AdminResourceBindingViewState {
+  if (source === undefined) {
+    return { kind: "NOT_ACTIVE" };
+  }
+  const status = source.resolveStatus(organization);
+  if (status === undefined) {
+    return { kind: "NOT_BOUND" };
+  }
+  return {
+    kind: "READY",
+    summary: {
+      state: status.state,
+      nextRequiredActor: status.nextRequiredActor,
+      ...(status.nextRequiredAction !== undefined
+        ? {
+            nextRequiredActionCode: status.nextRequiredAction.code,
+            nextRequiredActionReason: status.nextRequiredAction.reason,
+          }
+        : {}),
+      unresolvedGates: status.unresolvedGates,
+    },
+  };
+}
+
 export interface AdminViewState {
   readonly kind: "READY";
   readonly organization: OrganizationSummary;
   readonly access: AccessSummary;
+  readonly resourceBinding: AdminResourceBindingViewState;
   readonly notActiveConcepts: ReadonlyArray<string>;
 }
 
@@ -405,17 +475,24 @@ const ADMIN_NOT_ACTIVE_CONCEPTS: ReadonlyArray<string> = [
 /**
  * Admin/Settings: a safe read-only inventory of organization/access truth
  * this package already resolved (never any richer data), plus an explicit
- * list of the concepts Rev168 names that have no backing source yet. No
- * mutating control exists anywhere in this view - Phase A exposes zero
+ * list of the concepts Rev168 names that have no backing source yet, plus
+ * (Rev183 F3) the Organization's own current resource-binding
+ * explainability - what is bound, missing/blocked, and why. No mutating
+ * control exists anywhere in this view - Phase A exposes zero
  * write/execute affordances of any kind, so "ADMIN label + READ-only
  * authority exposes no active write/execute CTA" holds by construction
  * (see `os-v0-08-boundary-scan.test.ts`).
  */
-export function resolveAdminView(input: { organization: Organization; context: InternalOsAccessContext }): AdminViewState {
+export function resolveAdminView(input: {
+  organization: Organization;
+  context: InternalOsAccessContext;
+  resourceBindingSource?: OrganizationResourceBindingSource;
+}): AdminViewState {
   return {
     kind: "READY",
     organization: summarizeOrganization(input.organization),
     access: summarizeAccess(input.context.access),
+    resourceBinding: resolveResourceBindingView(input.organization, input.resourceBindingSource),
     notActiveConcepts: ADMIN_NOT_ACTIVE_CONCEPTS,
   };
 }

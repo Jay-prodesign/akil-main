@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync, appendFileSync, lin
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { TenantScope } from "./tenant-scope.js";
-import type { OrganizationResourceBinding } from "./organization-resource-binding.js";
+import { createOrganizationResourceBinding, type OrganizationResourceBinding } from "./organization-resource-binding.js";
 
 export class InvalidDurableOrganizationResourceBindingStoreError extends Error {
   constructor(reason: string) {
@@ -31,14 +31,33 @@ function requireNonEmptyStringField(value: unknown, field: string, filePath: str
   if (typeof value !== "string" || value.trim().length === 0) {
     fail(filePath, `${field} must be a non-empty string`);
   }
-  return value as string;
+  const str = value as string;
+  if (str.trim() !== str) {
+    fail(filePath, `${field} must not contain leading or trailing whitespace`);
+  }
+  return str;
 }
 
+/**
+ * Rev183 F4: `createOrganizationResourceBinding` rejects a ref array
+ * containing a duplicate entry at construction time - replay validation
+ * must reapply the identical invariant, not merely check element shape, or
+ * a corrupted/replayed line could reconstruct a binding no ordinary
+ * construction call could ever produce.
+ */
 function requireStringArrayField(value: unknown, field: string, filePath: string): ReadonlyArray<string> {
-  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || entry.trim().length === 0)) {
+  if (!Array.isArray(value)) {
     fail(filePath, `${field} must be an array of non-empty strings`);
   }
-  return value as ReadonlyArray<string>;
+  const entries = (value as unknown[]).map((entry, index) => requireNonEmptyStringField(entry, `${field}[${index}]`, filePath));
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    if (seen.has(entry)) {
+      fail(filePath, `${field} contains a duplicate entry "${entry}"`);
+    }
+    seen.add(entry);
+  }
+  return entries;
 }
 
 /**
@@ -85,6 +104,14 @@ function validatePersistedBindingRecord(
     fail(filePath, `record "${organizationId}".binding.organizationId does not match the record's own key`);
   }
   const membershipRefs = requireStringArrayField(bindingObj["membershipRefs"], `record "${organizationId}".binding.membershipRefs`, filePath);
+  if (membershipRefs.length === 0) {
+    // Rev183 F4: `createOrganizationResourceBinding` rejects an empty
+    // membership list at construction ("a binding cannot be bootstrapped
+    // from zero founder/internal identity evidence") - a corrupted/replayed
+    // line reconstructing this state is a state construction itself could
+    // never produce, and must fail closed identically.
+    fail(filePath, `record "${organizationId}".binding.membershipRefs must contain at least one entry`);
+  }
   const servicePrincipalRefs = requireStringArrayField(
     bindingObj["servicePrincipalRefs"],
     `record "${organizationId}".binding.servicePrincipalRefs`,
@@ -107,6 +134,18 @@ function validatePersistedBindingRecord(
   if (ownershipServiceRef !== undefined && (typeof ownershipServiceRef !== "string" || ownershipServiceRef.trim().length === 0)) {
     fail(filePath, `record "${organizationId}".binding.ownership.serviceRef must be a non-empty string when present`);
   }
+  if (ownershipProjectId !== projectRef) {
+    // Rev183 F4: `createOrganizationResourceBinding` requires
+    // `ownership.projectId === project.projectId` at construction - a
+    // persisted record whose top-level `projectRef` and
+    // `ownership.projectId` disagree could never have been produced by
+    // construction and must fail closed on replay, not silently reconstruct
+    // an impossible binding.
+    fail(
+      filePath,
+      `record "${organizationId}".binding.projectRef ("${projectRef}") does not match binding.ownership.projectId ("${ownershipProjectId}")`,
+    );
+  }
 
   const connectionBindingRefs = requireStringArrayField(
     bindingObj["connectionBindingRefs"],
@@ -127,6 +166,31 @@ function validatePersistedBindingRecord(
   const knowledgeEvidenceRefs = requireStringArrayField(
     bindingObj["knowledgeEvidenceRefs"],
     `record "${organizationId}".binding.knowledgeEvidenceRefs`,
+    filePath,
+  );
+  const outcomeIdentityRefs = requireStringArrayField(
+    bindingObj["outcomeIdentityRefs"],
+    `record "${organizationId}".binding.outcomeIdentityRefs`,
+    filePath,
+  );
+  const repositoryWorkspaceRefs = requireStringArrayField(
+    bindingObj["repositoryWorkspaceRefs"],
+    `record "${organizationId}".binding.repositoryWorkspaceRefs`,
+    filePath,
+  );
+  const usageQuotaNamespaceRefs = requireStringArrayField(
+    bindingObj["usageQuotaNamespaceRefs"],
+    `record "${organizationId}".binding.usageQuotaNamespaceRefs`,
+    filePath,
+  );
+  const auditRecoveryRefs = requireStringArrayField(
+    bindingObj["auditRecoveryRefs"],
+    `record "${organizationId}".binding.auditRecoveryRefs`,
+    filePath,
+  );
+  const admittedCapabilityRefs = requireStringArrayField(
+    bindingObj["admittedCapabilityRefs"],
+    `record "${organizationId}".binding.admittedCapabilityRefs`,
     filePath,
   );
   const boundAt = requireNonEmptyStringField(bindingObj["boundAt"], `record "${organizationId}".binding.boundAt`, filePath);
@@ -152,6 +216,11 @@ function validatePersistedBindingRecord(
     effectivePolicyRefs,
     workerRouteRefs,
     knowledgeEvidenceRefs,
+    outcomeIdentityRefs,
+    repositoryWorkspaceRefs,
+    usageQuotaNamespaceRefs,
+    auditRecoveryRefs,
+    admittedCapabilityRefs,
     boundAt,
   };
 
@@ -316,6 +385,21 @@ export class FileDurableOrganizationResourceBindingStore implements DurableOrgan
           `organizationId "${organizationId}" is already bound under a different resource-binding record`,
         );
       }
+      // Rev183 F2 partial-failure/restart recovery: a prior writer can win
+      // this same creation-lock race (linkSync succeeds) and then crash
+      // before its own appendFileSync ever runs, leaving the durable
+      // per-tenant .jsonl file with no record of this organizationId even
+      // though the lock now durably exists. Without this self-heal, this
+      // call would report `created: false` (implying the record is durably
+      // bound) while `get()` would keep returning `undefined` forever - a
+      // silent, permanent partial-bootstrap state. Self-heal by durably
+      // appending the SAME winning content before returning; a benign,
+      // idempotent race between two self-healing readers is safe because
+      // `get()`'s own dedup-by-organizationId keeps only the first matching
+      // line and the content is byte-identical either way.
+      if (this.get(tenantId, organizationId) === undefined) {
+        appendFileSync(this.filePathFor(tenantId), `${winnerRaw}\n`, "utf8");
+      }
       return { binding: winner.binding, created: false };
     }
 
@@ -327,4 +411,31 @@ export class FileDurableOrganizationResourceBindingStore implements DurableOrgan
   get(tenantId: TenantScope["tenantId"], organizationId: string): OrganizationResourceBinding | undefined {
     return this.dedupedByOrganizationId(this.readAll(tenantId)).get(organizationId);
   }
+}
+
+/**
+ * Rev183 F2: the smallest generic bootstrap composition Brain's remedy
+ * asks for - coordinates ONLY the already-existing
+ * `createOrganizationResourceBinding` factory and this store's own
+ * `putIfAbsent`, in that order, for ANY organizationId (no
+ * `org_akilta`-specific branch, no new IAM/router/memory/economics system).
+ * Proves two things by construction rather than by a caller's own
+ * discipline: (1) deterministic idempotent reinitialization - calling this
+ * twice with the SAME real evidence returns `created: false` the second
+ * time and the identical persisted binding, never a duplicate; (2)
+ * partial-failure/restart recovery - if a prior call's process crashed
+ * partway through (including between winning the creation-lock race and
+ * durably recording it), calling this again with the SAME evidence
+ * recovers the exact same durable binding via `putIfAbsent`'s own
+ * self-healing above, rather than throwing or silently producing a second
+ * record.
+ */
+export function bootstrapOrganizationResourceBinding(
+  input: { readonly store: DurableOrganizationResourceBindingStore } & Parameters<
+    typeof createOrganizationResourceBinding
+  >[0],
+): PersistOrganizationResourceBindingResult {
+  const { store, ...factoryInput } = input;
+  const binding = createOrganizationResourceBinding(factoryInput);
+  return store.putIfAbsent(factoryInput.organization.tenantId, factoryInput.organization.organizationId, binding);
 }

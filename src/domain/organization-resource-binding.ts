@@ -5,6 +5,7 @@ import { isOrganizationServicePrincipalActive, type OrganizationServicePrincipal
 import type { Project } from "./project.js";
 import type { ProjectOwnershipRef } from "./project-ownership.js";
 import type { ConnectionBinding } from "./connection-authority.js";
+import type { WorkerRoutingDecision } from "./worker-routing-policy.js";
 
 export class InvalidOrganizationResourceBindingError extends Error {
   constructor(reason: string) {
@@ -84,6 +85,32 @@ export interface OrganizationResourceBinding {
   readonly effectivePolicyRefs: ReadonlyArray<string>;
   readonly workerRouteRefs: ReadonlyArray<string>;
   readonly knowledgeEvidenceRefs: ReadonlyArray<string>;
+  /**
+   * Rev183 F2: the canonical resource-binding floor also names these five
+   * categories. Each is an opaque ref array exactly like the four above -
+   * never a copy of the referenced resource's own mutable state - and
+   * defaults to `[]` when nothing real exists to bind yet, an honest
+   * "not currently admitted" posture rather than a fabricated placeholder.
+   * Unlike membership/service-principal/connection/project, none of these
+   * five currently has a durable "current" registry this module could
+   * re-check against (see `resolveOrganizationResourceBindingStatus`'s own
+   * doc comment on scope) - they are captured here as bootstrap-time
+   * provenance only:
+   *  - `outcomeIdentityRefs`: Website/Digital Operations outcome identity
+   *    (e.g. `OutcomeJob`/`ClientProjectSnapshot` refs).
+   *  - `repositoryWorkspaceRefs`: repository/workspace refs (e.g. a
+   *    `ConnectionBinding.workspaceRef` or LOCAL-EXEC workspace ref).
+   *  - `usageQuotaNamespaceRefs`: usage/quota namespace refs (e.g. an
+   *    OS-V0-07 `quotaScopeKey`).
+   *  - `auditRecoveryRefs`: audit/recovery refs (e.g. an `AuditEvent` id).
+   *  - `admittedCapabilityRefs`: selected product/capability availability
+   *    (e.g. a `CapabilityAdmission` id).
+   */
+  readonly outcomeIdentityRefs: ReadonlyArray<string>;
+  readonly repositoryWorkspaceRefs: ReadonlyArray<string>;
+  readonly usageQuotaNamespaceRefs: ReadonlyArray<string>;
+  readonly auditRecoveryRefs: ReadonlyArray<string>;
+  readonly admittedCapabilityRefs: ReadonlyArray<string>;
   readonly boundAt: string;
 }
 
@@ -111,6 +138,11 @@ export function createOrganizationResourceBinding(input: {
   effectivePolicyRefs?: unknown;
   workerRouteRefs?: unknown;
   knowledgeEvidenceRefs?: unknown;
+  outcomeIdentityRefs?: unknown;
+  repositoryWorkspaceRefs?: unknown;
+  usageQuotaNamespaceRefs?: unknown;
+  auditRecoveryRefs?: unknown;
+  admittedCapabilityRefs?: unknown;
   boundAt: unknown;
 }): OrganizationResourceBinding {
   const memberships = input.memberships;
@@ -184,6 +216,11 @@ export function createOrganizationResourceBinding(input: {
     effectivePolicyRefs: requireOpaqueStringArray(input.effectivePolicyRefs ?? [], "effectivePolicyRefs"),
     workerRouteRefs: requireOpaqueStringArray(input.workerRouteRefs ?? [], "workerRouteRefs"),
     knowledgeEvidenceRefs: requireOpaqueStringArray(input.knowledgeEvidenceRefs ?? [], "knowledgeEvidenceRefs"),
+    outcomeIdentityRefs: requireOpaqueStringArray(input.outcomeIdentityRefs ?? [], "outcomeIdentityRefs"),
+    repositoryWorkspaceRefs: requireOpaqueStringArray(input.repositoryWorkspaceRefs ?? [], "repositoryWorkspaceRefs"),
+    usageQuotaNamespaceRefs: requireOpaqueStringArray(input.usageQuotaNamespaceRefs ?? [], "usageQuotaNamespaceRefs"),
+    auditRecoveryRefs: requireOpaqueStringArray(input.auditRecoveryRefs ?? [], "auditRecoveryRefs"),
+    admittedCapabilityRefs: requireOpaqueStringArray(input.admittedCapabilityRefs ?? [], "admittedCapabilityRefs"),
     boundAt,
   };
 }
@@ -249,19 +286,41 @@ function actionRequired(
  * now-revoked/now-missing current evidence is exactly how a caller observes
  * that revocation, without ever mutating or discarding the binding record.
  *
+ * Rev183 F1 correction: the resolver previously accepted current evidence
+ * only for Organization/memberships/service principals/connections, so it
+ * could return READY after a bound project/ownership, effective config/
+ * policy, worker route, or knowledge/evidence prerequisite disappeared or
+ * became ineligible. Each of those now has its own currentness gate below,
+ * reusing the live authoritative owner/primitive for that category rather
+ * than inventing a second status model: `Project` itself for project/
+ * ownership; `resolveEffectiveConfigurationPolicy`'s own output shape
+ * (`effectiveConfigRefs`/`effectivePolicyRefs` - a caller freshly resolves
+ * the current effective controls and passes the resulting refs) for
+ * config/policy; `WorkerRoutingDecision` from `worker-routing-policy.ts` (a
+ * caller freshly re-invokes `resolveWorkerRoute` for the bound route) for
+ * worker routes; and plain evidence-id presence (`EvidenceReference` from
+ * `evidence.ts`) for knowledge/evidence. The five Rev183 F2 manifest fields
+ * (`outcomeIdentityRefs`/`repositoryWorkspaceRefs`/`usageQuotaNamespaceRefs`/
+ * `auditRecoveryRefs`/`admittedCapabilityRefs`) are deliberately NOT gated
+ * here - none of them has a durable "current" registry anywhere in this
+ * repository yet to re-check against, so they remain bootstrap-time-only
+ * provenance until a future task adds one; gating them here today would
+ * mean inventing a second status model rather than reusing a real one.
+ *
  * Blocker priority (first failing gate wins, mirroring
  * `compileProjectActivationProfile`'s own ordering discipline): organization
  * lifecycle state, then membership currentness (at least one ACTIVE,
  * tenant-correct membership from the CURRENT supplied list must still exist
  * and its id must still appear in the binding's own `membershipRefs` -
  * closing "same-looking refs in another Organization cannot substitute"),
- * then service-principal currentness (only for principals actually
- * referenced), then project/ownership structural correlation, then
- * connection currentness (only for connections actually referenced) - a
- * referenced connection that no longer resolves, or resolves to a
- * `REVOKED`/`DEGRADED` state, or resolves to a DIFFERENT organization's
- * ownership, blocks. Only once every gate is clean does this return
- * `READY`.
+ * then project/ownership currentness, then service-principal currentness
+ * (only for principals actually referenced), then connection currentness
+ * (only for connections actually referenced) - a referenced connection that
+ * no longer resolves, or resolves to a `REVOKED`/`DEGRADED` state, or
+ * resolves to a DIFFERENT organization's ownership, blocks - then effective
+ * config currentness, then effective policy currentness, then worker route
+ * currentness, then knowledge/evidence currentness. Only once every gate is
+ * clean does this return `READY`.
  */
 export function resolveOrganizationResourceBindingStatus(input: {
   binding: OrganizationResourceBinding;
@@ -269,6 +328,11 @@ export function resolveOrganizationResourceBindingStatus(input: {
   currentMemberships: ReadonlyArray<OrganizationMembership>;
   currentServicePrincipals: ReadonlyArray<OrganizationServicePrincipal>;
   currentConnections: ReadonlyArray<ConnectionBinding>;
+  currentProject: Project | undefined;
+  currentEffectiveConfigRefs: ReadonlyArray<string>;
+  currentEffectivePolicyRefs: ReadonlyArray<string>;
+  currentWorkerRouteDecisions: ReadonlyArray<{ readonly routeRef: string; readonly decision: WorkerRoutingDecision }>;
+  currentKnowledgeEvidenceRefs: ReadonlyArray<string>;
 }): OrganizationResourceBindingStatus {
   const { binding, organization } = input;
 
@@ -297,6 +361,22 @@ export function resolveOrganizationResourceBindingStatus(input: {
       binding,
       "NO_ACTIVE_BOUND_MEMBERSHIP",
       "none of this binding's own membershipRefs currently resolve to an active, coherent, tenant-correct membership",
+    );
+  }
+
+  const currentProject = input.currentProject;
+  if (
+    currentProject === undefined ||
+    currentProject.tenantId !== binding.tenantId ||
+    currentProject.customerId !== binding.ownership.customerId ||
+    currentProject.projectId !== binding.projectRef
+  ) {
+    return blocked(
+      binding,
+      "PROJECT_NOT_CURRENT",
+      currentProject === undefined
+        ? "the bound project no longer resolves to a current record"
+        : "the currently-supplied project does not match this binding's own tenant/customer/project identity",
     );
   }
 
@@ -343,6 +423,54 @@ export function resolveOrganizationResourceBindingStatus(input: {
         `bound connection "${connectionBindingRef}" is currently ${current.connectionState}`,
       );
     }
+  }
+
+  const missingConfigRef = binding.effectiveConfigRefs.find(
+    (ref) => !input.currentEffectiveConfigRefs.includes(ref),
+  );
+  if (missingConfigRef !== undefined) {
+    return actionRequired(
+      binding,
+      "AKILTA",
+      "CONFIG_NOT_CURRENT",
+      `bound effective config ref "${missingConfigRef}" is no longer among the currently effective configuration`,
+    );
+  }
+
+  const missingPolicyRef = binding.effectivePolicyRefs.find(
+    (ref) => !input.currentEffectivePolicyRefs.includes(ref),
+  );
+  if (missingPolicyRef !== undefined) {
+    return actionRequired(
+      binding,
+      "AKILTA",
+      "POLICY_NOT_CURRENT",
+      `bound effective policy ref "${missingPolicyRef}" is no longer among the currently effective policy`,
+    );
+  }
+
+  for (const routeRef of binding.workerRouteRefs) {
+    const currentRoute = input.currentWorkerRouteDecisions.find((entry) => entry.routeRef === routeRef);
+    if (currentRoute === undefined || currentRoute.decision.status !== "ROUTED") {
+      return actionRequired(
+        binding,
+        "AKILTA",
+        "WORKER_ROUTE_NOT_CURRENT",
+        `bound worker route "${routeRef}" no longer resolves to a current ROUTED decision`,
+      );
+    }
+  }
+
+  const missingEvidenceRef = binding.knowledgeEvidenceRefs.find(
+    (ref) => !input.currentKnowledgeEvidenceRefs.includes(ref),
+  );
+  if (missingEvidenceRef !== undefined) {
+    return actionRequired(
+      binding,
+      "AKILTA",
+      "KNOWLEDGE_EVIDENCE_MISSING",
+      `bound knowledge/evidence ref "${missingEvidenceRef}" no longer resolves to current evidence`,
+    );
   }
 
   return {

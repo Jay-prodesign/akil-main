@@ -80,6 +80,7 @@ test("OS-V0-09: organization-resource-binding.ts imports only its declared sibli
     'import type { Project } from "./project.js";',
     'import type { ProjectOwnershipRef } from "./project-ownership.js";',
     'import type { ConnectionBinding } from "./connection-authority.js";',
+    'import type { WorkerRoutingDecision } from "./worker-routing-policy.js";',
   ]);
 });
 
@@ -94,7 +95,7 @@ test("OS-V0-09: durable-organization-resource-binding-store.ts imports only node
     'import { randomUUID } from "node:crypto";',
     'import { join } from "node:path";',
     'import type { TenantScope } from "./tenant-scope.js";',
-    'import type { OrganizationResourceBinding } from "./organization-resource-binding.js";',
+    'import { createOrganizationResourceBinding, type OrganizationResourceBinding } from "./organization-resource-binding.js";',
   ]);
 });
 
@@ -113,6 +114,7 @@ test("OS-V0-09: durable-organization-resource-binding-store.ts module exports ex
     "CorruptedOrganizationResourceBindingLineError",
     "FileDurableOrganizationResourceBindingStore",
     "InvalidDurableOrganizationResourceBindingStoreError",
+    "bootstrapOrganizationResourceBinding",
   ]);
 });
 

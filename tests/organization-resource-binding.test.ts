@@ -29,6 +29,7 @@ import {
   InvalidOrganizationResourceBindingError,
   type OrganizationResourceBinding,
 } from "../src/domain/organization-resource-binding.js";
+import type { WorkerRoutingDecision } from "../src/domain/worker-routing-policy.js";
 
 function fixture(tenantSuffix = "akilta") {
   const tenantScope = createTenantScope(`tenant-org-${tenantSuffix}`);
@@ -280,14 +281,26 @@ function bindingFixture(tenantSuffix = "status") {
   return { ...base, binding };
 }
 
+/** Rev183 F1: the default "everything current, nothing bound beyond membership" evidence shape every existing witness needs. */
+function defaultCurrentEvidence(project: ReturnType<typeof createProject>) {
+  return {
+    currentProject: project,
+    currentEffectiveConfigRefs: [] as ReadonlyArray<string>,
+    currentEffectivePolicyRefs: [] as ReadonlyArray<string>,
+    currentWorkerRouteDecisions: [] as ReadonlyArray<{ routeRef: string; decision: WorkerRoutingDecision }>,
+    currentKnowledgeEvidenceRefs: [] as ReadonlyArray<string>,
+  };
+}
+
 test("S1: a fully current binding resolves READY", () => {
-  const { organization, membership, binding } = bindingFixture();
+  const { organization, membership, binding, project } = bindingFixture();
   const status = resolveOrganizationResourceBindingStatus({
     binding,
     organization,
     currentMemberships: [membership],
     currentServicePrincipals: [],
     currentConnections: [],
+    ...defaultCurrentEvidence(project),
   });
   assert.equal(status.state, "READY");
   assert.equal(status.nextRequiredActor, "NONE");
@@ -295,7 +308,7 @@ test("S1: a fully current binding resolves READY", () => {
 });
 
 test("S2: a SUSPENDED organization blocks, even though the binding's own ref list is untouched", () => {
-  const { organization, membership, binding } = bindingFixture();
+  const { organization, membership, binding, project } = bindingFixture();
   const suspended = suspendOrganization({ organization, suspendedAt: "2026-01-03T00:00:00.000Z" });
   const status = resolveOrganizationResourceBindingStatus({
     binding,
@@ -303,6 +316,7 @@ test("S2: a SUSPENDED organization blocks, even though the binding's own ref lis
     currentMemberships: [membership],
     currentServicePrincipals: [],
     currentConnections: [],
+    ...defaultCurrentEvidence(project),
   });
   assert.equal(status.state, "BLOCKED");
   assert.equal(status.nextRequiredAction?.code, "ORGANIZATION_SUSPENDED");
@@ -311,7 +325,7 @@ test("S2: a SUSPENDED organization blocks, even though the binding's own ref lis
 });
 
 test("S3 (mandatory witness): a revoked membership blocks downstream use WITHOUT deleting the historical binding evidence", () => {
-  const { organization, membership, binding } = bindingFixture();
+  const { organization, membership, binding, project } = bindingFixture();
   const revoked = revokeOrganizationMembership({
     membership,
     revokedAt: "2026-01-03T00:00:00.000Z",
@@ -323,6 +337,7 @@ test("S3 (mandatory witness): a revoked membership blocks downstream use WITHOUT
     currentMemberships: [revoked],
     currentServicePrincipals: [],
     currentConnections: [],
+    ...defaultCurrentEvidence(project),
   });
   assert.equal(status.state, "BLOCKED");
   assert.equal(status.nextRequiredAction?.code, "NO_ACTIVE_BOUND_MEMBERSHIP");
@@ -333,13 +348,14 @@ test("S3 (mandatory witness): a revoked membership blocks downstream use WITHOUT
 });
 
 test("S4: a membership missing entirely from current evidence (deleted authoritative source) also blocks", () => {
-  const { organization, binding } = bindingFixture();
+  const { organization, binding, project } = bindingFixture();
   const status = resolveOrganizationResourceBindingStatus({
     binding,
     organization,
     currentMemberships: [],
     currentServicePrincipals: [],
     currentConnections: [],
+    ...defaultCurrentEvidence(project),
   });
   assert.equal(status.state, "BLOCKED");
   assert.equal(status.nextRequiredAction?.code, "NO_ACTIVE_BOUND_MEMBERSHIP");
@@ -362,6 +378,7 @@ test("S5 (mandatory witness): same-looking membership ref bound to a DIFFERENT o
     currentMemberships: [lookalike],
     currentServicePrincipals: [],
     currentConnections: [],
+    ...defaultCurrentEvidence(a.project),
   });
   assert.equal(status.state, "BLOCKED", "a same-id membership from a foreign tenant must never satisfy a's own binding");
 });
@@ -392,6 +409,7 @@ test("S6: a revoked service principal referenced by the binding triggers ACTION_
     currentMemberships: [membership],
     currentServicePrincipals: [revokedPrincipal],
     currentConnections: [],
+    ...defaultCurrentEvidence(project),
   });
   assert.equal(status.state, "ACTION_REQUIRED");
   assert.equal(status.nextRequiredAction?.code, "SERVICE_PRINCIPAL_REVOKED");
@@ -415,6 +433,7 @@ test("S7 (mandatory witness): a REVOKED connection referenced by the binding blo
     currentMemberships: [membership],
     currentServicePrincipals: [],
     currentConnections: [revokedConnection],
+    ...defaultCurrentEvidence(project),
   });
   assert.equal(status.state, "ACTION_REQUIRED");
   assert.equal(status.nextRequiredAction?.code, "CONNECTION_NOT_CURRENT");
@@ -441,6 +460,7 @@ test("S8: a bound connection resolved from a foreign tenant/project cannot subst
     currentMemberships: [membership],
     currentServicePrincipals: [],
     currentConnections: [lookalikeConnection],
+    ...defaultCurrentEvidence(project),
   });
   assert.equal(status.state, "ACTION_REQUIRED", "a same-id connection bound to a foreign tenant/project must never satisfy this binding");
   assert.equal(status.nextRequiredAction?.code, "CONNECTION_MISSING");
@@ -455,6 +475,7 @@ test("S9: an organization identity mismatch between the binding and the supplied
     currentMemberships: [a.membership],
     currentServicePrincipals: [],
     currentConnections: [],
+    ...defaultCurrentEvidence(a.project),
   });
   assert.equal(status.state, "BLOCKED");
   assert.equal(status.nextRequiredAction?.code, "ORGANIZATION_IDENTITY_MISMATCH");
@@ -481,6 +502,7 @@ test("S10: a BOOTSTRAPPING (not yet activated) organization reports ACTION_REQUI
     currentMemberships: [membership],
     currentServicePrincipals: [],
     currentConnections: [],
+    ...defaultCurrentEvidence(project),
   });
   assert.equal(status.state, "ACTION_REQUIRED");
   assert.equal(status.nextRequiredActor, "AKILTA");
@@ -500,6 +522,261 @@ test("C1 (mandatory witness): the exact same constructors/resolver bootstrap a c
     currentMemberships: [secondOrg.membership],
     currentServicePrincipals: [],
     currentConnections: [],
+    ...defaultCurrentEvidence(secondOrg.project),
   });
   assert.equal(secondStatus.state, "READY", "the second organization reaches READY through the identical code path used for org_akilta");
+});
+
+// --- Rev183 F1: currentness gates the prior resolver never checked ---
+
+test("Rev183 F1-P1: a project that no longer resolves to a current record blocks, even though membership/org are both fine", () => {
+  const { organization, membership, binding } = bindingFixture("rev183-p1");
+  const status = resolveOrganizationResourceBindingStatus({
+    binding,
+    organization,
+    currentMemberships: [membership],
+    currentServicePrincipals: [],
+    currentConnections: [],
+    currentProject: undefined,
+    currentEffectiveConfigRefs: [],
+    currentEffectivePolicyRefs: [],
+    currentWorkerRouteDecisions: [],
+    currentKnowledgeEvidenceRefs: [],
+  });
+  assert.equal(status.state, "BLOCKED");
+  assert.equal(status.nextRequiredAction?.code, "PROJECT_NOT_CURRENT");
+});
+
+test("Rev183 F1-P2 (mandatory witness): a same-looking project reassigned to a different tenant/customer cannot substitute for the bound one", () => {
+  const a = bindingFixture("rev183-p2-a");
+  const b = fixture("rev183-p2-b");
+  const status = resolveOrganizationResourceBindingStatus({
+    binding: a.binding,
+    organization: a.organization,
+    currentMemberships: [a.membership],
+    currentServicePrincipals: [],
+    currentConnections: [],
+    currentProject: b.project, // a foreign project, never a's own
+    currentEffectiveConfigRefs: [],
+    currentEffectivePolicyRefs: [],
+    currentWorkerRouteDecisions: [],
+    currentKnowledgeEvidenceRefs: [],
+  });
+  assert.equal(status.state, "BLOCKED");
+  assert.equal(status.nextRequiredAction?.code, "PROJECT_NOT_CURRENT");
+});
+
+test("Rev183 F1-C1: a bound effective config ref no longer among the currently effective configuration triggers ACTION_REQUIRED, without deleting the historical binding evidence", () => {
+  const { organization, membership, project, ownership } = fixture("rev183-c1");
+  const binding = createOrganizationResourceBinding({
+    organization,
+    memberships: [membership],
+    project,
+    ownership,
+    effectiveConfigRefs: ["cfg-alpha"],
+    boundAt: "2026-01-02T00:00:00.000Z",
+  });
+  const status = resolveOrganizationResourceBindingStatus({
+    binding,
+    organization,
+    currentMemberships: [membership],
+    currentServicePrincipals: [],
+    currentConnections: [],
+    currentProject: project,
+    currentEffectiveConfigRefs: [], // cfg-alpha has been superseded/removed
+    currentEffectivePolicyRefs: [],
+    currentWorkerRouteDecisions: [],
+    currentKnowledgeEvidenceRefs: [],
+  });
+  assert.equal(status.state, "ACTION_REQUIRED");
+  assert.equal(status.nextRequiredAction?.code, "CONFIG_NOT_CURRENT");
+  assert.deepEqual(binding.effectiveConfigRefs, ["cfg-alpha"]);
+});
+
+test("Rev183 F1-C2: a bound effective policy ref no longer among the currently effective policy triggers ACTION_REQUIRED", () => {
+  const { organization, membership, project, ownership } = fixture("rev183-c2");
+  const binding = createOrganizationResourceBinding({
+    organization,
+    memberships: [membership],
+    project,
+    ownership,
+    effectivePolicyRefs: ["pol-alpha"],
+    boundAt: "2026-01-02T00:00:00.000Z",
+  });
+  const status = resolveOrganizationResourceBindingStatus({
+    binding,
+    organization,
+    currentMemberships: [membership],
+    currentServicePrincipals: [],
+    currentConnections: [],
+    currentProject: project,
+    currentEffectiveConfigRefs: [],
+    currentEffectivePolicyRefs: [],
+    currentWorkerRouteDecisions: [],
+    currentKnowledgeEvidenceRefs: [],
+  });
+  assert.equal(status.state, "ACTION_REQUIRED");
+  assert.equal(status.nextRequiredAction?.code, "POLICY_NOT_CURRENT");
+});
+
+test("Rev183 F1-W1: a bound worker route with no current decision, or a current REJECTED decision, triggers ACTION_REQUIRED", () => {
+  const { organization, membership, project, ownership } = fixture("rev183-w1");
+  const binding = createOrganizationResourceBinding({
+    organization,
+    memberships: [membership],
+    project,
+    ownership,
+    workerRouteRefs: ["route-alpha"],
+    boundAt: "2026-01-02T00:00:00.000Z",
+  });
+  const missingStatus = resolveOrganizationResourceBindingStatus({
+    binding,
+    organization,
+    currentMemberships: [membership],
+    currentServicePrincipals: [],
+    currentConnections: [],
+    currentProject: project,
+    currentEffectiveConfigRefs: [],
+    currentEffectivePolicyRefs: [],
+    currentWorkerRouteDecisions: [],
+    currentKnowledgeEvidenceRefs: [],
+  });
+  assert.equal(missingStatus.state, "ACTION_REQUIRED");
+  assert.equal(missingStatus.nextRequiredAction?.code, "WORKER_ROUTE_NOT_CURRENT");
+
+  const rejectedStatus = resolveOrganizationResourceBindingStatus({
+    binding,
+    organization,
+    currentMemberships: [membership],
+    currentServicePrincipals: [],
+    currentConnections: [],
+    currentProject: project,
+    currentEffectiveConfigRefs: [],
+    currentEffectivePolicyRefs: [],
+    currentWorkerRouteDecisions: [
+      {
+        routeRef: "route-alpha",
+        decision: {
+          requiredCapabilityRef: "cap-1",
+          riskLevel: "STANDARD",
+          status: "REJECTED",
+          reason: "no eligible worker",
+        },
+      },
+    ],
+    currentKnowledgeEvidenceRefs: [],
+  });
+  assert.equal(rejectedStatus.state, "ACTION_REQUIRED");
+  assert.equal(rejectedStatus.nextRequiredAction?.code, "WORKER_ROUTE_NOT_CURRENT");
+});
+
+test("Rev183 F1-K1: a bound knowledge/evidence ref no longer resolving to current evidence triggers ACTION_REQUIRED", () => {
+  const { organization, membership, project, ownership } = fixture("rev183-k1");
+  const binding = createOrganizationResourceBinding({
+    organization,
+    memberships: [membership],
+    project,
+    ownership,
+    knowledgeEvidenceRefs: ["evidence-alpha"],
+    boundAt: "2026-01-02T00:00:00.000Z",
+  });
+  const status = resolveOrganizationResourceBindingStatus({
+    binding,
+    organization,
+    currentMemberships: [membership],
+    currentServicePrincipals: [],
+    currentConnections: [],
+    currentProject: project,
+    currentEffectiveConfigRefs: [],
+    currentEffectivePolicyRefs: [],
+    currentWorkerRouteDecisions: [],
+    currentKnowledgeEvidenceRefs: [],
+  });
+  assert.equal(status.state, "ACTION_REQUIRED");
+  assert.equal(status.nextRequiredAction?.code, "KNOWLEDGE_EVIDENCE_MISSING");
+});
+
+test("Rev183 F1: a binding with current config/policy/worker-route/knowledge-evidence still resolves READY - the new gates don't false-positive-block genuinely current state", () => {
+  const { organization, membership, project, ownership } = fixture("rev183-ready");
+  const binding = createOrganizationResourceBinding({
+    organization,
+    memberships: [membership],
+    project,
+    ownership,
+    effectiveConfigRefs: ["cfg-1"],
+    effectivePolicyRefs: ["pol-1"],
+    workerRouteRefs: ["route-1"],
+    knowledgeEvidenceRefs: ["evidence-1"],
+    boundAt: "2026-01-02T00:00:00.000Z",
+  });
+  const status = resolveOrganizationResourceBindingStatus({
+    binding,
+    organization,
+    currentMemberships: [membership],
+    currentServicePrincipals: [],
+    currentConnections: [],
+    currentProject: project,
+    currentEffectiveConfigRefs: ["cfg-1"],
+    currentEffectivePolicyRefs: ["pol-1"],
+    currentWorkerRouteDecisions: [
+      {
+        routeRef: "route-1",
+        decision: { requiredCapabilityRef: "cap-1", riskLevel: "STANDARD", status: "ROUTED", executorWorkerId: "worker-1", reason: "eligible" },
+      },
+    ],
+    currentKnowledgeEvidenceRefs: ["evidence-1"],
+  });
+  assert.equal(status.state, "READY");
+});
+
+// --- Rev183 F2: widened manifest fields ---
+
+test("Rev183 F2: outcomeIdentityRefs/repositoryWorkspaceRefs/usageQuotaNamespaceRefs/auditRecoveryRefs/admittedCapabilityRefs are captured as opaque refs and reject duplicates like every other ref array", () => {
+  const { organization, membership, project, ownership } = fixture("rev183-f2");
+  const binding = createOrganizationResourceBinding({
+    organization,
+    memberships: [membership],
+    project,
+    ownership,
+    outcomeIdentityRefs: ["job-1"],
+    repositoryWorkspaceRefs: ["workspace-1"],
+    usageQuotaNamespaceRefs: ["quota-ns-1"],
+    auditRecoveryRefs: ["audit-1"],
+    admittedCapabilityRefs: ["cap-admission-1"],
+    boundAt: "2026-01-02T00:00:00.000Z",
+  });
+  assert.deepEqual(binding.outcomeIdentityRefs, ["job-1"]);
+  assert.deepEqual(binding.repositoryWorkspaceRefs, ["workspace-1"]);
+  assert.deepEqual(binding.usageQuotaNamespaceRefs, ["quota-ns-1"]);
+  assert.deepEqual(binding.auditRecoveryRefs, ["audit-1"]);
+  assert.deepEqual(binding.admittedCapabilityRefs, ["cap-admission-1"]);
+
+  assert.throws(
+    () =>
+      createOrganizationResourceBinding({
+        organization,
+        memberships: [membership],
+        project,
+        ownership,
+        usageQuotaNamespaceRefs: ["quota-ns-1", "quota-ns-1"],
+        boundAt: "2026-01-02T00:00:00.000Z",
+      }),
+    InvalidOrganizationResourceBindingError,
+  );
+});
+
+test("Rev183 F2: the five new fields default to an honest empty [] posture, never fabricated content, when the caller has nothing real to bind yet", () => {
+  const { organization, membership, project, ownership } = fixture("rev183-f2-defaults");
+  const binding = createOrganizationResourceBinding({
+    organization,
+    memberships: [membership],
+    project,
+    ownership,
+    boundAt: "2026-01-02T00:00:00.000Z",
+  });
+  assert.deepEqual(binding.outcomeIdentityRefs, []);
+  assert.deepEqual(binding.repositoryWorkspaceRefs, []);
+  assert.deepEqual(binding.usageQuotaNamespaceRefs, []);
+  assert.deepEqual(binding.auditRecoveryRefs, []);
+  assert.deepEqual(binding.admittedCapabilityRefs, []);
 });

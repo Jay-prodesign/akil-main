@@ -14,6 +14,7 @@ import {
   FileDurableOrganizationResourceBindingStore,
   InvalidDurableOrganizationResourceBindingStoreError,
   CorruptedOrganizationResourceBindingLineError,
+  bootstrapOrganizationResourceBinding,
 } from "../src/domain/durable-organization-resource-binding-store.js";
 
 function freshStoreDir(): string {
@@ -231,6 +232,140 @@ test("D9: a persisted line claiming a different tenantId than the file it is sto
     );
     const store = new FileDurableOrganizationResourceBindingStore(dir);
     assert.throws(() => store.get(tenantScope.tenantId, organization.organizationId), CorruptedOrganizationResourceBindingLineError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function writeRawRecord(dir: string, tenantScope: ReturnType<typeof createTenantScope>, organizationId: string, binding: unknown): void {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    tenantFilePath(dir, tenantScope.tenantId),
+    `${JSON.stringify({ organizationId, binding })}\n`,
+    "utf8",
+  );
+}
+
+test("D10 (Rev183 F4 mandatory witness): a persisted line with an empty membershipRefs array is rejected - construction itself could never produce this state", () => {
+  const dir = freshStoreDir();
+  try {
+    const { tenantScope, organization, binding } = bindingFixture();
+    writeRawRecord(dir, tenantScope, organization.organizationId, { ...binding, membershipRefs: [] });
+    const store = new FileDurableOrganizationResourceBindingStore(dir);
+    assert.throws(() => store.get(tenantScope.tenantId, organization.organizationId), CorruptedOrganizationResourceBindingLineError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("D11 (Rev183 F4 mandatory witness): a persisted line with a duplicate entry inside a ref array is rejected, exactly like duplicate rejection at construction", () => {
+  const dir = freshStoreDir();
+  try {
+    const { tenantScope, organization, binding } = bindingFixture();
+    writeRawRecord(dir, tenantScope, organization.organizationId, {
+      ...binding,
+      connectionBindingRefs: ["conn-1", "conn-1"],
+    });
+    const store = new FileDurableOrganizationResourceBindingStore(dir);
+    assert.throws(() => store.get(tenantScope.tenantId, organization.organizationId), CorruptedOrganizationResourceBindingLineError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("D12 (Rev183 F4 mandatory witness): a persisted line with a leading/trailing-whitespace ref is rejected, exactly like the domain's own whitespace invariant at construction", () => {
+  const dir = freshStoreDir();
+  try {
+    const { tenantScope, organization, binding } = bindingFixture();
+    writeRawRecord(dir, tenantScope, organization.organizationId, {
+      ...binding,
+      effectiveConfigRefs: [" cfg-padded "],
+    });
+    const store = new FileDurableOrganizationResourceBindingStore(dir);
+    assert.throws(() => store.get(tenantScope.tenantId, organization.organizationId), CorruptedOrganizationResourceBindingLineError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("D13 (Rev183 F4 mandatory witness): a persisted line whose top-level projectRef disagrees with binding.ownership.projectId is rejected - construction requires them to agree", () => {
+  const dir = freshStoreDir();
+  try {
+    const { tenantScope, organization, binding } = bindingFixture();
+    writeRawRecord(dir, tenantScope, organization.organizationId, {
+      ...binding,
+      projectRef: "a-different-project-id",
+    });
+    const store = new FileDurableOrganizationResourceBindingStore(dir);
+    assert.throws(() => store.get(tenantScope.tenantId, organization.organizationId), CorruptedOrganizationResourceBindingLineError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function creationLockPathFor(dir: string, tenantId: string, organizationId: string): string {
+  const tenantKey = Buffer.from(tenantId, "utf8").toString("base64url");
+  const orgKey = Buffer.from(organizationId, "utf8").toString("base64url");
+  return join(dir, ".creation-locks", `${tenantKey}.${orgKey}.lock`);
+}
+
+test("D14 (Rev183 F2 mandatory witness): partial-failure/restart recovery - a creation-lock left behind by a writer that crashed before its own durable append is self-healed by the next putIfAbsent call, rather than permanently hiding the record from get()", () => {
+  const dir = freshStoreDir();
+  try {
+    const { tenantScope, organization, binding } = bindingFixture();
+    const store = new FileDurableOrganizationResourceBindingStore(dir);
+    // Simulate a crash that happened AFTER a prior writer's linkSync won the
+    // creation-lock race but BEFORE its own appendFileSync to the durable
+    // per-tenant .jsonl file ever ran: write the lock file directly,
+    // bypassing putIfAbsent's own append step entirely, and never touch the
+    // .jsonl file.
+    const lockPath = creationLockPathFor(dir, tenantScope.tenantId, organization.organizationId);
+    writeFileSync(lockPath, JSON.stringify({ organizationId: organization.organizationId, binding }), "utf8");
+
+    // Before self-heal: the record is invisible to get() even though the
+    // lock durably exists.
+    assert.equal(store.get(tenantScope.tenantId, organization.organizationId), undefined);
+
+    const result = store.putIfAbsent(tenantScope.tenantId, organization.organizationId, binding);
+    assert.equal(result.created, false, "the lock already existed - this call did not win creation, it recovered it");
+    assert.deepEqual(result.binding, binding);
+
+    // After self-heal: get() now durably resolves the binding.
+    assert.deepEqual(store.get(tenantScope.tenantId, organization.organizationId), binding);
+    const fileContent = readFileSync(tenantFilePath(dir, tenantScope.tenantId), "utf8");
+    const lineCount = fileContent.split("\n").filter((line) => line.trim().length > 0).length;
+    assert.equal(lineCount, 1, "self-heal must durably record exactly one line, not zero and not a duplicate");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("D15 (Rev183 F2 mandatory witness): bootstrapOrganizationResourceBinding composes create+persist for ANY organizationId, idempotently, with no org_akilta-specific branch", () => {
+  const dir = freshStoreDir();
+  try {
+    const { tenantScope, organization, membership, project, ownership } = bindingFixture();
+    const store = new FileDurableOrganizationResourceBindingStore(dir);
+    const first = bootstrapOrganizationResourceBinding({
+      store,
+      organization,
+      memberships: [membership],
+      project,
+      ownership,
+      boundAt: "2026-01-02T00:00:00.000Z",
+    });
+    assert.equal(first.created, true);
+
+    const second = bootstrapOrganizationResourceBinding({
+      store,
+      organization,
+      memberships: [membership],
+      project,
+      ownership,
+      boundAt: "2026-01-02T00:00:00.000Z",
+    });
+    assert.equal(second.created, false, "the same real evidence must reinitialize deterministically and idempotently");
+    assert.deepEqual(second.binding, first.binding);
+    assert.deepEqual(store.get(tenantScope.tenantId, organization.organizationId), first.binding);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
