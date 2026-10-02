@@ -17,7 +17,7 @@ import { FileDurableConnectorConnectionStore } from "../src/domain/durable-conne
 import { createGenericApiConnectorDefinition, bindGenericApiDefinition } from "../src/domain/generic-connector-definition.js";
 import { executeConnectorCapability, ConnectorExecutionNotAuthorizedError, type ConnectorTransport } from "../src/domain/connector-execution.js";
 import { createOrganization, activateOrganization } from "../src/domain/organization.js";
-import { createOrganizationMembership } from "../src/domain/organization-membership.js";
+import { createOrganizationMembership, revokeOrganizationMembership } from "../src/domain/organization-membership.js";
 import { createOrganizationAccessRoleContext } from "../src/domain/organization-access-role.js";
 import { resolveEffectiveOrganizationAccess } from "../src/domain/effective-organization-access.js";
 import { createAuthorityContext, InsufficientAuthorityError } from "../src/domain/authority.js";
@@ -63,6 +63,10 @@ function adminAccess(permissions: ReadonlyArray<"READ" | "WRITE" | "EXECUTE"> = 
     permissions,
     canPerformProtectedActions: true,
   });
+  // Rev187 F2: a GRANTED access is still independently resolved here only
+  // for test-side assertions (e.g. `access.role`) - mutateConnectorConnectionStateAsAdmin
+  // itself now re-resolves access internally from the raw organization/
+  // membership/roleContext ingredients passed below, never from this value.
   const access = resolveEffectiveOrganizationAccess({
     organization,
     membership,
@@ -70,7 +74,7 @@ function adminAccess(permissions: ReadonlyArray<"READ" | "WRITE" | "EXECUTE"> = 
     authority,
     roleContext,
   });
-  return { authority, access };
+  return { organization, membership, roleContext, currentPrincipalRef: "principal-golden-b-admin", authority, access };
 }
 
 function ownership(): ProjectOwnershipRef {
@@ -150,11 +154,14 @@ test("Golden B: a current VERIFIED org_akilta connection authorizes execution; s
   // Step 2: durably transition to DEGRADED via the admitted authority/admin
   // mutation boundary - a real GRANTED ADMIN-role EffectiveAccessResolution
   // plus protected-action authority, never a raw transition+save call.
-  const { authority, access } = adminAccess();
+  const { organization, membership, roleContext, currentPrincipalRef, authority } = adminAccess();
   const savedDegraded = mutateConnectorConnectionStateAsAdmin({
     tenantScope,
     authority,
-    access,
+    organization,
+    membership,
+    currentPrincipalRef,
+    roleContext,
     store,
     connectionBindingId: verified.binding.connectionBindingId,
     to: "DEGRADED",
@@ -189,7 +196,10 @@ test("Golden B: a current VERIFIED org_akilta connection authorizes execution; s
   mutateConnectorConnectionStateAsAdmin({
     tenantScope,
     authority,
-    access,
+    organization,
+    membership,
+    currentPrincipalRef,
+    roleContext,
     store,
     connectionBindingId: verified.binding.connectionBindingId,
     to: "REVOKED",
@@ -270,7 +280,9 @@ test("Rev186 F2 (adversarial): an ordinary MEMBER-role access cannot mutate a co
       mutateConnectorConnectionStateAsAdmin({
         tenantScope,
         authority,
-        access: memberAccess,
+        organization,
+        membership,
+        currentPrincipalRef: "principal-golden-b-member",
         store,
         connectionBindingId: verified.binding.connectionBindingId,
         to: "DEGRADED",
@@ -307,7 +319,7 @@ test("Rev186 F2 (Founder implementation clarification): mutateConnectorConnectio
   const verified = verifyConnectorConnection(unverified, "evidence:golden-b-handshake");
   store.save(verified);
 
-  const { authority, access } = adminAccess(["READ"]);
+  const { organization, membership, roleContext, currentPrincipalRef, authority, access } = adminAccess(["READ"]);
   assert.equal(access.decision, "GRANTED");
   assert.equal(access.role, "ADMIN");
 
@@ -316,12 +328,74 @@ test("Rev186 F2 (Founder implementation clarification): mutateConnectorConnectio
       mutateConnectorConnectionStateAsAdmin({
         tenantScope,
         authority,
-        access,
+        organization,
+        membership,
+        currentPrincipalRef,
+        roleContext,
         store,
         connectionBindingId: verified.binding.connectionBindingId,
         to: "DEGRADED",
       }),
     InsufficientAuthorityError,
+  );
+  assert.equal(store.get(tenantScope.tenantId, verified.binding.connectionBindingId)!.instance.binding.connectionState, "VERIFIED");
+});
+
+test("Rev187 F2 (stale-access residual): mutateConnectorConnectionStateAsAdmin re-resolves access at mutation time - a membership revoked AFTER an earlier GRANTED/ADMIN resolution causes zero store mutation, never honoring the stale cached grant", () => {
+  const baseDir = mkdtempSync(join(tmpdir(), "os-v0-10-golden-b-stale-access-"));
+  const store = new FileDurableConnectorConnectionStore(baseDir);
+  const ownershipRef = ownership();
+  const descriptor = createConnectorDescriptor({
+    connectorKind: "GENERIC_CUSTOM_API",
+    displayName: "Golden B API",
+    supportedAuthModes: ["API_KEY", "BEARER_TOKEN"],
+    capabilityRefs: ["cap:golden-b-ping"],
+    isAiModelProvider: false,
+    requiresOAuthRedirect: false,
+  });
+  const requirement = requirementFor(ownershipRef);
+  const requested = requestConnectorConnection({
+    requirement,
+    connectorDescriptor: descriptor,
+    connectionBindingId: "bind-golden-b-stale-access",
+    workspaceRef: "workspace-golden-b",
+    integrationInstanceRef: "instance-golden-b",
+    delegatedScope: [],
+    authMode: "API_KEY",
+    secretRef: createSecretRef({ secretRefId: "secret-golden-b" }),
+  });
+  const unverified = transitionConnectorConnection(requested, "CONNECTED_UNVERIFIED");
+  const verified = verifyConnectorConnection(unverified, "evidence:golden-b-handshake");
+  store.save(verified);
+
+  const { organization, membership, roleContext, currentPrincipalRef, authority, access } = adminAccess();
+  // An earlier, now-stale resolution was GRANTED/ADMIN.
+  assert.equal(access.decision, "GRANTED");
+  assert.equal(access.role, "ADMIN");
+
+  // The membership is revoked AFTER that earlier resolution, before this
+  // mutation call - exactly the window Rev187 F2 flags. The caller passes
+  // the CURRENT (now-revoked) membership, never the stale cached `access`.
+  const revokedMembership = revokeOrganizationMembership({
+    membership,
+    revokedAt: "2026-10-02T00:00:05.000Z",
+    revokedReason: "offboarded",
+  });
+
+  assert.throws(
+    () =>
+      mutateConnectorConnectionStateAsAdmin({
+        tenantScope,
+        authority,
+        organization,
+        membership: revokedMembership,
+        currentPrincipalRef,
+        roleContext,
+        store,
+        connectionBindingId: verified.binding.connectionBindingId,
+        to: "DEGRADED",
+      }),
+    ConnectorConnectionAdminMutationNotAuthorizedError,
   );
   assert.equal(store.get(tenantScope.tenantId, verified.binding.connectionBindingId)!.instance.binding.connectionState, "VERIFIED");
 });

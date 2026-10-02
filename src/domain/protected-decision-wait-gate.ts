@@ -4,6 +4,7 @@ import type { Project } from "./project.js";
 import type { OutcomeJob } from "./outcome-job.js";
 import { requireSameTenant, requirePermission, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";
 import type { EffectiveAccessResolution } from "./effective-organization-access.js";
+import type { ProtectedDecisionRecord } from "./protected-decision-record.js";
 
 export class InvalidProtectedDecisionWaitRequestError extends Error {
   constructor(reason: string) {
@@ -112,40 +113,6 @@ export function createProtectedDecisionWaitRequest(input: {
 }
 
 /**
- * Rev186 F3: the durable evidence that a real protected decision was
- * actually MADE, for the exact `decisionRef` the wait was raised for -
- * resume must consume/verify this, not merely trust a bare label. Opaque
- * to this module beyond its own `decisionRef` cross-check - the real
- * decision-recording mechanism (a human approval UI, an admitted
- * `ApprovalReference`, etc.) remains a separate, later concern; this is
- * only the minimum durable proof this gate itself requires.
- */
-export interface ProtectedDecisionOutcomeEvidence {
-  readonly decisionRef: string;
-  readonly decidedAt: string;
-  readonly evidenceRef: string;
-}
-
-function requireNonEmptyOutcomeField(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new InvalidProtectedDecisionWaitRequestError(`decisionOutcome.${field} must be a non-empty string`);
-  }
-  return value;
-}
-
-export function createProtectedDecisionOutcomeEvidence(input: {
-  decisionRef: unknown;
-  decidedAt: unknown;
-  evidenceRef: unknown;
-}): ProtectedDecisionOutcomeEvidence {
-  return {
-    decisionRef: requireNonEmptyOutcomeField(input.decisionRef, "decisionRef"),
-    decidedAt: requireNonEmptyOutcomeField(input.decidedAt, "decidedAt"),
-    evidenceRef: requireNonEmptyOutcomeField(input.evidenceRef, "evidenceRef"),
-  };
-}
-
-/**
  * Rev186 F3: the single-use resume authorization a durable store's
  * `putIfAbsent` produces exactly once per `waitRequestId` - see
  * `durable-protected-decision-wait-store.ts`. This domain module never
@@ -153,7 +120,7 @@ export function createProtectedDecisionOutcomeEvidence(input: {
  * moment of resume. `resolvedByPrincipalRef` is the current authenticated
  * principal's own membership identity (never a bare caller-supplied label),
  * and `decisionRef`/`decisionEvidenceRef` are carried forward verbatim from
- * the exact `ProtectedDecisionOutcomeEvidence` that authorized this resume.
+ * the exact durable `ProtectedDecisionRecord` that authorized this resume.
  */
 export interface ProtectedDecisionResumeAuthorization {
   readonly waitRequestId: WaitRequestId;
@@ -166,7 +133,12 @@ export interface ProtectedDecisionResumeAuthorization {
 
 /**
  * "Resume must re-resolve current authority/config/connection/quota before
- * effect" (packet's own text). Rev186 F3 widens this gate's own two checks:
+ * effect" (packet's own text). Rev186 F3 widened this gate's own two
+ * checks; Rev187 F3b widens the second again - a decision "outcome" is no
+ * longer a bare caller-constructed object of strings, it is a real durable
+ * `ProtectedDecisionRecord` (`protected-decision-record.ts`) the caller
+ * must have already fetched from `DurableProtectedDecisionRecordStore`
+ * (this function itself has no persistence, so it cannot fetch one):
  *
  * 1. `access` must be a current, GRANTED `EffectiveAccessResolution`
  *    (`effective-organization-access.ts`) bound to a real
@@ -174,10 +146,16 @@ export interface ProtectedDecisionResumeAuthorization {
  *    string. `access.membershipId` becomes `resolvedByPrincipalRef`: the
  *    current authenticated principal who performed this resume, not an
  *    unauthenticated label.
- * 2. `decisionOutcome` must be real durable evidence that the protected
- *    decision this wait was raised for was actually MADE, and its own
- *    `decisionRef` must exactly equal `waitRequest.decisionRef` - a
- *    decision outcome for a different decision can never resume this wait.
+ * 2. `decisionRecord` must be a real durable `ProtectedDecisionRecord` for
+ *    the SAME tenant as this wait (a foreign-tenant record can never
+ *    resume it), whose own `decisionRef` exactly equals
+ *    `waitRequest.decisionRef` (a record for a different decision can
+ *    never resume this wait), and whose `outcome` is exactly `"APPROVED"`
+ *    - a `"DENIED"` or `"REVOKED"` record fails closed just as certainly
+ *    as no record at all (the caller fetching `undefined` from the
+ *    durable store is an even earlier fail-closed point, before this
+ *    function is even called - see `resume-protected-decision-for-
+ *    connector-effect.ts`).
  *
  * The existing activation-fingerprint currentness check is unchanged (the
  * same `assertCurrentActivation` discipline `outcome-job-execution-
@@ -195,7 +173,7 @@ export function authorizeProtectedDecisionResume(input: {
   readonly waitRequest: ProtectedDecisionWaitRequest;
   readonly access: EffectiveAccessResolution;
   readonly authority: AuthorityContext;
-  readonly decisionOutcome: ProtectedDecisionOutcomeEvidence;
+  readonly decisionRecord: ProtectedDecisionRecord;
   readonly currentActivationFingerprint: string;
   readonly now: unknown;
 }): ProtectedDecisionResumeAuthorization {
@@ -213,9 +191,19 @@ export function authorizeProtectedDecisionResume(input: {
       "access must be bound to a real OrganizationMembership (a current authenticated principal) to resume a protected decision",
     );
   }
-  if (input.decisionOutcome.decisionRef !== input.waitRequest.decisionRef) {
+  if (input.decisionRecord.tenantId !== input.waitRequest.tenantId) {
     throw new ProtectedDecisionWaitStaleError(
-      `decisionOutcome.decisionRef "${input.decisionOutcome.decisionRef}" does not match this wait's own decisionRef "${input.waitRequest.decisionRef}" - a decision outcome for a different decision can never resume this wait`,
+      "decisionRecord does not belong to the given waitRequest's own tenant - a foreign-tenant decision record can never resume this wait",
+    );
+  }
+  if (input.decisionRecord.decisionRef !== input.waitRequest.decisionRef) {
+    throw new ProtectedDecisionWaitStaleError(
+      `decisionRecord.decisionRef "${input.decisionRecord.decisionRef}" does not match this wait's own decisionRef "${input.waitRequest.decisionRef}" - a decision record for a different decision can never resume this wait`,
+    );
+  }
+  if (input.decisionRecord.outcome !== "APPROVED") {
+    throw new ProtectedDecisionWaitStaleError(
+      `decisionRecord's own outcome is "${input.decisionRecord.outcome}", not "APPROVED" - a denied or revoked decision can never resume this wait`,
     );
   }
   if (input.currentActivationFingerprint !== input.waitRequest.activationFingerprintAtWait) {
@@ -228,7 +216,7 @@ export function authorizeProtectedDecisionResume(input: {
     effectRef: input.waitRequest.effectRef,
     resolvedAt: requireNonEmptyString(input.now, "now"),
     resolvedByPrincipalRef: input.access.membershipId,
-    decisionRef: input.decisionOutcome.decisionRef,
-    decisionEvidenceRef: input.decisionOutcome.evidenceRef,
+    decisionRef: input.decisionRecord.decisionRef,
+    decisionEvidenceRef: input.decisionRecord.evidenceRef,
   };
 }

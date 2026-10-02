@@ -7,12 +7,13 @@ import {
   compileGoldenPathActivation,
 } from "./helpers/golden-path-fixture.js";
 import { createAuthorityContext } from "../src/domain/authority.js";
+import { createTenantScope, type TenantScope } from "../src/domain/tenant-scope.js";
 import { createOrganization, activateOrganization } from "../src/domain/organization.js";
 import { createOrganizationMembership, revokeOrganizationMembership } from "../src/domain/organization-membership.js";
 import { resolveEffectiveOrganizationAccess, type EffectiveAccessResolution } from "../src/domain/effective-organization-access.js";
+import { createProtectedDecisionRecord, type ProtectedDecisionOutcome } from "../src/domain/protected-decision-record.js";
 import {
   createProtectedDecisionWaitRequest,
-  createProtectedDecisionOutcomeEvidence,
   authorizeProtectedDecisionResume,
   InvalidProtectedDecisionWaitRequestError,
   ProtectedDecisionWaitStaleError,
@@ -39,24 +40,15 @@ function waitRequest(overrides: Partial<Parameters<typeof createProtectedDecisio
   });
 }
 
-function decisionOutcome(overrides: Partial<Parameters<typeof createProtectedDecisionOutcomeEvidence>[0]> = {}) {
-  return createProtectedDecisionOutcomeEvidence({
-    decisionRef: "decision:example",
-    decidedAt: "2026-10-02T00:00:30.000Z",
-    evidenceRef: "evidence:decision-made",
-    ...overrides,
-  });
-}
-
 function protectedAuthority() {
   return createAuthorityContext({ tenantScope: GOLDEN_PATH_TENANT_SCOPE, permissions: ["EXECUTE"], canPerformProtectedActions: true });
 }
 
-function grantedAccess(authority = protectedAuthority()): EffectiveAccessResolution {
+function grantedAccess(authority = protectedAuthority(), tenantScope: TenantScope = GOLDEN_PATH_TENANT_SCOPE): EffectiveAccessResolution {
   const organization = activateOrganization({
     organization: createOrganization({
-      organizationId: "org-akilta-pdw",
-      tenantScope: GOLDEN_PATH_TENANT_SCOPE,
+      organizationId: `org-akilta-pdw-${tenantScope.tenantId}`,
+      tenantScope,
       displayName: "AKILTA (Organization Zero)",
       createdAt: "2026-10-02T00:00:00.000Z",
     }),
@@ -64,7 +56,7 @@ function grantedAccess(authority = protectedAuthority()): EffectiveAccessResolut
   });
   const membership = createOrganizationMembership({
     membershipId: "membership-pdw-resumer",
-    tenantScope: GOLDEN_PATH_TENANT_SCOPE,
+    tenantScope,
     principalRef: "principal-pdw-resumer",
     role: "STAFF",
   });
@@ -73,6 +65,22 @@ function grantedAccess(authority = protectedAuthority()): EffectiveAccessResolut
     membership,
     currentPrincipalRef: "principal-pdw-resumer",
     authority,
+  });
+}
+
+function decisionRecord(overrides: {
+  decisionRef?: string;
+  outcome?: ProtectedDecisionOutcome;
+  tenantScope?: TenantScope;
+} = {}) {
+  const tenantScope = overrides.tenantScope ?? GOLDEN_PATH_TENANT_SCOPE;
+  return createProtectedDecisionRecord({
+    tenantScope,
+    decisionRef: overrides.decisionRef ?? "decision:example",
+    outcome: overrides.outcome ?? "APPROVED",
+    decidedByAccess: grantedAccess(createAuthorityContext({ tenantScope, permissions: ["EXECUTE"], canPerformProtectedActions: true }), tenantScope),
+    decidedAt: "2026-10-02T00:00:30.000Z",
+    evidenceRef: "evidence:decision-made",
   });
 }
 
@@ -97,7 +105,7 @@ test("authorizeProtectedDecisionResume requires protected-action authorization, 
       waitRequest: request,
       access: grantedAccess(nonProtected),
       authority: nonProtected,
-      decisionOutcome: decisionOutcome(),
+      decisionRecord: decisionRecord(),
       currentActivationFingerprint: compilation.profile.sourceFingerprint,
       now: "2026-10-02T00:01:00.000Z",
     }),
@@ -116,7 +124,7 @@ test("Rev186 F3 (Founder implementation clarification): authorizeProtectedDecisi
       waitRequest: request,
       access: grantedAccess(readOnlyButProtected),
       authority: readOnlyButProtected,
-      decisionOutcome: decisionOutcome(),
+      decisionRecord: decisionRecord(),
       currentActivationFingerprint: compilation.profile.sourceFingerprint,
       now: "2026-10-02T00:01:00.000Z",
     }),
@@ -131,7 +139,7 @@ test("authorizeProtectedDecisionResume fails closed when the current activation 
         waitRequest: request,
         access: grantedAccess(),
         authority: protectedAuthority(),
-        decisionOutcome: decisionOutcome(),
+        decisionRecord: decisionRecord(),
         currentActivationFingerprint: "a-different-fingerprint",
         now: "2026-10-02T00:01:00.000Z",
       }),
@@ -139,7 +147,7 @@ test("authorizeProtectedDecisionResume fails closed when the current activation 
   );
 });
 
-test("Rev186 F3: authorizeProtectedDecisionResume fails closed when the decision outcome's decisionRef does not match this exact wait's own decisionRef", () => {
+test("Rev186 F3: authorizeProtectedDecisionResume fails closed when the decision record's decisionRef does not match this exact wait's own decisionRef", () => {
   const request = waitRequest();
   assert.throws(
     () =>
@@ -147,7 +155,55 @@ test("Rev186 F3: authorizeProtectedDecisionResume fails closed when the decision
         waitRequest: request,
         access: grantedAccess(),
         authority: protectedAuthority(),
-        decisionOutcome: decisionOutcome({ decisionRef: "decision:a-different-one" }),
+        decisionRecord: decisionRecord({ decisionRef: "decision:a-different-one" }),
+        currentActivationFingerprint: compilation.profile.sourceFingerprint,
+        now: "2026-10-02T00:01:00.000Z",
+      }),
+    ProtectedDecisionWaitStaleError,
+  );
+});
+
+test("Rev187 F3b: authorizeProtectedDecisionResume fails closed when the decision record belongs to a foreign tenant", () => {
+  const request = waitRequest();
+  assert.throws(
+    () =>
+      authorizeProtectedDecisionResume({
+        waitRequest: request,
+        access: grantedAccess(),
+        authority: protectedAuthority(),
+        decisionRecord: decisionRecord({ tenantScope: createTenantScope("tenant-pdw-foreign") }),
+        currentActivationFingerprint: compilation.profile.sourceFingerprint,
+        now: "2026-10-02T00:01:00.000Z",
+      }),
+    ProtectedDecisionWaitStaleError,
+  );
+});
+
+test("Rev187 F3b: authorizeProtectedDecisionResume fails closed on a DENIED decision record", () => {
+  const request = waitRequest();
+  assert.throws(
+    () =>
+      authorizeProtectedDecisionResume({
+        waitRequest: request,
+        access: grantedAccess(),
+        authority: protectedAuthority(),
+        decisionRecord: decisionRecord({ outcome: "DENIED" }),
+        currentActivationFingerprint: compilation.profile.sourceFingerprint,
+        now: "2026-10-02T00:01:00.000Z",
+      }),
+    ProtectedDecisionWaitStaleError,
+  );
+});
+
+test("Rev187 F3b: authorizeProtectedDecisionResume fails closed on a REVOKED decision record", () => {
+  const request = waitRequest();
+  assert.throws(
+    () =>
+      authorizeProtectedDecisionResume({
+        waitRequest: request,
+        access: grantedAccess(),
+        authority: protectedAuthority(),
+        decisionRecord: decisionRecord({ outcome: "REVOKED" }),
         currentActivationFingerprint: compilation.profile.sourceFingerprint,
         now: "2026-10-02T00:01:00.000Z",
       }),
@@ -172,7 +228,7 @@ test("Rev186 F3: authorizeProtectedDecisionResume fails closed on a DENIED acces
         waitRequest: request,
         access: deniedAccess,
         authority,
-        decisionOutcome: decisionOutcome(),
+        decisionRecord: decisionRecord(),
         currentActivationFingerprint: compilation.profile.sourceFingerprint,
         now: "2026-10-02T00:01:00.000Z",
       }),
@@ -216,7 +272,7 @@ test("Rev186 F3 (adversarial, isolates the GRANTED check from the membershipId c
         waitRequest: request,
         access: deniedAccess,
         authority: protectedAuthority(),
-        decisionOutcome: decisionOutcome(),
+        decisionRecord: decisionRecord(),
         currentActivationFingerprint: compilation.profile.sourceFingerprint,
         now: "2026-10-02T00:01:00.000Z",
       }),
@@ -241,7 +297,7 @@ test("Rev186 F3 (adversarial, isolates the membershipId check): a GRANTED access
         waitRequest: request,
         access: servicePrincipalShapedAccess,
         authority,
-        decisionOutcome: decisionOutcome(),
+        decisionRecord: decisionRecord(),
         currentActivationFingerprint: compilation.profile.sourceFingerprint,
         now: "2026-10-02T00:01:00.000Z",
       }),
@@ -249,14 +305,14 @@ test("Rev186 F3 (adversarial, isolates the membershipId check): a GRANTED access
   );
 });
 
-test("authorizeProtectedDecisionResume succeeds when currentness/decision/access all match, and the resulting authorization binds the exact effectRef, decisionRef and current authenticated principal", () => {
+test("authorizeProtectedDecisionResume succeeds when currentness/decision/access/decisionRecord all match, and the resulting authorization binds the exact effectRef, decisionRef and current authenticated principal", () => {
   const request = waitRequest();
   const access = grantedAccess();
   const authorization = authorizeProtectedDecisionResume({
     waitRequest: request,
     access,
     authority: protectedAuthority(),
-    decisionOutcome: decisionOutcome(),
+    decisionRecord: decisionRecord(),
     currentActivationFingerprint: compilation.profile.sourceFingerprint,
     now: "2026-10-02T00:01:00.000Z",
   });

@@ -1,6 +1,9 @@
 import type { TenantScope } from "./tenant-scope.js";
 import { requireSameTenant, requirePermission, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";
-import type { EffectiveAccessResolution } from "./effective-organization-access.js";
+import { resolveEffectiveOrganizationAccess } from "./effective-organization-access.js";
+import type { Organization } from "./organization.js";
+import type { OrganizationMembership } from "./organization-membership.js";
+import type { OrganizationAccessRoleContext } from "./organization-access-role.js";
 import { transitionConnectorConnection, type ConnectorConnectionInstance } from "./integration-connector-catalog.js";
 import type { ConnectionState } from "./connection-authority.js";
 import type { DurableConnectorConnectionStore, StoredConnectorConnection } from "./durable-connector-connection-store.js";
@@ -19,11 +22,21 @@ export class ConnectorConnectionAdminMutationNotAuthorizedError extends Error {
  * staff/service-principal binding, effective access, or protected-action
  * authority. This is the minimum such boundary this exact consumer needs -
  * reusing `effective-organization-access.ts`'s own `EffectiveAccessResolution`
- * (an already-GRANTED resolution against a current, active membership) and
- * `authority.ts`'s existing protected-action gate, never a new IAM/admin
- * product. `access.role` must be `OWNER` or `ADMIN` - an ordinary `MEMBER`
- * resolution, however currently GRANTED, cannot mutate a connection's own
- * lifecycle state through this boundary.
+ * and `authority.ts`'s existing protected-action gate, never a new IAM/admin
+ * product. The resulting `access.role` must be `OWNER` or `ADMIN` - an
+ * ordinary `MEMBER` resolution, however currently GRANTED, cannot mutate a
+ * connection's own lifecycle state through this boundary.
+ *
+ * Rev187 F2 (stale-access residual): `resolveEffectiveOrganizationAccess`'s
+ * own doc comment states that re-invoking it with CURRENT inputs is the
+ * only way to obtain a current answer - it cannot itself preserve a stale
+ * decision. A caller-supplied, already-computed `EffectiveAccessResolution`
+ * is therefore never trusted here; this function instead takes the raw
+ * `organization`/`membership`/`currentPrincipalRef`/`roleContext` ingredients
+ * and calls `resolveEffectiveOrganizationAccess` itself, IMMEDIATELY before
+ * the mutation - so a membership revoked (or a role context withdrawn)
+ * between an earlier resolution and this call is caught here, not silently
+ * honored from a stale cached grant.
  *
  * The mutated connection is always re-read fresh from `store` immediately
  * before the transition (never the caller's own possibly-stale instance),
@@ -35,25 +48,35 @@ export class ConnectorConnectionAdminMutationNotAuthorizedError extends Error {
 export function mutateConnectorConnectionStateAsAdmin(input: {
   readonly tenantScope: TenantScope;
   readonly authority: AuthorityContext;
-  readonly access: EffectiveAccessResolution;
+  readonly organization: Organization;
+  readonly membership: OrganizationMembership;
+  readonly currentPrincipalRef: string;
+  readonly roleContext?: OrganizationAccessRoleContext;
   readonly store: DurableConnectorConnectionStore;
   readonly connectionBindingId: ConnectorConnectionInstance["binding"]["connectionBindingId"];
   readonly to: ConnectionState;
 }): StoredConnectorConnection {
   requireSameTenant(input.authority, input.tenantScope.tenantId);
-  if (input.access.decision !== "GRANTED") {
+  const access = resolveEffectiveOrganizationAccess({
+    organization: input.organization,
+    membership: input.membership,
+    currentPrincipalRef: input.currentPrincipalRef,
+    authority: input.authority,
+    ...(input.roleContext !== undefined ? { roleContext: input.roleContext } : {}),
+  });
+  if (access.decision !== "GRANTED") {
     throw new ConnectorConnectionAdminMutationNotAuthorizedError(
-      "access must be a GRANTED EffectiveAccessResolution to mutate a connection's lifecycle state",
+      `current access must resolve GRANTED to mutate a connection's lifecycle state (reasons: ${access.reasons.join("; ")})`,
     );
   }
-  if (input.access.tenantId !== input.tenantScope.tenantId) {
+  if (access.tenantId !== input.tenantScope.tenantId) {
     throw new ConnectorConnectionAdminMutationNotAuthorizedError(
       "access does not belong to the given tenantScope",
     );
   }
-  if (input.access.role !== "OWNER" && input.access.role !== "ADMIN") {
+  if (access.role !== "OWNER" && access.role !== "ADMIN") {
     throw new ConnectorConnectionAdminMutationNotAuthorizedError(
-      `admin mutation requires an OWNER or ADMIN access role (got "${String(input.access.role)}")`,
+      `admin mutation requires an OWNER or ADMIN access role (got "${String(access.role)}")`,
     );
   }
   requirePermission(input.authority, "EXECUTE");

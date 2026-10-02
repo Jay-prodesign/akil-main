@@ -14,10 +14,40 @@ import {
   FileDurableOrganizationResourceBindingStore,
 } from "../src/domain/durable-organization-resource-binding-store.js";
 import { resolveOrganizationResourceBindingStatus } from "../src/domain/organization-resource-binding.js";
-import { transitionOutcomeJob } from "../src/domain/outcome-job.js";
+import { transitionOutcomeJob, verifyOutcomeJob } from "../src/domain/outcome-job.js";
 import { createEvidenceReference } from "../src/domain/evidence.js";
 import { createVerificationResult, type VerificationResult } from "../src/domain/verification-result.js";
-import { verifyOutcomeJob } from "../src/domain/outcome-job.js";
+import type { WorkerInvoker } from "../src/domain/worker-invoker.js";
+import { createOutcomeJobExecutionEvent, type OutcomeJobExecutionEvent } from "../src/domain/outcome-job-execution-event.js";
+import { applyOutcomeJobExecutionEvent, type OutcomeJobExecutionRunState } from "../src/domain/outcome-job-execution-run-state.js";
+import {
+  createQuotaAdmissionScope,
+  createQuotaEnvelope,
+  admitQuotaReservation,
+  commitQuotaUsage,
+  releaseQuotaReservation,
+  findCanonicalLatestForIdempotencyKey,
+  EMPTY_QUOTA_LEDGER,
+  type QuotaEnvelope,
+  type QuotaReservationIdentity,
+  type QuotaLedger,
+} from "../src/domain/execution-quota-admission.js";
+import {
+  appendExecutionEconomicsEventAllowingCapturedAtDrift,
+  EMPTY_EXECUTION_ECONOMICS_LEDGER,
+  type ExecutionEconomicsEvent,
+  type ExecutionEconomicsLedger,
+} from "../src/domain/execution-economics-attribution.js";
+import {
+  dispatchOutcomeJobExecutionRun,
+  recordExecutionResult,
+  advanceOutcomeJobAfterExecutionSuccess,
+  type ExecutionEventStore,
+  type QuotaAdmissionPort,
+  type ExecutionEconomicsPort,
+  type CurrentQuotaEnvelopeResolver,
+  type QuotaSettlementPeek,
+} from "../src/application/outcome-job-execution-runtime.js";
 import {
   composeTaskPacketForOutcomeJob,
   resolveNextRunnableGoldenPathAction,
@@ -54,6 +84,76 @@ import {
  * is the ordinary OS-V0-01/02/08/09 kernel, consumed exactly as any other
  * Organization would consume it.
  */
+
+class InMemoryExecutionEventStore implements ExecutionEventStore {
+  private readonly byRun = new Map<string, OutcomeJobExecutionRunState>();
+  private readonly seenEventIds = new Set<string>();
+
+  appendEvent(event: OutcomeJobExecutionEvent): boolean {
+    if (this.seenEventIds.has(event.eventId)) {
+      return false;
+    }
+    this.seenEventIds.add(event.eventId);
+    const key = JSON.stringify([event.tenantId, event.customerId, event.projectId, event.jobId, event.runId]);
+    const current = this.byRun.get(key);
+    this.byRun.set(key, applyOutcomeJobExecutionEvent(current, event));
+    return true;
+  }
+
+  getState(tenantId: string, customerId: string, projectId: string, jobId: string, runId: string): OutcomeJobExecutionRunState | undefined {
+    return this.byRun.get(JSON.stringify([tenantId, customerId, projectId, jobId, runId]));
+  }
+}
+
+class InMemoryQuotaAdmissionStore implements QuotaAdmissionPort {
+  private ledger: QuotaLedger = EMPTY_QUOTA_LEDGER;
+
+  admit(input: Parameters<QuotaAdmissionPort["admit"]>[0]) {
+    const { ledger, outcome } = admitQuotaReservation({ ledger: this.ledger, ...input });
+    this.ledger = ledger;
+    return outcome;
+  }
+
+  commit(input: Parameters<QuotaAdmissionPort["commit"]>[0]) {
+    const { ledger, outcome } = commitQuotaUsage({ ledger: this.ledger, ...input });
+    this.ledger = ledger;
+    return outcome;
+  }
+
+  release(input: Parameters<QuotaAdmissionPort["release"]>[0]) {
+    const { ledger, outcome } = releaseQuotaReservation({ ledger: this.ledger, ...input });
+    this.ledger = ledger;
+    return outcome;
+  }
+
+  peekSettlement(input: { identity: QuotaReservationIdentity; idempotencyKey: unknown }): QuotaSettlementPeek {
+    if (typeof input.idempotencyKey !== "string") {
+      throw new Error("idempotencyKey must be a string");
+    }
+    const latest = findCanonicalLatestForIdempotencyKey(this.ledger, input.identity.scope.tenantId, input.idempotencyKey);
+    if (latest !== undefined && (latest.type === "COMMITTED" || latest.type === "RECONCILIATION_REQUIRED")) {
+      return { settled: true, event: latest };
+    }
+    return { settled: false };
+  }
+}
+
+class InMemoryExecutionEconomicsStore implements ExecutionEconomicsPort {
+  private ledger: ExecutionEconomicsLedger = EMPTY_EXECUTION_ECONOMICS_LEDGER;
+  recordSettledAttempt(event: ExecutionEconomicsEvent): void {
+    this.ledger = appendExecutionEconomicsEventAllowingCapturedAtDrift(this.ledger, event);
+  }
+}
+
+function acceptingInvoker(callLog: unknown[]): WorkerInvoker {
+  return {
+    role: "CLAUDE_PRIMARY_ENGINEER",
+    invoke: async (input) => {
+      callLog.push(input.outcomeJobExecution);
+      return { accepted: true };
+    },
+  };
+}
 
 function foundingPrincipalContext() {
   const organization = activateOrganization({
@@ -200,14 +300,88 @@ test("Rev186 F1 end-to-end: authorized org_akilta principal + resource binding -
   // unverified context.
   assert.deepEqual(access.permissions, authority.permissions);
 
+  // Rev187 F1 runtime residual: Golden A's authorized-principal/resource-
+  // binding witness must carry through the REAL dispatch/WorkerInvoker/
+  // execution runtime (dispatchOutcomeJobExecutionRun/recordExecutionResult/
+  // advanceOutcomeJobAfterExecutionSuccess, unmodified) before evidence/
+  // verification/next-action - never a direct transitionOutcomeJob shortcut
+  // past the real execution composition.
   const executingJob = transitionOutcomeJob(readyJob, "EXECUTING");
-  const succeededJob = transitionOutcomeJob(executingJob, "VERIFYING");
+  const quotaScope = createQuotaAdmissionScope({
+    tenantScope: GOLDEN_PATH_TENANT_SCOPE,
+    customerId: GOLDEN_PATH_CUSTOMER.customerId,
+    projectId: GOLDEN_PATH_PROJECT.projectId,
+    planId: compilation.profile.planId,
+    planVersion: compilation.profile.planVersion,
+  });
+  const quotaEnvelope: QuotaEnvelope = createQuotaEnvelope({
+    scope: quotaScope,
+    envelopeRef: "envelope-gpa-org-zero",
+    sourceFingerprint: "qfp-gpa-org-zero",
+    unitLimit: 1_000_000,
+  });
+  const quotaAdmission = new InMemoryQuotaAdmissionStore();
+  const economicsPort = new InMemoryExecutionEconomicsStore();
+  const eventStore = new InMemoryExecutionEventStore();
+  const quotaEnvelopeResolver: CurrentQuotaEnvelopeResolver = { resolveCurrentQuotaEnvelope: () => quotaEnvelope };
+  const dispatchBase = {
+    tenantScope: GOLDEN_PATH_TENANT_SCOPE,
+    customer: GOLDEN_PATH_CUSTOMER,
+    project: GOLDEN_PATH_PROJECT,
+    now: "2026-10-02T00:00:03.000Z",
+    executorKind: "INJECTED" as const,
+    expectedFingerprint: compilation.profile.sourceFingerprint,
+    currentFingerprint: compilation.profile.sourceFingerprint,
+    currentActivationPlanId: compilation.profile.planId,
+    currentActivationPlanVersion: compilation.profile.planVersion,
+    economicsPort,
+    economicsTaskRef: "task-ref-gpa-org-zero",
+    economicsUsageSource: "OTHER_ADMITTED" as const,
+    taskId: "task-gpa-org-zero",
+    branch: "claude/os-v0-10-golden-a-org-zero",
+    checkpointSha: "sha-org-zero-1",
+    quotaAdmission,
+    quotaEnvelope,
+    currentQuotaSourceFingerprint: "qfp-gpa-org-zero",
+    quotaEnvelopeResolver,
+    estimatedCost: { presence: "REPORTED" as const, amountMinorUnits: 10, currency: "USD" },
+  };
+  const callLog: unknown[] = [];
+  const invoker = acceptingInvoker(callLog);
+  const dispatchResult = await dispatchOutcomeJobExecutionRun({
+    ...dispatchBase,
+    job: executingJob,
+    authority,
+    runId: "run-gpa-org-zero",
+    correlationId: "corr-gpa-org-zero",
+    store: eventStore,
+    invoker,
+  });
+  assert.equal(dispatchResult.invoked, true);
+  assert.equal(callLog.length, 1);
+
+  const succeededState = await recordExecutionResult({
+    tenantScope: GOLDEN_PATH_TENANT_SCOPE,
+    customer: GOLDEN_PATH_CUSTOMER,
+    project: GOLDEN_PATH_PROJECT,
+    job: executingJob,
+    currentState: dispatchResult.state,
+    now: "2026-10-02T00:00:10.000Z",
+    type: "SUCCEEDED",
+    store: eventStore,
+  });
+  const afterSuccessAction = resolveNextRunnableGoldenPathAction({ job: executingJob, activation: compilation.profile, executionState: succeededState });
+  assert.equal(afterSuccessAction.code, "ADVANCE_TO_VERIFYING");
+
+  const succeededJob = advanceOutcomeJobAfterExecutionSuccess(executingJob, succeededState);
+  assert.equal(succeededJob.state, "VERIFYING");
+
   const evidence = createEvidenceReference({
     job: succeededJob,
     evidenceId: "ev-org-zero-1",
     evidenceType: "TEST_RESULT",
     sourceLocator: "internal://golden-path/org-zero",
-    capturedAt: "2026-10-02T00:00:10.000Z",
+    capturedAt: "2026-10-02T00:00:20.000Z",
   });
   const verification: VerificationResult = createVerificationResult({
     verificationId: "verif-org-zero-1",

@@ -11,9 +11,9 @@ import {
 } from "./helpers/golden-path-fixture.js";
 import {
   createProtectedDecisionWaitRequest,
-  createProtectedDecisionOutcomeEvidence,
   authorizeProtectedDecisionResume,
 } from "../src/domain/protected-decision-wait-gate.js";
+import { createProtectedDecisionRecord } from "../src/domain/protected-decision-record.js";
 import { createAuthorityContext } from "../src/domain/authority.js";
 import { createOrganization, activateOrganization } from "../src/domain/organization.js";
 import { createOrganizationMembership } from "../src/domain/organization-membership.js";
@@ -30,15 +30,6 @@ const job = compilation.jobs[0]!;
 function freshStore(): { store: FileDurableProtectedDecisionWaitStore; baseDir: string } {
   const baseDir = mkdtempSync(join(tmpdir(), "os-v0-10-protected-decision-wait-"));
   return { store: new FileDurableProtectedDecisionWaitStore(baseDir), baseDir };
-}
-
-function decisionOutcome(overrides: Partial<Parameters<typeof createProtectedDecisionOutcomeEvidence>[0]> = {}) {
-  return createProtectedDecisionOutcomeEvidence({
-    decisionRef: "decision:example",
-    decidedAt: "2026-10-02T00:00:30.000Z",
-    evidenceRef: "evidence:decision-made",
-    ...overrides,
-  });
 }
 
 let membershipSeq = 0;
@@ -65,6 +56,17 @@ function grantedAccess(): EffectiveAccessResolution {
     membership,
     currentPrincipalRef: `principal-dpdw-${membershipSeq}`,
     authority: createAuthorityContext({ tenantScope: GOLDEN_PATH_TENANT_SCOPE, permissions: ["EXECUTE"], canPerformProtectedActions: true }),
+  });
+}
+
+function decisionRecord() {
+  return createProtectedDecisionRecord({
+    tenantScope: GOLDEN_PATH_TENANT_SCOPE,
+    decisionRef: "decision:example",
+    outcome: "APPROVED",
+    decidedByAccess: grantedAccess(),
+    decidedAt: "2026-10-02T00:00:30.000Z",
+    evidenceRef: "evidence:decision-made",
   });
 }
 
@@ -121,7 +123,7 @@ test("D4: claimResume requires a durably-recorded wait request to already exist"
     waitRequest: request,
     access: grantedAccess(),
     authority: createAuthorityContext({ tenantScope: GOLDEN_PATH_TENANT_SCOPE, permissions: ["EXECUTE"], canPerformProtectedActions: true }),
-    decisionOutcome: decisionOutcome(),
+    decisionRecord: decisionRecord(),
     currentActivationFingerprint: compilation.profile.sourceFingerprint,
     now: "2026-10-02T00:01:00.000Z",
   });
@@ -142,7 +144,7 @@ test("D5 (benchmark-audit single-use): a second claimResume for the same waitReq
     waitRequest: request,
     access: firstAccess,
     authority,
-    decisionOutcome: decisionOutcome(),
+    decisionRecord: decisionRecord(),
     currentActivationFingerprint: compilation.profile.sourceFingerprint,
     now: "2026-10-02T00:01:00.000Z",
   });
@@ -153,7 +155,7 @@ test("D5 (benchmark-audit single-use): a second claimResume for the same waitReq
     waitRequest: request,
     access: grantedAccess(),
     authority,
-    decisionOutcome: decisionOutcome(),
+    decisionRecord: decisionRecord(),
     currentActivationFingerprint: compilation.profile.sourceFingerprint,
     now: "2026-10-02T00:02:00.000Z",
   });
@@ -171,7 +173,7 @@ test("D6: cold restart reconstructs the identical resume claim", () => {
     waitRequest: request,
     access: grantedAccess(),
     authority: createAuthorityContext({ tenantScope: GOLDEN_PATH_TENANT_SCOPE, permissions: ["EXECUTE"], canPerformProtectedActions: true }),
-    decisionOutcome: decisionOutcome(),
+    decisionRecord: decisionRecord(),
     currentActivationFingerprint: compilation.profile.sourceFingerprint,
     now: "2026-10-02T00:01:00.000Z",
   });
@@ -203,7 +205,7 @@ test("D8: claimResume rejects an authorization whose effectRef does not match th
     waitRequest: request,
     access: grantedAccess(),
     authority: createAuthorityContext({ tenantScope: GOLDEN_PATH_TENANT_SCOPE, permissions: ["EXECUTE"], canPerformProtectedActions: true }),
-    decisionOutcome: decisionOutcome(),
+    decisionRecord: decisionRecord(),
     currentActivationFingerprint: compilation.profile.sourceFingerprint,
     now: "2026-10-02T00:01:00.000Z",
   });

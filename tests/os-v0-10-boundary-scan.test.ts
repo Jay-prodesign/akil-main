@@ -9,6 +9,8 @@ import * as DurableProtectedDecisionWaitStore from "../src/domain/durable-protec
 import * as ConnectorCapabilityVerifiedEffect from "../src/domain/connector-capability-verified-effect.js";
 import * as ConnectorConnectionAdminMutation from "../src/domain/connector-connection-admin-mutation.js";
 import * as ResumeProtectedDecisionForConnectorEffect from "../src/domain/resume-protected-decision-for-connector-effect.js";
+import * as ProtectedDecisionRecord from "../src/domain/protected-decision-record.js";
+import * as DurableProtectedDecisionRecordStore from "../src/domain/durable-protected-decision-record-store.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const COMPOSITION_FILE = "src/domain/outcome-job-golden-path-composition.ts";
@@ -17,6 +19,8 @@ const WAIT_STORE_FILE = "src/domain/durable-protected-decision-wait-store.ts";
 const VERIFIED_EFFECT_FILE = "src/domain/connector-capability-verified-effect.ts";
 const ADMIN_MUTATION_FILE = "src/domain/connector-connection-admin-mutation.ts";
 const RESUME_CONNECTOR_EFFECT_FILE = "src/domain/resume-protected-decision-for-connector-effect.ts";
+const DECISION_RECORD_FILE = "src/domain/protected-decision-record.ts";
+const DECISION_RECORD_STORE_FILE = "src/domain/durable-protected-decision-record-store.ts";
 
 const SECRET_PATTERNS: ReadonlyArray<{ label: string; pattern: RegExp }> = [
   { label: "api-key", pattern: /api[_-]?key\s*[:=]\s*['"][^'"]+['"]/i },
@@ -48,6 +52,8 @@ const ALL_FILES = [
   VERIFIED_EFFECT_FILE,
   ADMIN_MUTATION_FILE,
   RESUME_CONNECTOR_EFFECT_FILE,
+  DECISION_RECORD_FILE,
+  DECISION_RECORD_STORE_FILE,
 ];
 
 for (const file of ALL_FILES) {
@@ -112,6 +118,7 @@ test("OS-V0-10: protected-decision-wait-gate.ts imports only its declared siblin
     'import type { OutcomeJob } from "./outcome-job.js";',
     'import { requireSameTenant, requirePermission, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";',
     'import type { EffectiveAccessResolution } from "./effective-organization-access.js";',
+    'import type { ProtectedDecisionRecord } from "./protected-decision-record.js";',
   ]);
 });
 
@@ -157,7 +164,10 @@ test("OS-V0-10: connector-connection-admin-mutation.ts imports only its declared
   assert.deepEqual(importLinesOf(ADMIN_MUTATION_FILE), [
     'import type { TenantScope } from "./tenant-scope.js";',
     'import { requireSameTenant, requirePermission, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";',
-    'import type { EffectiveAccessResolution } from "./effective-organization-access.js";',
+    'import { resolveEffectiveOrganizationAccess } from "./effective-organization-access.js";',
+    'import type { Organization } from "./organization.js";',
+    'import type { OrganizationMembership } from "./organization-membership.js";',
+    'import type { OrganizationAccessRoleContext } from "./organization-access-role.js";',
     'import { transitionConnectorConnection, type ConnectorConnectionInstance } from "./integration-connector-catalog.js";',
     'import type { ConnectionState } from "./connection-authority.js";',
     'import type { DurableConnectorConnectionStore, StoredConnectorConnection } from "./durable-connector-connection-store.js";',
@@ -170,10 +180,10 @@ test("OS-V0-10: resume-protected-decision-for-connector-effect.ts imports only i
     'import {',
     'authorizeProtectedDecisionResume,',
     'type ProtectedDecisionWaitRequest,',
-    'type ProtectedDecisionOutcomeEvidence,',
     'type ProtectedDecisionResumeAuthorization,',
     '} from "./protected-decision-wait-gate.js";',
     'import type { DurableProtectedDecisionWaitStore } from "./durable-protected-decision-wait-store.js";',
+    'import type { DurableProtectedDecisionRecordStore } from "./durable-protected-decision-record-store.js";',
     'import type { EffectiveAccessResolution } from "./effective-organization-access.js";',
     'import type { AuthorityContext } from "./authority.js";',
     'import {',
@@ -184,6 +194,30 @@ test("OS-V0-10: resume-protected-decision-for-connector-effect.ts imports only i
     'import type { executeConnectorCapability, ConnectorTransport, SecretResolver, CurrentConnectorConnectionReader } from "./connector-execution.js";',
     'import type { ProjectOwnershipRef } from "./project-ownership.js";',
     'import type { ExternalEffectRetryClassification } from "./external-effect-envelope.js";',
+    'import type { QuotaAdmissionPort } from "../application/outcome-job-execution-runtime.js";',
+    'import {',
+    'createQuotaReservationIdentity,',
+    'deriveQuotaReservationIdempotencyKey,',
+    'assertCurrentQuotaEnvelope,',
+    'type QuotaEnvelope,',
+    '} from "./execution-quota-admission.js";',
+  ]);
+});
+
+test("OS-V0-10: protected-decision-record.ts imports only its declared sibling domain modules", () => {
+  assert.deepEqual(importLinesOf(DECISION_RECORD_FILE), [
+    'import type { TenantScope } from "./tenant-scope.js";',
+    'import type { EffectiveAccessResolution } from "./effective-organization-access.js";',
+  ]);
+});
+
+test("OS-V0-10: durable-protected-decision-record-store.ts imports only node:fs, node:crypto, node:path, and protected-decision-record.ts - no new runtime dependency", () => {
+  assert.deepEqual(importLinesOf(DECISION_RECORD_STORE_FILE), [
+    'import { mkdirSync, readFileSync, writeFileSync, existsSync, appendFileSync, linkSync, unlinkSync } from "node:fs";',
+    'import { randomUUID } from "node:crypto";',
+    'import { join } from "node:path";',
+    'import type { TenantScope } from "./tenant-scope.js";',
+    'import type { ProtectedDecisionRecord } from "./protected-decision-record.js";',
   ]);
 });
 
@@ -200,8 +234,22 @@ test("OS-V0-10: protected-decision-wait-gate.ts module exports exactly the expec
     "InvalidProtectedDecisionWaitRequestError",
     "ProtectedDecisionWaitStaleError",
     "authorizeProtectedDecisionResume",
-    "createProtectedDecisionOutcomeEvidence",
     "createProtectedDecisionWaitRequest",
+  ]);
+});
+
+test("OS-V0-10: protected-decision-record.ts module exports exactly the expected surface", () => {
+  assert.deepEqual(Object.keys(ProtectedDecisionRecord).sort(), [
+    "InvalidProtectedDecisionRecordError",
+    "createProtectedDecisionRecord",
+  ]);
+});
+
+test("OS-V0-10: durable-protected-decision-record-store.ts module exports exactly the expected surface", () => {
+  assert.deepEqual(Object.keys(DurableProtectedDecisionRecordStore).sort(), [
+    "CorruptedProtectedDecisionRecordLineError",
+    "FileDurableProtectedDecisionRecordStore",
+    "InvalidDurableProtectedDecisionRecordStoreError",
   ]);
 });
 
@@ -214,6 +262,9 @@ test("OS-V0-10: connector-connection-admin-mutation.ts module exports exactly th
 
 test("OS-V0-10: resume-protected-decision-for-connector-effect.ts module exports exactly the expected surface", () => {
   assert.deepEqual(Object.keys(ResumeProtectedDecisionForConnectorEffect).sort(), [
+    "ProtectedDecisionRecordNotFoundError",
+    "ProtectedEffectBindingMismatchError",
+    "ProtectedEffectQuotaRejectedError",
     "resumeProtectedDecisionAndExecuteConnectorEffect",
   ]);
 });
