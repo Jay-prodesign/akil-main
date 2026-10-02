@@ -20,7 +20,7 @@ import { createOrganization, activateOrganization } from "../src/domain/organiza
 import { createOrganizationMembership } from "../src/domain/organization-membership.js";
 import { createOrganizationAccessRoleContext } from "../src/domain/organization-access-role.js";
 import { resolveEffectiveOrganizationAccess } from "../src/domain/effective-organization-access.js";
-import { createAuthorityContext } from "../src/domain/authority.js";
+import { createAuthorityContext, InsufficientAuthorityError } from "../src/domain/authority.js";
 import {
   mutateConnectorConnectionStateAsAdmin,
   ConnectorConnectionAdminMutationNotAuthorizedError,
@@ -41,7 +41,7 @@ import {
 
 const tenantScope = createTenantScope("tenant-golden-b");
 
-function adminAccess() {
+function adminAccess(permissions: ReadonlyArray<"READ" | "WRITE" | "EXECUTE"> = ["EXECUTE", "WRITE", "READ"]) {
   const organization = activateOrganization({
     organization: createOrganization({
       organizationId: "org-akilta-golden-b",
@@ -60,7 +60,7 @@ function adminAccess() {
   const roleContext = createOrganizationAccessRoleContext({ membership, role: "ADMIN" });
   const authority = createAuthorityContext({
     tenantScope,
-    permissions: ["EXECUTE", "WRITE", "READ"],
+    permissions,
     canPerformProtectedActions: true,
   });
   const access = resolveEffectiveOrganizationAccess({
@@ -276,6 +276,52 @@ test("Rev186 F2 (adversarial): an ordinary MEMBER-role access cannot mutate a co
         to: "DEGRADED",
       }),
     ConnectorConnectionAdminMutationNotAuthorizedError,
+  );
+  assert.equal(store.get(tenantScope.tenantId, verified.binding.connectionBindingId)!.instance.binding.connectionState, "VERIFIED");
+});
+
+test("Rev186 F2 (Founder implementation clarification): mutateConnectorConnectionStateAsAdmin requires ordinary EXECUTE permission separately from canPerformProtectedActions - a READ-only ADMIN-role access cannot mutate lifecycle state merely because canPerformProtectedActions is true", () => {
+  const baseDir = mkdtempSync(join(tmpdir(), "os-v0-10-golden-b-readonly-admin-"));
+  const store = new FileDurableConnectorConnectionStore(baseDir);
+  const ownershipRef = ownership();
+  const descriptor = createConnectorDescriptor({
+    connectorKind: "GENERIC_CUSTOM_API",
+    displayName: "Golden B API",
+    supportedAuthModes: ["API_KEY", "BEARER_TOKEN"],
+    capabilityRefs: ["cap:golden-b-ping"],
+    isAiModelProvider: false,
+    requiresOAuthRedirect: false,
+  });
+  const requirement = requirementFor(ownershipRef);
+  const requested = requestConnectorConnection({
+    requirement,
+    connectorDescriptor: descriptor,
+    connectionBindingId: "bind-golden-b-readonly-admin",
+    workspaceRef: "workspace-golden-b",
+    integrationInstanceRef: "instance-golden-b",
+    delegatedScope: [],
+    authMode: "API_KEY",
+    secretRef: createSecretRef({ secretRefId: "secret-golden-b" }),
+  });
+  const unverified = transitionConnectorConnection(requested, "CONNECTED_UNVERIFIED");
+  const verified = verifyConnectorConnection(unverified, "evidence:golden-b-handshake");
+  store.save(verified);
+
+  const { authority, access } = adminAccess(["READ"]);
+  assert.equal(access.decision, "GRANTED");
+  assert.equal(access.role, "ADMIN");
+
+  assert.throws(
+    () =>
+      mutateConnectorConnectionStateAsAdmin({
+        tenantScope,
+        authority,
+        access,
+        store,
+        connectionBindingId: verified.binding.connectionBindingId,
+        to: "DEGRADED",
+      }),
+    InsufficientAuthorityError,
   );
   assert.equal(store.get(tenantScope.tenantId, verified.binding.connectionBindingId)!.instance.binding.connectionState, "VERIFIED");
 });

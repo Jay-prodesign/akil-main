@@ -1,5 +1,5 @@
 import type { TenantScope } from "./tenant-scope.js";
-import { requireSameTenant, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";
+import { requireSameTenant, requirePermission, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";
 import type { EffectiveAccessResolution } from "./effective-organization-access.js";
 import { transitionConnectorConnection, type ConnectorConnectionInstance } from "./integration-connector-catalog.js";
 import type { ConnectionState } from "./connection-authority.js";
@@ -56,6 +56,7 @@ export function mutateConnectorConnectionStateAsAdmin(input: {
       `admin mutation requires an OWNER or ADMIN access role (got "${String(input.access.role)}")`,
     );
   }
+  requirePermission(input.authority, "EXECUTE");
   requireProtectedActionAuthorization(input.authority, "mutateConnectorConnectionStateAsAdmin");
 
   const current = input.store.get(input.tenantScope.tenantId, input.connectionBindingId);

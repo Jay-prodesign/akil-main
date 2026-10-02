@@ -104,6 +104,25 @@ test("authorizeProtectedDecisionResume requires protected-action authorization, 
   );
 });
 
+test("Rev186 F3 (Founder implementation clarification): authorizeProtectedDecisionResume requires ordinary EXECUTE permission separately from canPerformProtectedActions - a READ-only authority cannot resume a protected decision merely because canPerformProtectedActions is true", () => {
+  const request = waitRequest();
+  const readOnlyButProtected = createAuthorityContext({
+    tenantScope: GOLDEN_PATH_TENANT_SCOPE,
+    permissions: ["READ"],
+    canPerformProtectedActions: true,
+  });
+  assert.throws(() =>
+    authorizeProtectedDecisionResume({
+      waitRequest: request,
+      access: grantedAccess(readOnlyButProtected),
+      authority: readOnlyButProtected,
+      decisionOutcome: decisionOutcome(),
+      currentActivationFingerprint: compilation.profile.sourceFingerprint,
+      now: "2026-10-02T00:01:00.000Z",
+    }),
+  );
+});
+
 test("authorizeProtectedDecisionResume fails closed when the current activation fingerprint has moved since the wait was raised - resume must re-resolve currentness before effect", () => {
   const request = waitRequest();
   assert.throws(

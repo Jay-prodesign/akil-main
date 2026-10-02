@@ -191,6 +191,11 @@ test("executeConnectorCapabilityAsVerifiedEffect requires protected-action autho
   assert.throws(() => executeConnectorCapabilityAsVerifiedEffect(baseInput({ authority: nonProtected })));
 });
 
+test("Rev186 F3 (Founder implementation clarification): executeConnectorCapabilityAsVerifiedEffect requires ordinary EXECUTE permission separately from canPerformProtectedActions - a READ-only authority cannot cause a material connector effect merely because canPerformProtectedActions is true", () => {
+  const readOnlyButProtected = createAuthorityContext({ tenantScope, permissions: ["READ"], canPerformProtectedActions: true });
+  assert.throws(() => executeConnectorCapabilityAsVerifiedEffect(baseInput({ authority: readOnlyButProtected })));
+});
+
 test("executeConnectorCapabilityAsVerifiedEffect fails closed on a cross-tenant authority", () => {
   const foreignTenant = createTenantScope("tenant-ccve-foreign");
   const foreignAuthority = createAuthorityContext({ tenantScope: foreignTenant, permissions: ["EXECUTE"], canPerformProtectedActions: true });

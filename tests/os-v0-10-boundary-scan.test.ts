@@ -110,7 +110,7 @@ test("OS-V0-10: protected-decision-wait-gate.ts imports only its declared siblin
     'import type { Customer } from "./customer.js";',
     'import type { Project } from "./project.js";',
     'import type { OutcomeJob } from "./outcome-job.js";',
-    'import { requireSameTenant, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";',
+    'import { requireSameTenant, requirePermission, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";',
     'import type { EffectiveAccessResolution } from "./effective-organization-access.js";',
   ]);
 });
@@ -149,14 +149,14 @@ test("OS-V0-10: connector-capability-verified-effect.ts imports only its declare
     'type ExternalEffectAttempt,',
     'type ExternalEffectRetryClassification,',
     '} from "./external-effect-envelope.js";',
-    'import { requireSameTenant, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";',
+    'import { requireSameTenant, requirePermission, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";',
   ]);
 });
 
 test("OS-V0-10: connector-connection-admin-mutation.ts imports only its declared sibling domain modules", () => {
   assert.deepEqual(importLinesOf(ADMIN_MUTATION_FILE), [
     'import type { TenantScope } from "./tenant-scope.js";',
-    'import { requireSameTenant, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";',
+    'import { requireSameTenant, requirePermission, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";',
     'import type { EffectiveAccessResolution } from "./effective-organization-access.js";',
     'import { transitionConnectorConnection, type ConnectorConnectionInstance } from "./integration-connector-catalog.js";',
     'import type { ConnectionState } from "./connection-authority.js";',

@@ -17,7 +17,7 @@ import {
   type ExternalEffectAttempt,
   type ExternalEffectRetryClassification,
 } from "./external-effect-envelope.js";
-import { requireSameTenant, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";
+import { requireSameTenant, requirePermission, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";
 
 export class InvalidVerifiedConnectorEffectError extends Error {
   constructor(reason: string) {
@@ -108,6 +108,7 @@ export function executeConnectorCapabilityAsVerifiedEffect(input: {
   readonly readback: ConnectorCapabilityReadback;
 }): VerifiedConnectorEffectOutcome {
   requireSameTenant(input.authority, input.tenantScope.tenantId);
+  requirePermission(input.authority, "EXECUTE");
   requireProtectedActionAuthorization(input.authority, "executeConnectorCapabilityAsVerifiedEffect");
 
   const intent: ExternalEffectIntent = createExternalEffectIntent({

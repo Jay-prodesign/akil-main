@@ -2,7 +2,7 @@ import type { TenantScope } from "./tenant-scope.js";
 import type { Customer } from "./customer.js";
 import type { Project } from "./project.js";
 import type { OutcomeJob } from "./outcome-job.js";
-import { requireSameTenant, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";
+import { requireSameTenant, requirePermission, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";
 import type { EffectiveAccessResolution } from "./effective-organization-access.js";
 
 export class InvalidProtectedDecisionWaitRequestError extends Error {
@@ -200,6 +200,7 @@ export function authorizeProtectedDecisionResume(input: {
   readonly now: unknown;
 }): ProtectedDecisionResumeAuthorization {
   requireSameTenant(input.authority, input.waitRequest.tenantId);
+  requirePermission(input.authority, "EXECUTE");
   requireProtectedActionAuthorization(input.authority, "authorizeProtectedDecisionResume");
   if (input.access.decision !== "GRANTED") {
     throw new ProtectedDecisionWaitStaleError("access must be a GRANTED EffectiveAccessResolution to resume a protected decision");

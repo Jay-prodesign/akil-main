@@ -5,8 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createOrganization, activateOrganization } from "../src/domain/organization.js";
 import { createOrganizationMembership, createAssignmentReference } from "../src/domain/organization-membership.js";
-import { resolveEffectiveOrganizationAccess } from "../src/domain/effective-organization-access.js";
 import { createAuthorityContext } from "../src/domain/authority.js";
+import { createAuthenticatedStaffPrincipal } from "../src/web/staff-session-context.js";
+import { createDevFixtureStaffSessionProvider } from "../src/web/dev-fixture-staff-session-provider.js";
+import { requireInternalOsAccess, requireInternalOsProjectAccess, type StaffAccessGrant } from "../src/web/internal-os-access.js";
 import {
   bootstrapOrganizationResourceBinding,
   FileDurableOrganizationResourceBindingStore,
@@ -29,18 +31,27 @@ import {
 } from "./helpers/golden-path-fixture.js";
 
 /**
- * OS-V0-10 Rev186 F1: Golden A must begin at an authorized principal ->
- * org_akilta -> bounded outcome/project, not a synthetic tenant/customer/
- * project with a bare caller-constructed `AuthorityContext`. This test
- * enters through the exact accepted OS-V0-09 ingress - a real
- * `Organization`, a real `OrganizationMembership` with real assignment
- * evidence, `resolveEffectiveOrganizationAccess` (GRANTED), a real
+ * OS-V0-10 Rev186 F1 (Founder implementation clarification, same scope):
+ * Golden A must begin at an authorized principal -> org_akilta -> bounded
+ * outcome/project, not a synthetic tenant/customer/project with a bare
+ * caller-constructed `AuthorityContext`, and the authenticated-human proof
+ * must reuse the already-accepted staff ingress chain
+ * (`StaffSessionProvider` -> `requireInternalOsAccess` ->
+ * `resolveEffectiveOrganizationAccess`) rather than calling
+ * `resolveEffectiveOrganizationAccess` directly - a production IdP/session
+ * is intentionally not fabricated here (`createProductionStaffSessionProvider()`
+ * remains fail-closed/unauthenticated until separately admitted), so this
+ * test uses `createDevFixtureStaffSessionProvider`, the same dev-only
+ * mechanical guard `tests/web-internal-os-access.test.ts` already uses,
+ * never a production provider. A real `Organization`, a real
+ * `OrganizationMembership` with real assignment evidence, a real staff
+ * session resolved through `requireInternalOsAccess` (GRANTED), a real
  * `bootstrapOrganizationResourceBinding`/`resolveOrganizationResourceBindingStatus`
  * (READY) - before the already-proven activation/recipe/plan/OutcomeJob
  * -> TaskPacket -> execution -> evidence -> verification -> next-action
  * lineage is exercised on the SAME tenant/customer/project identity. No
  * AKILTA-only bypass, isSystem flag, or second IAM/context system - this
- * is the ordinary OS-V0-01/02/09 kernel, consumed exactly as any other
+ * is the ordinary OS-V0-01/02/08/09 kernel, consumed exactly as any other
  * Organization would consume it.
  */
 
@@ -75,16 +86,25 @@ function foundingPrincipalContext() {
     canPerformProtectedActions: true,
   });
 
-  const access = resolveEffectiveOrganizationAccess({
+  const principal = createAuthenticatedStaffPrincipal({
+    principalId: "principal-golden-a-founder",
+    displayName: "Golden A Founding Principal",
+  });
+  const sessionToken = "token-golden-a-founder";
+  const provider = createDevFixtureStaffSessionProvider({
+    fixtures: new Map([[sessionToken, { principal, issuedAt: "2026-10-02T00:00:00.000Z" }]]),
+    isProduction: false,
+  });
+  const grant: StaffAccessGrant = { membership, authority, assignments: [assignment] };
+
+  const internalOsAccess = requireInternalOsAccess({
+    provider,
+    sessionToken,
     organization,
-    membership,
-    currentPrincipalRef: "principal-golden-a-founder",
-    authority,
-    project: GOLDEN_PATH_PROJECT,
-    assignments: [assignment],
+    grants: [grant],
   });
 
-  return { organization, membership, authority, access };
+  return { organization, membership, authority, access: internalOsAccess.access, internalOsAccess };
 }
 
 test("Rev186 F1: Golden A begins at authorized principal -> org_akilta -> bounded project through resolveEffectiveOrganizationAccess (GRANTED)", () => {
@@ -125,7 +145,11 @@ test("Rev186 F1: Golden A's authorized principal is bound through a real bootstr
 });
 
 test("Rev186 F1 end-to-end: authorized org_akilta principal + resource binding -> real activation/plan/OutcomeJob -> TaskPacket -> dispatch -> SUCCEEDED -> VERIFYING -> independent verification -> VERIFIED -> CLOSE_JOB", async () => {
-  const { organization, membership, authority, access } = foundingPrincipalContext();
+  const { organization, membership, authority, internalOsAccess } = foundingPrincipalContext();
+  assert.equal(internalOsAccess.access.decision, "GRANTED");
+  // "Bounded outcome/project": re-check access scoped to the exact project
+  // Golden A will operate against, not merely organization-level access.
+  const access = requireInternalOsProjectAccess({ organization, context: internalOsAccess, project: GOLDEN_PATH_PROJECT });
   assert.equal(access.decision, "GRANTED");
 
   const baseDir = mkdtempSync(join(tmpdir(), "os-v0-10-golden-a-org-zero-e2e-"));
