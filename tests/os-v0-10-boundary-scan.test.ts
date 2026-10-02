@@ -7,12 +7,16 @@ import * as OutcomeJobGoldenPathComposition from "../src/domain/outcome-job-gold
 import * as ProtectedDecisionWaitGate from "../src/domain/protected-decision-wait-gate.js";
 import * as DurableProtectedDecisionWaitStore from "../src/domain/durable-protected-decision-wait-store.js";
 import * as ConnectorCapabilityVerifiedEffect from "../src/domain/connector-capability-verified-effect.js";
+import * as ConnectorConnectionAdminMutation from "../src/domain/connector-connection-admin-mutation.js";
+import * as ResumeProtectedDecisionForConnectorEffect from "../src/domain/resume-protected-decision-for-connector-effect.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const COMPOSITION_FILE = "src/domain/outcome-job-golden-path-composition.ts";
 const WAIT_GATE_FILE = "src/domain/protected-decision-wait-gate.ts";
 const WAIT_STORE_FILE = "src/domain/durable-protected-decision-wait-store.ts";
 const VERIFIED_EFFECT_FILE = "src/domain/connector-capability-verified-effect.ts";
+const ADMIN_MUTATION_FILE = "src/domain/connector-connection-admin-mutation.ts";
+const RESUME_CONNECTOR_EFFECT_FILE = "src/domain/resume-protected-decision-for-connector-effect.ts";
 
 const SECRET_PATTERNS: ReadonlyArray<{ label: string; pattern: RegExp }> = [
   { label: "api-key", pattern: /api[_-]?key\s*[:=]\s*['"][^'"]+['"]/i },
@@ -37,7 +41,14 @@ const BYPASS_PATTERNS: ReadonlyArray<{ label: string; pattern: RegExp }> = [
   { label: "raw-credential-field", pattern: /\b(rawCredential|credentialPayload|sessionCookie)\w*\s*[:?.]/i },
 ];
 
-const ALL_FILES = [COMPOSITION_FILE, WAIT_GATE_FILE, WAIT_STORE_FILE, VERIFIED_EFFECT_FILE];
+const ALL_FILES = [
+  COMPOSITION_FILE,
+  WAIT_GATE_FILE,
+  WAIT_STORE_FILE,
+  VERIFIED_EFFECT_FILE,
+  ADMIN_MUTATION_FILE,
+  RESUME_CONNECTOR_EFFECT_FILE,
+];
 
 for (const file of ALL_FILES) {
   test(`OS-V0-10: ${file} contains no secret material, hard-coded provider/model coupling, or isSystem/bypass path`, () => {
@@ -100,6 +111,7 @@ test("OS-V0-10: protected-decision-wait-gate.ts imports only its declared siblin
     'import type { Project } from "./project.js";',
     'import type { OutcomeJob } from "./outcome-job.js";',
     'import { requireSameTenant, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";',
+    'import type { EffectiveAccessResolution } from "./effective-organization-access.js";',
   ]);
 });
 
@@ -122,7 +134,6 @@ test("OS-V0-10: connector-capability-verified-effect.ts imports only its declare
     'import {',
     'executeConnectorCapability,',
     'ConnectorExecutionAuthorizationError,',
-    'ConnectorExecutionTransportError,',
     'type ConnectorExecutionResult,',
     'type ConnectorTransport,',
     'type SecretResolver,',
@@ -142,6 +153,40 @@ test("OS-V0-10: connector-capability-verified-effect.ts imports only its declare
   ]);
 });
 
+test("OS-V0-10: connector-connection-admin-mutation.ts imports only its declared sibling domain modules", () => {
+  assert.deepEqual(importLinesOf(ADMIN_MUTATION_FILE), [
+    'import type { TenantScope } from "./tenant-scope.js";',
+    'import { requireSameTenant, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";',
+    'import type { EffectiveAccessResolution } from "./effective-organization-access.js";',
+    'import { transitionConnectorConnection, type ConnectorConnectionInstance } from "./integration-connector-catalog.js";',
+    'import type { ConnectionState } from "./connection-authority.js";',
+    'import type { DurableConnectorConnectionStore, StoredConnectorConnection } from "./durable-connector-connection-store.js";',
+  ]);
+});
+
+test("OS-V0-10: resume-protected-decision-for-connector-effect.ts imports only its declared sibling domain modules", () => {
+  assert.deepEqual(importLinesOf(RESUME_CONNECTOR_EFFECT_FILE), [
+    'import type { TenantScope } from "./tenant-scope.js";',
+    'import {',
+    'authorizeProtectedDecisionResume,',
+    'type ProtectedDecisionWaitRequest,',
+    'type ProtectedDecisionOutcomeEvidence,',
+    'type ProtectedDecisionResumeAuthorization,',
+    '} from "./protected-decision-wait-gate.js";',
+    'import type { DurableProtectedDecisionWaitStore } from "./durable-protected-decision-wait-store.js";',
+    'import type { EffectiveAccessResolution } from "./effective-organization-access.js";',
+    'import type { AuthorityContext } from "./authority.js";',
+    'import {',
+    'executeConnectorCapabilityAsVerifiedEffect,',
+    'type VerifiedConnectorEffectOutcome,',
+    'type ConnectorCapabilityReadback,',
+    '} from "./connector-capability-verified-effect.js";',
+    'import type { executeConnectorCapability, ConnectorTransport, SecretResolver, CurrentConnectorConnectionReader } from "./connector-execution.js";',
+    'import type { ProjectOwnershipRef } from "./project-ownership.js";',
+    'import type { ExternalEffectRetryClassification } from "./external-effect-envelope.js";',
+  ]);
+});
+
 test("OS-V0-10: outcome-job-golden-path-composition.ts module exports exactly the expected surface", () => {
   assert.deepEqual(Object.keys(OutcomeJobGoldenPathComposition).sort(), [
     "InvalidGoldenPathCompositionError",
@@ -155,7 +200,21 @@ test("OS-V0-10: protected-decision-wait-gate.ts module exports exactly the expec
     "InvalidProtectedDecisionWaitRequestError",
     "ProtectedDecisionWaitStaleError",
     "authorizeProtectedDecisionResume",
+    "createProtectedDecisionOutcomeEvidence",
     "createProtectedDecisionWaitRequest",
+  ]);
+});
+
+test("OS-V0-10: connector-connection-admin-mutation.ts module exports exactly the expected surface", () => {
+  assert.deepEqual(Object.keys(ConnectorConnectionAdminMutation).sort(), [
+    "ConnectorConnectionAdminMutationNotAuthorizedError",
+    "mutateConnectorConnectionStateAsAdmin",
+  ]);
+});
+
+test("OS-V0-10: resume-protected-decision-for-connector-effect.ts module exports exactly the expected surface", () => {
+  assert.deepEqual(Object.keys(ResumeProtectedDecisionForConnectorEffect).sort(), [
+    "resumeProtectedDecisionAndExecuteConnectorEffect",
   ]);
 });
 

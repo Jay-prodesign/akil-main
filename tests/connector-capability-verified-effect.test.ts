@@ -147,7 +147,7 @@ function baseInput(overrides: Partial<Parameters<typeof executeConnectorCapabili
   };
 }
 
-test("Golden C: transport SUCCESS + confirming readback reaches VERIFIED, and readback evidence is independent of the transport's own claim", () => {
+test("Golden C (mock-only local safety evidence): transport SUCCESS + confirming readback reaches VERIFIED, and readback evidence is independent of the transport's own claim", () => {
   const outcome = executeConnectorCapabilityAsVerifiedEffect(baseInput());
   assert.equal(outcome.kind, "VERIFIED");
   if (outcome.kind === "VERIFIED") {
@@ -156,13 +156,13 @@ test("Golden C: transport SUCCESS + confirming readback reaches VERIFIED, and re
   }
 });
 
-test("Golden C Live Gap C1: transport SUCCESS alone never reaches VERIFIED - a disagreeing readback corrects APPLIED to FAILED", () => {
+test("Golden C (mock-only local safety evidence) Live Gap C1: transport SUCCESS alone never reaches VERIFIED - a disagreeing readback corrects APPLIED to FAILED", () => {
   const outcome = executeConnectorCapabilityAsVerifiedEffect(baseInput({ readback: alwaysDisagreesReadback() }));
   assert.equal(outcome.kind, "FAILED");
   assert.equal(outcome.attempt.state, "FAILED");
 });
 
-test("Golden C: a classified AUTHORIZATION_FAILED transport outcome is reported FAILED, never UNKNOWN, and readback is never consulted", () => {
+test("Golden C (mock-only local safety evidence): a classified AUTHORIZATION_FAILED transport outcome is reported FAILED, never UNKNOWN, and readback is never consulted", () => {
   let readbackCalled = false;
   const outcome = executeConnectorCapabilityAsVerifiedEffect(
     baseInput({
@@ -174,12 +174,13 @@ test("Golden C: a classified AUTHORIZATION_FAILED transport outcome is reported 
   assert.equal(readbackCalled, false);
 });
 
-test("Golden C: a classified TRANSPORT_ERROR outcome is reported FAILED", () => {
+test("Rev186 F4: a classified TRANSPORT_ERROR outcome is reported UNKNOWN, not FAILED - the ConnectorTransport contract never guarantees no effect occurred", () => {
   const outcome = executeConnectorCapabilityAsVerifiedEffect(baseInput({ transport: new ScriptedTransport("TRANSPORT_ERROR") }));
-  assert.equal(outcome.kind, "FAILED");
+  assert.equal(outcome.kind, "UNKNOWN");
+  assert.equal(outcome.attempt.state, "UNKNOWN");
 });
 
-test("Golden C adversarial: an unclassified/unexpected transport exception is reported UNKNOWN, never silently retried or treated as success", () => {
+test("Golden C (mock-only local safety evidence) adversarial: an unclassified/unexpected transport exception is reported UNKNOWN, never silently retried or treated as success", () => {
   const outcome = executeConnectorCapabilityAsVerifiedEffect(baseInput({ transport: new ScriptedTransport("THROW_UNEXPECTED") }));
   assert.equal(outcome.kind, "UNKNOWN");
   assert.equal(outcome.attempt.state, "UNKNOWN");

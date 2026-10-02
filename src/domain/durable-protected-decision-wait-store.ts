@@ -134,16 +134,28 @@ function validatePersistedResumeAuthorization(
   const authObj = rawAuthorization as Record<string, unknown>;
   const effectRef = requireNonEmptyStringField(authObj["effectRef"], `record "${waitRequestId}".authorization.effectRef`, filePath);
   const resolvedAt = requireNonEmptyStringField(authObj["resolvedAt"], `record "${waitRequestId}".authorization.resolvedAt`, filePath);
-  const resolvedByAuthorityId = requireNonEmptyStringField(
-    authObj["resolvedByAuthorityId"],
-    `record "${waitRequestId}".authorization.resolvedByAuthorityId`,
+  const resolvedByPrincipalRef = requireNonEmptyStringField(
+    authObj["resolvedByPrincipalRef"],
+    `record "${waitRequestId}".authorization.resolvedByPrincipalRef`,
+    filePath,
+  );
+  const decisionRef = requireNonEmptyStringField(
+    authObj["decisionRef"],
+    `record "${waitRequestId}".authorization.decisionRef`,
+    filePath,
+  );
+  const decisionEvidenceRef = requireNonEmptyStringField(
+    authObj["decisionEvidenceRef"],
+    `record "${waitRequestId}".authorization.decisionEvidenceRef`,
     filePath,
   );
   const authorization: ProtectedDecisionResumeAuthorization = {
     waitRequestId: waitRequestId as unknown as ProtectedDecisionResumeAuthorization["waitRequestId"],
     effectRef,
     resolvedAt,
-    resolvedByAuthorityId,
+    resolvedByPrincipalRef,
+    decisionRef,
+    decisionEvidenceRef,
   };
   return { waitRequestId, authorization };
 }

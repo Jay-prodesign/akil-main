@@ -9,8 +9,15 @@ import {
   GOLDEN_PATH_PROJECT,
   compileGoldenPathActivation,
 } from "./helpers/golden-path-fixture.js";
-import { createProtectedDecisionWaitRequest, authorizeProtectedDecisionResume } from "../src/domain/protected-decision-wait-gate.js";
+import {
+  createProtectedDecisionWaitRequest,
+  createProtectedDecisionOutcomeEvidence,
+  authorizeProtectedDecisionResume,
+} from "../src/domain/protected-decision-wait-gate.js";
 import { createAuthorityContext } from "../src/domain/authority.js";
+import { createOrganization, activateOrganization } from "../src/domain/organization.js";
+import { createOrganizationMembership } from "../src/domain/organization-membership.js";
+import { resolveEffectiveOrganizationAccess, type EffectiveAccessResolution } from "../src/domain/effective-organization-access.js";
 import {
   FileDurableProtectedDecisionWaitStore,
   InvalidDurableProtectedDecisionWaitStoreError,
@@ -23,6 +30,42 @@ const job = compilation.jobs[0]!;
 function freshStore(): { store: FileDurableProtectedDecisionWaitStore; baseDir: string } {
   const baseDir = mkdtempSync(join(tmpdir(), "os-v0-10-protected-decision-wait-"));
   return { store: new FileDurableProtectedDecisionWaitStore(baseDir), baseDir };
+}
+
+function decisionOutcome(overrides: Partial<Parameters<typeof createProtectedDecisionOutcomeEvidence>[0]> = {}) {
+  return createProtectedDecisionOutcomeEvidence({
+    decisionRef: "decision:example",
+    decidedAt: "2026-10-02T00:00:30.000Z",
+    evidenceRef: "evidence:decision-made",
+    ...overrides,
+  });
+}
+
+let membershipSeq = 0;
+
+function grantedAccess(): EffectiveAccessResolution {
+  membershipSeq += 1;
+  const organization = activateOrganization({
+    organization: createOrganization({
+      organizationId: "org-akilta-dpdw",
+      tenantScope: GOLDEN_PATH_TENANT_SCOPE,
+      displayName: "AKILTA (Organization Zero)",
+      createdAt: "2026-10-02T00:00:00.000Z",
+    }),
+    activatedAt: "2026-10-02T00:00:01.000Z",
+  });
+  const membership = createOrganizationMembership({
+    membershipId: `membership-dpdw-${membershipSeq}`,
+    tenantScope: GOLDEN_PATH_TENANT_SCOPE,
+    principalRef: `principal-dpdw-${membershipSeq}`,
+    role: "STAFF",
+  });
+  return resolveEffectiveOrganizationAccess({
+    organization,
+    membership,
+    currentPrincipalRef: `principal-dpdw-${membershipSeq}`,
+    authority: createAuthorityContext({ tenantScope: GOLDEN_PATH_TENANT_SCOPE, permissions: ["EXECUTE"], canPerformProtectedActions: true }),
+  });
 }
 
 function sampleRequest(waitRequestId: string) {
@@ -76,8 +119,9 @@ test("D4: claimResume requires a durably-recorded wait request to already exist"
   const request = sampleRequest("wait-d4");
   const authorization = authorizeProtectedDecisionResume({
     waitRequest: request,
+    access: grantedAccess(),
     authority: createAuthorityContext({ tenantScope: GOLDEN_PATH_TENANT_SCOPE, permissions: ["EXECUTE"], canPerformProtectedActions: true }),
-    authorityId: "authority-1",
+    decisionOutcome: decisionOutcome(),
     currentActivationFingerprint: compilation.profile.sourceFingerprint,
     now: "2026-10-02T00:01:00.000Z",
   });
@@ -93,10 +137,12 @@ test("D5 (benchmark-audit single-use): a second claimResume for the same waitReq
   store.putIfAbsentWaitRequest(GOLDEN_PATH_TENANT_SCOPE.tenantId, "wait-d5", request);
 
   const authority = createAuthorityContext({ tenantScope: GOLDEN_PATH_TENANT_SCOPE, permissions: ["EXECUTE"], canPerformProtectedActions: true });
+  const firstAccess = grantedAccess();
   const firstAuthorization = authorizeProtectedDecisionResume({
     waitRequest: request,
+    access: firstAccess,
     authority,
-    authorityId: "authority-first",
+    decisionOutcome: decisionOutcome(),
     currentActivationFingerprint: compilation.profile.sourceFingerprint,
     now: "2026-10-02T00:01:00.000Z",
   });
@@ -105,15 +151,16 @@ test("D5 (benchmark-audit single-use): a second claimResume for the same waitReq
 
   const secondAuthorization = authorizeProtectedDecisionResume({
     waitRequest: request,
+    access: grantedAccess(),
     authority,
-    authorityId: "authority-second",
+    decisionOutcome: decisionOutcome(),
     currentActivationFingerprint: compilation.profile.sourceFingerprint,
     now: "2026-10-02T00:02:00.000Z",
   });
   const secondClaim = store.claimResume(GOLDEN_PATH_TENANT_SCOPE.tenantId, "wait-d5", secondAuthorization);
   assert.equal(secondClaim.created, false);
-  assert.equal(secondClaim.value.resolvedByAuthorityId, "authority-first");
-  assert.equal(store.getResume(GOLDEN_PATH_TENANT_SCOPE.tenantId, "wait-d5")?.resolvedByAuthorityId, "authority-first");
+  assert.equal(secondClaim.value.resolvedByPrincipalRef, firstAccess.membershipId);
+  assert.equal(store.getResume(GOLDEN_PATH_TENANT_SCOPE.tenantId, "wait-d5")?.resolvedByPrincipalRef, firstAccess.membershipId);
 });
 
 test("D6: cold restart reconstructs the identical resume claim", () => {
@@ -122,8 +169,9 @@ test("D6: cold restart reconstructs the identical resume claim", () => {
   store.putIfAbsentWaitRequest(GOLDEN_PATH_TENANT_SCOPE.tenantId, "wait-d6", request);
   const authorization = authorizeProtectedDecisionResume({
     waitRequest: request,
+    access: grantedAccess(),
     authority: createAuthorityContext({ tenantScope: GOLDEN_PATH_TENANT_SCOPE, permissions: ["EXECUTE"], canPerformProtectedActions: true }),
-    authorityId: "authority-1",
+    decisionOutcome: decisionOutcome(),
     currentActivationFingerprint: compilation.profile.sourceFingerprint,
     now: "2026-10-02T00:01:00.000Z",
   });
@@ -153,8 +201,9 @@ test("D8: claimResume rejects an authorization whose effectRef does not match th
   store.putIfAbsentWaitRequest(GOLDEN_PATH_TENANT_SCOPE.tenantId, "wait-d8", request);
   const authorization = authorizeProtectedDecisionResume({
     waitRequest: request,
+    access: grantedAccess(),
     authority: createAuthorityContext({ tenantScope: GOLDEN_PATH_TENANT_SCOPE, permissions: ["EXECUTE"], canPerformProtectedActions: true }),
-    authorityId: "authority-1",
+    decisionOutcome: decisionOutcome(),
     currentActivationFingerprint: compilation.profile.sourceFingerprint,
     now: "2026-10-02T00:01:00.000Z",
   });
