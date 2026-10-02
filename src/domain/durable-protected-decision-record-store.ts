@@ -90,19 +90,40 @@ function decisionRecordCoreIdentityEquals(a: ProtectedDecisionRecord, b: Protect
 }
 
 /**
- * Rev187 F3b: a `ProtectedDecisionRecord` is durably recorded exactly once
- * per `(tenantId, decisionRef)` - a direct structural clone of
- * `FileDurableProtectedDecisionWaitStore`'s own `putIfAbsentWaitRequest`
- * atomic-`linkSync`/content-revalidation-on-replay pattern. A decision is
- * never silently overwritten once recorded (including a REVOKED one - a
- * genuinely changed decision is a NEW `decisionRef`, mirroring how a stale
- * `ProtectedDecisionWaitRequest` is never resumed but re-raised fresh).
+ * Rev187 F3b (creation) + Rev188 F3-item4 (monotonic revision lifecycle):
+ * a `ProtectedDecisionRecord` is durably CREATED exactly once per
+ * `(tenantId, decisionRef)` (`putIfAbsentDecisionRecord`, unchanged - a
+ * direct structural clone of `FileDurableProtectedDecisionWaitStore`'s own
+ * `putIfAbsentWaitRequest` atomic-`linkSync`/content-revalidation-on-replay
+ * pattern), and may then be REVISED at most once, from `APPROVED` to
+ * `REVOKED` (`reviseDecisionRecord`) - `DENIED` and an already-`REVOKED`
+ * record are both terminal; no further revision is ever accepted for
+ * either. `getDecisionRecord` is a "latest wins" read over the full
+ * append log - mirroring `execution-quota-admission.ts`'s own
+ * `findCanonicalLatestForIdempotencyKey` discipline - so a later-appended
+ * REVOKED revision is always observed over the original APPROVED creation,
+ * never a stale first-write snapshot.
  */
 export interface DurableProtectedDecisionRecordStore {
   putIfAbsentDecisionRecord(
     tenantId: TenantScope["tenantId"],
     decisionRef: string,
     record: ProtectedDecisionRecord,
+  ): PersistResult<ProtectedDecisionRecord>;
+  /**
+   * Rev188 F3-item4: single-use per `decisionRef`, exactly like
+   * `putIfAbsentDecisionRecord`'s own creation claim - `revision.outcome`
+   * must be `"REVOKED"` and the CURRENT latest record (fetched fresh, here)
+   * must be `"APPROVED"`, or this throws before any append. A concurrent
+   * second caller racing the exact same revision loses the atomic claim
+   * and is handed back the winner's own already-durable record (idempotent
+   * if content matches, a hard conflict if it does not) - never a second,
+   * silently-divergent REVOKED entry for the same `decisionRef`.
+   */
+  reviseDecisionRecord(
+    tenantId: TenantScope["tenantId"],
+    decisionRef: string,
+    revision: ProtectedDecisionRecord,
   ): PersistResult<ProtectedDecisionRecord>;
   getDecisionRecord(tenantId: TenantScope["tenantId"], decisionRef: string): ProtectedDecisionRecord | undefined;
 }
@@ -114,6 +135,7 @@ export class FileDurableProtectedDecisionRecordStore implements DurableProtected
     this.baseDir = baseDir;
     mkdirSync(this.baseDir, { recursive: true });
     mkdirSync(this.creationLockDir(), { recursive: true });
+    mkdirSync(this.revisionLockDir(), { recursive: true });
   }
 
   private filePathFor(tenantId: TenantScope["tenantId"]): string {
@@ -129,6 +151,16 @@ export class FileDurableProtectedDecisionRecordStore implements DurableProtected
     const tenantKey = Buffer.from(tenantId, "utf8").toString("base64url");
     const decisionKey = Buffer.from(decisionRef, "utf8").toString("base64url");
     return join(this.creationLockDir(), `${tenantKey}.${decisionKey}.lock`);
+  }
+
+  private revisionLockDir(): string {
+    return join(this.baseDir, ".decision-revision-locks");
+  }
+
+  private revisionLockPathFor(tenantId: TenantScope["tenantId"], decisionRef: string): string {
+    const tenantKey = Buffer.from(tenantId, "utf8").toString("base64url");
+    const decisionKey = Buffer.from(decisionRef, "utf8").toString("base64url");
+    return join(this.revisionLockDir(), `${tenantKey}.${decisionKey}.lock`);
   }
 
   private readAll(tenantId: TenantScope["tenantId"]): Array<{ decisionRef: string; record: ProtectedDecisionRecord }> {
@@ -149,14 +181,18 @@ export class FileDurableProtectedDecisionRecordStore implements DurableProtected
     });
   }
 
+  /**
+   * Rev188 F3-item4: "latest wins" over the full append log - unconditional
+   * overwrite on each later entry (never `if (!byRef.has(...))`), so a
+   * later-appended REVOKED revision is always what `getDecisionRecord`
+   * returns, never the original APPROVED creation it superseded.
+   */
   private dedupedByDecisionRef(
     records: ReadonlyArray<{ decisionRef: string; record: ProtectedDecisionRecord }>,
   ): Map<string, ProtectedDecisionRecord> {
     const byRef = new Map<string, ProtectedDecisionRecord>();
     for (const entry of records) {
-      if (!byRef.has(entry.decisionRef)) {
-        byRef.set(entry.decisionRef, entry.record);
-      }
+      byRef.set(entry.decisionRef, entry.record);
     }
     return byRef;
   }
@@ -222,6 +258,91 @@ export class FileDurableProtectedDecisionRecordStore implements DurableProtected
 
     appendFileSync(this.filePathFor(tenantId), `${payload}\n`, "utf8");
     return { value: record, created: true };
+  }
+
+  /**
+   * Rev188 F3-item4: single-use revision claim, structurally identical to
+   * `putIfAbsentDecisionRecord`'s own atomic `linkSync` creation claim,
+   * applied one level up - a decision can be revised AT MOST ONCE, so the
+   * SAME "exactly one durable winner, everyone else reads it back" pattern
+   * fits the revision edge exactly as well as the creation edge.
+   */
+  reviseDecisionRecord(
+    tenantId: TenantScope["tenantId"],
+    decisionRef: string,
+    revision: ProtectedDecisionRecord,
+  ): PersistResult<ProtectedDecisionRecord> {
+    if (decisionRef.trim().length === 0) {
+      throw new InvalidDurableProtectedDecisionRecordStoreError("decisionRef must be a non-empty string");
+    }
+    if (revision.tenantId !== tenantId || revision.decisionRef !== decisionRef) {
+      throw new InvalidDurableProtectedDecisionRecordStoreError(
+        "revision.tenantId/decisionRef must exactly match the given tenantId/decisionRef",
+      );
+    }
+
+    const current = this.getDecisionRecord(tenantId, decisionRef);
+    if (current === undefined) {
+      throw new InvalidDurableProtectedDecisionRecordStoreError(
+        `cannot revise decisionRef "${decisionRef}" - no existing durable record to revise`,
+      );
+    }
+    if (current.outcome !== "APPROVED") {
+      // A terminal outcome (DENIED, or an already-REVOKED record) can never
+      // be revised again. A repeat of the SAME already-applied revision is
+      // still a safe idempotent no-op; anything else is a rejected
+      // transition attempt.
+      if (decisionRecordCoreIdentityEquals(current, revision)) {
+        return { value: current, created: false };
+      }
+      throw new InvalidDurableProtectedDecisionRecordStoreError(
+        `decisionRef "${decisionRef}" is already in a terminal outcome "${current.outcome}" and cannot be revised again`,
+      );
+    }
+    if (revision.outcome !== "REVOKED") {
+      throw new InvalidDurableProtectedDecisionRecordStoreError(
+        `decisionRef "${decisionRef}"'s only legitimate revision from APPROVED is to REVOKED, not "${revision.outcome}"`,
+      );
+    }
+
+    const lockPath = this.revisionLockPathFor(tenantId, decisionRef);
+    const tmpPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
+    const payload = JSON.stringify({ decisionRef, record: revision });
+    writeFileSync(tmpPath, payload, "utf8");
+    let wonRevision: boolean;
+    try {
+      linkSync(tmpPath, lockPath);
+      wonRevision = true;
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw cause;
+      }
+      wonRevision = false;
+    } finally {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        // best-effort cleanup only.
+      }
+    }
+
+    if (!wonRevision) {
+      const winnerRaw = readFileSync(lockPath, "utf8");
+      const winner = validatePersistedDecisionRecord(JSON.parse(winnerRaw), tenantId, lockPath);
+      if (!decisionRecordCoreIdentityEquals(winner.record, revision)) {
+        throw new InvalidDurableProtectedDecisionRecordStoreError(
+          `decisionRef "${decisionRef}" was already revised to a different outcome/evidence by a concurrent caller`,
+        );
+      }
+      const latestNow = this.getDecisionRecord(tenantId, decisionRef);
+      if (latestNow === undefined || latestNow.outcome !== "REVOKED") {
+        appendFileSync(this.filePathFor(tenantId), `${winnerRaw}\n`, "utf8");
+      }
+      return { value: winner.record, created: false };
+    }
+
+    appendFileSync(this.filePathFor(tenantId), `${payload}\n`, "utf8");
+    return { value: revision, created: true };
   }
 
   getDecisionRecord(tenantId: TenantScope["tenantId"], decisionRef: string): ProtectedDecisionRecord | undefined {

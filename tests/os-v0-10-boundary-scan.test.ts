@@ -11,6 +11,9 @@ import * as ConnectorConnectionAdminMutation from "../src/domain/connector-conne
 import * as ResumeProtectedDecisionForConnectorEffect from "../src/domain/resume-protected-decision-for-connector-effect.js";
 import * as ProtectedDecisionRecord from "../src/domain/protected-decision-record.js";
 import * as DurableProtectedDecisionRecordStore from "../src/domain/durable-protected-decision-record-store.js";
+import * as ConnectorConnectionAdminAccess from "../src/web/connector-connection-admin-access.js";
+import * as ResumeProtectedDecisionAdminAccess from "../src/web/resume-protected-decision-admin-access.js";
+import * as ProtectedDecisionRecordAdminAccess from "../src/web/protected-decision-record-admin-access.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const COMPOSITION_FILE = "src/domain/outcome-job-golden-path-composition.ts";
@@ -21,6 +24,9 @@ const ADMIN_MUTATION_FILE = "src/domain/connector-connection-admin-mutation.ts";
 const RESUME_CONNECTOR_EFFECT_FILE = "src/domain/resume-protected-decision-for-connector-effect.ts";
 const DECISION_RECORD_FILE = "src/domain/protected-decision-record.ts";
 const DECISION_RECORD_STORE_FILE = "src/domain/durable-protected-decision-record-store.ts";
+const ADMIN_ACCESS_WEB_FILE = "src/web/connector-connection-admin-access.ts";
+const RESUME_ADMIN_ACCESS_WEB_FILE = "src/web/resume-protected-decision-admin-access.ts";
+const DECISION_RECORD_ADMIN_ACCESS_WEB_FILE = "src/web/protected-decision-record-admin-access.ts";
 
 const SECRET_PATTERNS: ReadonlyArray<{ label: string; pattern: RegExp }> = [
   { label: "api-key", pattern: /api[_-]?key\s*[:=]\s*['"][^'"]+['"]/i },
@@ -54,6 +60,9 @@ const ALL_FILES = [
   RESUME_CONNECTOR_EFFECT_FILE,
   DECISION_RECORD_FILE,
   DECISION_RECORD_STORE_FILE,
+  ADMIN_ACCESS_WEB_FILE,
+  RESUME_ADMIN_ACCESS_WEB_FILE,
+  DECISION_RECORD_ADMIN_ACCESS_WEB_FILE,
 ];
 
 for (const file of ALL_FILES) {
@@ -184,7 +193,10 @@ test("OS-V0-10: resume-protected-decision-for-connector-effect.ts imports only i
     '} from "./protected-decision-wait-gate.js";',
     'import type { DurableProtectedDecisionWaitStore } from "./durable-protected-decision-wait-store.js";',
     'import type { DurableProtectedDecisionRecordStore } from "./durable-protected-decision-record-store.js";',
-    'import type { EffectiveAccessResolution } from "./effective-organization-access.js";',
+    'import { resolveEffectiveOrganizationAccess } from "./effective-organization-access.js";',
+    'import type { Organization } from "./organization.js";',
+    'import type { OrganizationMembership } from "./organization-membership.js";',
+    'import type { OrganizationAccessRoleContext } from "./organization-access-role.js";',
     'import type { AuthorityContext } from "./authority.js";',
     'import {',
     'executeConnectorCapabilityAsVerifiedEffect,',
@@ -194,20 +206,65 @@ test("OS-V0-10: resume-protected-decision-for-connector-effect.ts imports only i
     'import type { executeConnectorCapability, ConnectorTransport, SecretResolver, CurrentConnectorConnectionReader } from "./connector-execution.js";',
     'import type { ProjectOwnershipRef } from "./project-ownership.js";',
     'import type { ExternalEffectRetryClassification } from "./external-effect-envelope.js";',
-    'import type { QuotaAdmissionPort } from "../application/outcome-job-execution-runtime.js";',
+    'import type { QuotaAdmissionPort, CurrentQuotaEnvelopeResolver, ExecutionEconomicsPort } from "../application/outcome-job-execution-runtime.js";',
     'import {',
     'createQuotaReservationIdentity,',
     'deriveQuotaReservationIdempotencyKey,',
     'assertCurrentQuotaEnvelope,',
+    'quotaScopeKey,',
     'type QuotaEnvelope,',
+    'type QuotaAdmissionScope,',
     '} from "./execution-quota-admission.js";',
+    'import { createExecutionEconomicsLineage, recordExecutionEconomicsEvent } from "./execution-economics-attribution.js";',
+  ]);
+});
+
+test("OS-V0-10 Rev188 F2: connector-connection-admin-access.ts (web layer) imports only requireInternalOsAccess, its own declared types, and the unchanged domain mutation function - never a second authority/admin system", () => {
+  assert.deepEqual(importLinesOf(ADMIN_ACCESS_WEB_FILE), [
+    'import { requireInternalOsAccess, type StaffAccessGrant } from "./internal-os-access.js";',
+    'import type { StaffSessionProvider } from "./staff-session-provider.js";',
+    'import type { Organization } from "../domain/organization.js";',
+    'import type { TenantScope } from "../domain/tenant-scope.js";',
+    'import { mutateConnectorConnectionStateAsAdmin } from "../domain/connector-connection-admin-mutation.js";',
+    'import type { DurableConnectorConnectionStore, StoredConnectorConnection } from "../domain/durable-connector-connection-store.js";',
+    'import type { ConnectorConnectionInstance } from "../domain/integration-connector-catalog.js";',
+    'import type { ConnectionState } from "../domain/connection-authority.js";',
+  ]);
+});
+
+test("OS-V0-10 Rev188 item2: resume-protected-decision-admin-access.ts (web layer) imports only requireInternalOsAccess, its own declared types, and the unchanged domain resume function - never a second authority system", () => {
+  assert.deepEqual(importLinesOf(RESUME_ADMIN_ACCESS_WEB_FILE), [
+    'import { requireInternalOsAccess, type StaffAccessGrant } from "./internal-os-access.js";',
+    'import type { StaffSessionProvider } from "./staff-session-provider.js";',
+    'import type { Organization } from "../domain/organization.js";',
+    'import {',
+    'resumeProtectedDecisionAndExecuteConnectorEffect,',
+    'type ResumeAndExecuteConnectorEffectResult,',
+    '} from "../domain/resume-protected-decision-for-connector-effect.js";',
+  ]);
+});
+
+test("OS-V0-10 Rev188 item4: protected-decision-record-admin-access.ts (web layer) imports only requireInternalOsAccess, its own declared types, and the unchanged domain decision-record functions - never a second authority system", () => {
+  assert.deepEqual(importLinesOf(DECISION_RECORD_ADMIN_ACCESS_WEB_FILE), [
+    'import { requireInternalOsAccess, type StaffAccessGrant } from "./internal-os-access.js";',
+    'import type { StaffSessionProvider } from "./staff-session-provider.js";',
+    'import type { Organization } from "../domain/organization.js";',
+    'import {',
+    'createProtectedDecisionRecord,',
+    'reviseProtectedDecisionRecord,',
+    'type ProtectedDecisionRecord,',
+    '} from "../domain/protected-decision-record.js";',
   ]);
 });
 
 test("OS-V0-10: protected-decision-record.ts imports only its declared sibling domain modules", () => {
   assert.deepEqual(importLinesOf(DECISION_RECORD_FILE), [
     'import type { TenantScope } from "./tenant-scope.js";',
-    'import type { EffectiveAccessResolution } from "./effective-organization-access.js";',
+    'import { resolveEffectiveOrganizationAccess, type EffectiveAccessResolution } from "./effective-organization-access.js";',
+    'import type { Organization } from "./organization.js";',
+    'import type { OrganizationMembership } from "./organization-membership.js";',
+    'import type { OrganizationAccessRoleContext } from "./organization-access-role.js";',
+    'import { requireSameTenant, requirePermission, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";',
   ]);
 });
 
@@ -241,7 +298,9 @@ test("OS-V0-10: protected-decision-wait-gate.ts module exports exactly the expec
 test("OS-V0-10: protected-decision-record.ts module exports exactly the expected surface", () => {
   assert.deepEqual(Object.keys(ProtectedDecisionRecord).sort(), [
     "InvalidProtectedDecisionRecordError",
+    "ProtectedDecisionRecordTransitionError",
     "createProtectedDecisionRecord",
+    "reviseProtectedDecisionRecord",
   ]);
 });
 
@@ -264,8 +323,29 @@ test("OS-V0-10: resume-protected-decision-for-connector-effect.ts module exports
   assert.deepEqual(Object.keys(ResumeProtectedDecisionForConnectorEffect).sort(), [
     "ProtectedDecisionRecordNotFoundError",
     "ProtectedEffectBindingMismatchError",
+    "ProtectedEffectQuotaLineageMismatchError",
     "ProtectedEffectQuotaRejectedError",
+    "computeConnectorEffectFingerprint",
     "resumeProtectedDecisionAndExecuteConnectorEffect",
+  ]);
+});
+
+test("OS-V0-10 Rev188 F2: connector-connection-admin-access.ts (web layer) module exports exactly the expected surface", () => {
+  assert.deepEqual(Object.keys(ConnectorConnectionAdminAccess).sort(), [
+    "mutateConnectorConnectionStateAsAuthenticatedAdmin",
+  ]);
+});
+
+test("OS-V0-10 Rev188 item2: resume-protected-decision-admin-access.ts (web layer) module exports exactly the expected surface", () => {
+  assert.deepEqual(Object.keys(ResumeProtectedDecisionAdminAccess).sort(), [
+    "resumeProtectedDecisionAndExecuteConnectorEffectAsAuthenticatedStaff",
+  ]);
+});
+
+test("OS-V0-10 Rev188 item4: protected-decision-record-admin-access.ts (web layer) module exports exactly the expected surface", () => {
+  assert.deepEqual(Object.keys(ProtectedDecisionRecordAdminAccess).sort(), [
+    "createProtectedDecisionRecordAsAuthenticatedStaff",
+    "reviseProtectedDecisionRecordAsAuthenticatedStaff",
   ]);
 });
 

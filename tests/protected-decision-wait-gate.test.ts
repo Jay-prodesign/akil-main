@@ -44,7 +44,7 @@ function protectedAuthority() {
   return createAuthorityContext({ tenantScope: GOLDEN_PATH_TENANT_SCOPE, permissions: ["EXECUTE"], canPerformProtectedActions: true });
 }
 
-function grantedAccess(authority = protectedAuthority(), tenantScope: TenantScope = GOLDEN_PATH_TENANT_SCOPE): EffectiveAccessResolution {
+function decisionAuthoringFixture(authority = protectedAuthority(), tenantScope: TenantScope = GOLDEN_PATH_TENANT_SCOPE) {
   const organization = activateOrganization({
     organization: createOrganization({
       organizationId: `org-akilta-pdw-${tenantScope.tenantId}`,
@@ -60,12 +60,11 @@ function grantedAccess(authority = protectedAuthority(), tenantScope: TenantScop
     principalRef: "principal-pdw-resumer",
     role: "STAFF",
   });
-  return resolveEffectiveOrganizationAccess({
-    organization,
-    membership,
-    currentPrincipalRef: "principal-pdw-resumer",
-    authority,
-  });
+  return { organization, membership, currentPrincipalRef: "principal-pdw-resumer", authority };
+}
+
+function grantedAccess(authority = protectedAuthority(), tenantScope: TenantScope = GOLDEN_PATH_TENANT_SCOPE): EffectiveAccessResolution {
+  return resolveEffectiveOrganizationAccess(decisionAuthoringFixture(authority, tenantScope));
 }
 
 function decisionRecord(overrides: {
@@ -78,7 +77,7 @@ function decisionRecord(overrides: {
     tenantScope,
     decisionRef: overrides.decisionRef ?? "decision:example",
     outcome: overrides.outcome ?? "APPROVED",
-    decidedByAccess: grantedAccess(createAuthorityContext({ tenantScope, permissions: ["EXECUTE"], canPerformProtectedActions: true }), tenantScope),
+    ...decisionAuthoringFixture(createAuthorityContext({ tenantScope, permissions: ["EXECUTE"], canPerformProtectedActions: true }), tenantScope),
     decidedAt: "2026-10-02T00:00:30.000Z",
     evidenceRef: "evidence:decision-made",
   });

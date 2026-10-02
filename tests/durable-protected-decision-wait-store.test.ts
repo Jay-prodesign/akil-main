@@ -34,7 +34,7 @@ function freshStore(): { store: FileDurableProtectedDecisionWaitStore; baseDir: 
 
 let membershipSeq = 0;
 
-function grantedAccess(): EffectiveAccessResolution {
+function decisionAuthoringFixture() {
   membershipSeq += 1;
   const organization = activateOrganization({
     organization: createOrganization({
@@ -51,12 +51,17 @@ function grantedAccess(): EffectiveAccessResolution {
     principalRef: `principal-dpdw-${membershipSeq}`,
     role: "STAFF",
   });
-  return resolveEffectiveOrganizationAccess({
+  return {
     organization,
     membership,
     currentPrincipalRef: `principal-dpdw-${membershipSeq}`,
     authority: createAuthorityContext({ tenantScope: GOLDEN_PATH_TENANT_SCOPE, permissions: ["EXECUTE"], canPerformProtectedActions: true }),
-  });
+  };
+}
+
+function grantedAccess(): EffectiveAccessResolution {
+  const fixture = decisionAuthoringFixture();
+  return resolveEffectiveOrganizationAccess(fixture);
 }
 
 function decisionRecord() {
@@ -64,7 +69,7 @@ function decisionRecord() {
     tenantScope: GOLDEN_PATH_TENANT_SCOPE,
     decisionRef: "decision:example",
     outcome: "APPROVED",
-    decidedByAccess: grantedAccess(),
+    ...decisionAuthoringFixture(),
     decidedAt: "2026-10-02T00:00:30.000Z",
     evidenceRef: "evidence:decision-made",
   });
