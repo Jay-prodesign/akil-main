@@ -397,6 +397,59 @@ function deriveQuotaIdentityAndKey(
 }
 
 /**
+ * Rev191 (F7): `claimResume` alone only proves a resume was ONCE
+ * authorized - it says nothing about whether that authorization is still
+ * current after a crash/restart window in which the decision could have
+ * been REVOKED, the membership/access could have been REVOKED, or the
+ * activation context could have changed. A CLAIMED_NOT_STARTED restart
+ * (the transport boundary was never approached) must re-run the EXACT same
+ * pre-effect gates the first-time path enforces before it ever won
+ * `claimResume` - never a narrower or duplicated re-derivation. This
+ * function's return value is always discarded by its caller: it exists
+ * purely for its fail-closed validation side effects (each throws on
+ * mismatch/stale/revoked), never to mint a new resume authorization -
+ * `claimResume`'s own single-use durable claim is never re-created or
+ * overwritten by a restart.
+ */
+function reauthorizeBeforeNotStartedContinuation(input: ResumeAndExecuteConnectorEffectInput): void {
+  const connectionBindingId = input.bound.instance.binding.connectionBindingId;
+  const effectFingerprint = computeConnectorEffectFingerprint({
+    effectIntentId: input.effectIntentId,
+    actionRef: input.actionRef,
+    retryClassification: input.retryClassification,
+    capabilityRef: input.capabilityRef,
+    connectionBindingId,
+    requestPayload: input.requestPayload,
+    approvalEvidenceRef: input.approvalEvidenceRef,
+  });
+  if (input.waitRequest.effectRef !== effectFingerprint) {
+    throw new ProtectedEffectBindingMismatchError(input.waitRequest.effectRef, effectFingerprint);
+  }
+
+  const decisionRecord = input.decisionRecordStore.getDecisionRecord(input.waitRequest.tenantId, input.waitRequest.decisionRef);
+  if (decisionRecord === undefined) {
+    throw new ProtectedDecisionRecordNotFoundError(input.waitRequest.tenantId, input.waitRequest.decisionRef);
+  }
+
+  const access = resolveEffectiveOrganizationAccess({
+    organization: input.organization,
+    membership: input.membership,
+    currentPrincipalRef: input.currentPrincipalRef,
+    authority: input.authority,
+    ...(input.roleContext !== undefined ? { roleContext: input.roleContext } : {}),
+  });
+
+  authorizeProtectedDecisionResume({
+    waitRequest: input.waitRequest,
+    access,
+    authority: input.authority,
+    decisionRecord,
+    currentActivationFingerprint: input.currentActivationFingerprint,
+    now: input.now,
+  });
+}
+
+/**
  * Rev190: the ONE reconciliation path for an already-durably-resumed
  * `waitRequestId` - reached on a genuine replay (`getResume` already
  * returns a value) AND on a same-call race that lost `claimResume` or
@@ -436,6 +489,21 @@ async function reconcileExistingResume(
     // CLAIMED_NOT_STARTED: the transport boundary was never approached for
     // this waitRequestId - the reservation admitted when the resume was
     // first won is still exactly RESERVED, reused as-is (never re-admitted).
+    // Rev191 F7: before this restart may continue, re-run the exact same
+    // pre-effect gates the first-time path enforces - a crash-after-claim
+    // window could otherwise let a now-revoked decision/membership/access
+    // still reach the transport.
+    try {
+      reauthorizeBeforeNotStartedContinuation(input);
+    } catch (cause) {
+      await input.quotaAdmission.release({
+        identity: quotaIdentity,
+        idempotencyKey: quotaIdempotencyKey,
+        occurredAt: input.now,
+        reason: "CLAIMED_NOT_STARTED restart's fresh pre-effect gate re-resolution failed (binding/decision/access/currentness) - releasing the reservation rather than leaving it claimed against an effect that can now never legitimately occur",
+      });
+      throw cause;
+    }
     return await proceedToInvokeEffect(input, resume, quotaIdentity, quotaIdempotencyKey);
   }
 

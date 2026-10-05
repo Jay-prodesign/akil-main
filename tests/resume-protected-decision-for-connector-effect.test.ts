@@ -452,6 +452,99 @@ test("Rev190 (F6/R1 remainder) adversarial: a replayed call whose prior attempt 
   assert.equal(economicsPort.events.length, 1);
 });
 
+test("Rev191 F7 adversarial: a decision REVOKED after the original claimResume win, but before a CLAIMED_NOT_STARTED restart, blocks the restart with zero transport invocations and releases the stranded RESERVED reservation - claimResume alone is never sufficient to let a restart reach transport", async () => {
+  const { input, transport, decisionRecordStore } = baseInput();
+  const quotaAdmission = input.quotaAdmission as InMemoryQuotaAdmissionStore;
+
+  const quotaIdentity = createQuotaReservationIdentity({
+    scope: input.quotaEnvelope.scope,
+    jobId: input.waitRequest.jobId as unknown as string,
+    runId: input.waitRequest.runId,
+    attemptRef: String(input.waitRequest.attempt),
+  });
+  const quotaIdempotencyKey = deriveQuotaReservationIdempotencyKey(quotaIdentity);
+  await quotaAdmission.admit({
+    envelope: input.quotaEnvelope,
+    identity: quotaIdentity,
+    idempotencyKey: quotaIdempotencyKey,
+    requestedAmount: input.estimatedCost,
+    occurredAt: input.now,
+  });
+  const authorization = {
+    waitRequestId: input.waitRequest.waitRequestId,
+    effectRef: input.waitRequest.effectRef,
+    resolvedAt: "2026-10-02T00:01:00.000Z",
+    resolvedByPrincipalRef: RESUMER_PRINCIPAL_REF,
+    decisionRef: input.waitRequest.decisionRef,
+    decisionEvidenceRef: "evidence:decision-made",
+  };
+  // Simulate the exact crash-after-claim/before-transport window: claimResume
+  // already won, quota already RESERVED, getEffectStarted still absent -
+  // CLAIMED_NOT_STARTED. Then, in the window before the restart, the
+  // decision is REVOKED via the durable store's own monotonic revision.
+  input.waitStore.claimResume(tenantScope.tenantId, input.waitRequest.waitRequestId, authorization);
+  assert.equal(input.waitStore.getEffectStarted(tenantScope.tenantId, input.waitRequest.waitRequestId), false);
+
+  const currentlyApproved = decisionRecordStore.getDecisionRecord(tenantScope.tenantId, input.waitRequest.decisionRef)!;
+  const revocation = reviseProtectedDecisionRecord({
+    current: currentlyApproved,
+    tenantScope,
+    outcome: "REVOKED",
+    organization: resumerOrganization(),
+    membership: resumerMembership(),
+    currentPrincipalRef: RESUMER_PRINCIPAL_REF,
+    authority: protectedAuthority(),
+    decidedAt: "2026-10-02T00:00:50.000Z",
+    evidenceRef: "evidence:revoked-before-restart",
+  });
+  decisionRecordStore.reviseDecisionRecord(tenantScope.tenantId, input.waitRequest.decisionRef, revocation);
+
+  await assert.rejects(() => resumeProtectedDecisionAndExecuteConnectorEffect(input));
+  assert.equal(transport.callCount, 0, "a decision revoked in the crash-after-claim window must never let the restart reach transport");
+  assert.equal(quotaAdmission.releaseCount, 1, "the stranded RESERVED reservation must be released, never left claimed against an effect that can now never legitimately occur");
+  assert.equal(quotaAdmission.commitCount, 0);
+});
+
+test("Rev191 F7 adversarial: a membership REVOKED after the original claimResume win, but before a CLAIMED_NOT_STARTED restart, blocks the restart with zero transport invocations and releases the stranded RESERVED reservation", async () => {
+  const revoked: OrganizationMembership = { ...resumerMembership(), state: "REVOKED" } as OrganizationMembership;
+  const { input, transport } = baseInput({ membership: revoked });
+  const quotaAdmission = input.quotaAdmission as InMemoryQuotaAdmissionStore;
+
+  const quotaIdentity = createQuotaReservationIdentity({
+    scope: input.quotaEnvelope.scope,
+    jobId: input.waitRequest.jobId as unknown as string,
+    runId: input.waitRequest.runId,
+    attemptRef: String(input.waitRequest.attempt),
+  });
+  const quotaIdempotencyKey = deriveQuotaReservationIdempotencyKey(quotaIdentity);
+  await quotaAdmission.admit({
+    envelope: input.quotaEnvelope,
+    identity: quotaIdentity,
+    idempotencyKey: quotaIdempotencyKey,
+    requestedAmount: input.estimatedCost,
+    occurredAt: input.now,
+  });
+  const authorization = {
+    waitRequestId: input.waitRequest.waitRequestId,
+    effectRef: input.waitRequest.effectRef,
+    resolvedAt: "2026-10-02T00:01:00.000Z",
+    resolvedByPrincipalRef: RESUMER_PRINCIPAL_REF,
+    decisionRef: input.waitRequest.decisionRef,
+    decisionEvidenceRef: "evidence:decision-made",
+  };
+  // The claim itself was won (hypothetically, before the membership was
+  // revoked) and quota was admitted; getEffectStarted is still absent -
+  // CLAIMED_NOT_STARTED. The membership is ALREADY revoked by the time this
+  // restart runs - the fresh access re-resolution must catch it.
+  input.waitStore.claimResume(tenantScope.tenantId, input.waitRequest.waitRequestId, authorization);
+  assert.equal(input.waitStore.getEffectStarted(tenantScope.tenantId, input.waitRequest.waitRequestId), false);
+
+  await assert.rejects(() => resumeProtectedDecisionAndExecuteConnectorEffect(input));
+  assert.equal(transport.callCount, 0, "a membership revoked in the crash-after-claim window must never let the restart reach transport");
+  assert.equal(quotaAdmission.releaseCount, 1, "the stranded RESERVED reservation must be released, never left claimed against an effect that can now never legitimately occur");
+  assert.equal(quotaAdmission.commitCount, 0);
+});
+
 test("Rev190 (F6/R1 remainder) adversarial: a restart observing STARTED_OR_EFFECT_POSSIBLE (getEffectStarted present) with an unsettled quota reservation NEVER blind-reinvokes the transport - it is reported as EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED until an independent readback resolves it", async () => {
   const { input, transport } = baseInput({ readback: { confirmsApplied: () => false, evidenceRef: () => "evidence:not-applied" } });
   const quotaAdmission = input.quotaAdmission as InMemoryQuotaAdmissionStore;
