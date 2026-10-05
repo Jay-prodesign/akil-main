@@ -16,7 +16,7 @@ import {
   type VerifiedConnectorEffectOutcome,
   type ConnectorCapabilityReadback,
 } from "./connector-capability-verified-effect.js";
-import type { executeConnectorCapability, ConnectorTransport, SecretResolver, CurrentConnectorConnectionReader } from "./connector-execution.js";
+import type { executeConnectorCapability, ConnectorTransport, SecretResolver, CurrentConnectorConnectionReader, ConnectorExecutionResult } from "./connector-execution.js";
 import type { ProjectOwnershipRef } from "./project-ownership.js";
 import type { ExternalEffectRetryClassification } from "./external-effect-envelope.js";
 import type { QuotaAdmissionPort, CurrentQuotaEnvelopeResolver, ExecutionEconomicsPort } from "../application/outcome-job-execution-runtime.js";
@@ -282,72 +282,311 @@ async function recoverEconomicsIfSettled(input: {
 }
 
 /**
+ * Rev190 (F6/R1 remainder): the ONLY way a restart may resolve a
+ * `STARTED_OR_EFFECT_POSSIBLE` disposition - an INDEPENDENT readback,
+ * never a second `transport.execute()` call (Golden C's own "transport
+ * SUCCESS alone is never sufficient" discipline applies with equal force
+ * to a crash-recovery path as it does to the first invocation). The
+ * minimal `ConnectorExecutionResult` passed to the caller-injected
+ * `readback` carries only addressing fields (`connectorKind`/
+ * `connectionBindingId`/`capabilityRef`) - exactly what a real readback
+ * implementation needs to independently ask the provider "was this
+ * applied", never a transport response this function fabricates. Returns
+ * `"APPLIED"` only when the readback itself affirmatively confirms it;
+ * anything else - including the readback itself throwing, which is
+ * genuine uncertainty, not a negative answer - is `"UNKNOWN"`, never
+ * silently treated as a negative that would license a bypass of this
+ * boundary's own fail-closed discipline.
+ */
+function reconcileStartedDispositionViaReadback(input: {
+  readonly bound: Parameters<typeof executeConnectorCapability>[0]["bound"];
+  readonly capabilityRef: unknown;
+  readonly readback: ConnectorCapabilityReadback;
+}): { readonly disposition: "APPLIED"; readonly evidenceRef: string } | { readonly disposition: "UNKNOWN" } {
+  try {
+    const minimalResult = {
+      connectorKind: input.bound.instance.connectorKind,
+      connectionBindingId: input.bound.instance.binding.connectionBindingId,
+      capabilityRef: input.capabilityRef,
+    } as unknown as ConnectorExecutionResult;
+    if (input.readback.confirmsApplied(minimalResult)) {
+      return { disposition: "APPLIED", evidenceRef: input.readback.evidenceRef(minimalResult) };
+    }
+    return { disposition: "UNKNOWN" };
+  } catch {
+    // The readback itself could not determine disposition - genuine
+    // uncertainty, fail closed exactly like any other unresolved state.
+    return { disposition: "UNKNOWN" };
+  }
+}
+
+/**
  * Rev186 F3: "prove one real protected-effect path consumes [the resume
  * claim] once." This is that one real consumer - it binds WAIT→RESUME
  * directly to the one real protected-effect wrapper this task built
  * (`executeConnectorCapabilityAsVerifiedEffect`, Live Gap C1), so the
- * durable store's own single-use `claimResume` is what decides whether the
- * connector transport is ever invoked at all, not merely whether the same
- * authorization value is returned twice.
+ * durable store's own single-use `claimResume` is what decides whether a
+ * `waitRequestId` is authorized to proceed at all - and, separately
+ * (Rev190), the durable `claimEffectStarted` marker is what decides
+ * whether the transport boundary has a single operation owner.
  *
- * `claimResume` is called only AFTER every currentness/binding check below
- * passes - only the call that durably wins the claim (`created: true`)
- * proceeds to the real effect. A second call for the same `waitRequestId`
- * (ours replayed, or a concurrent racer) finds `created: false` and returns
- * `ALREADY_RESUMED_NO_EFFECT` without ever invoking the transport.
+ * Rev187/Rev188/Rev189 residuals, all closed in this one consumer (see
+ * each revision's own exec-plan section for detail): F3a/item3 exact-
+ * effect binding (now widened by Rev189 R3 with `requiresApproval`); F3b
+ * durable decision, fetched fresh; item2 authenticated access, re-resolved
+ * fresh; item5 quota currentness/lifecycle; Rev189 R2's `BLOCKED_NO_EFFECT`
+ * release-without-commit; Rev189 R4's truthful `decidedByPrincipalRef`.
  *
- * Rev187/Rev188 residuals, all closed in this one consumer:
+ * Rev190 (F6/R1 remainder) - the durable effect-operation lifecycle:
+ * `claimResume` alone only proves "a resume was authorized" - it does NOT
+ * prove the transport boundary was ever approached, so a replay that only
+ * ever checked `getResume`/quota-settlement (Rev189's own R1 fix) could
+ * never safely distinguish "crashed before even trying" from "crashed
+ * after maybe applying it", and so was forced to report both as the SAME
+ * `EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED` - truthful, but
+ * stranding the common, genuinely safe case forever. `claimEffectStarted`
+ * (`durable-protected-decision-wait-store.ts`) adds the minimum needed
+ * third state:
  *
- * - **F3a/item3 (exact-effect binding)**: `waitRequest.effectRef` must
- *   equal a canonical fingerprint covering `effectIntentId`/`actionRef`/
- *   `retryClassification`/`capabilityRef`/`connectionBindingId`/
- *   `requestPayload` (`computeConnectorEffectFingerprint`) - checked BEFORE
- *   the durable decision-record lookup, the resume authorization, and the
- *   claim, so a wait for one exact effect/action/capability/connection/
- *   payload can never win `claimResume` or invoke the transport for a
- *   substituted one.
- * - **F3b (durable decision)**: the durable `ProtectedDecisionRecord` for
- *   this exact `(tenantId, decisionRef)` is fetched fresh from
- *   `decisionRecordStore` immediately before use.
- * - **item2 (authenticated access)**: this function never accepts a
- *   precomputed `EffectiveAccessResolution` - `resolveEffectiveOrganizationAccess`'s
- *   own doc comment is explicit that re-invoking it with CURRENT inputs is
- *   the only way to obtain a current answer. Callers instead pass the raw
- *   `organization`/`membership`/`currentPrincipalRef`/`roleContext`
- *   ingredients (mirroring `mutateConnectorConnectionStateAsAdmin`'s own
- *   Rev187 F2 fix exactly), and this function re-resolves access itself,
- *   immediately before `authorizeProtectedDecisionResume` - a membership
- *   revoked (or role withdrawn) since an earlier resolution is caught here,
- *   not silently honored from a stale cached grant. A forged identity (no
- *   real authenticated session behind the supplied membership/principal) is
- *   the web-layer's own responsibility to have already rejected before this
- *   domain function is ever reached (see the analogous web-layer wrapper
- *   this task adds alongside this file - domain code never depends on
- *   `src/web/`).
- * - **item5 (quota currentness/lifecycle)**: `quotaEnvelope.scope` is bound
- *   to this wait's own tenant/customer/project plus the caller's current
- *   activation plan lineage (`assertQuotaScopeMatchesWaitLineage`) before
- *   admission; the admitted reservation is re-verified against a FRESH
- *   `quotaEnvelopeResolver` read immediately before invoking the transport
- *   (`quotaStillCurrentImmediatelyBeforeEffect`) - on a mismatch the
- *   reservation is released and `EFFECT_BLOCKED_STALE_QUOTA` is returned
- *   with zero transport invocation (the resume claim itself, already won,
- *   is never undone - exactly like the dispatch runtime's own "BLOCKED
- *   before release" attempt-closing discipline); a thrown exception from
- *   the verified-effect call releases the reservation before propagating;
- *   any normal (non-thrown) outcome commits actual usage as honestly
- *   `UNKNOWN` (G5/G6 - the activated transport reports no real cost
- *   telemetry) and correlates it to exactly one `ExecutionEconomicsEvent`
- *   via the SAME `ExecutionEconomicsPort`/lineage primitives
- *   `outcome-job-execution-runtime.ts` already composes, reused verbatim -
- *   no second quota or economics system.
+ * - **CLAIMED_NOT_STARTED** (`getEffectStarted` absent): the resume was
+ *   won, but the transport boundary (`executeConnectorCapabilityAsVerifiedEffect`)
+ *   was never invoked - the admitted quota reservation is still exactly
+ *   `RESERVED` (every release/commit path only runs AFTER
+ *   `claimEffectStarted` durably succeeds, by construction). Safe to
+ *   continue the one real attempt now, reusing the SAME reservation.
+ * - **STARTED_OR_EFFECT_POSSIBLE** (`getEffectStarted` present, not yet
+ *   terminally settled): the transport boundary was approached and may
+ *   have applied the effect before a crash. NEVER blind-reinvoked - the
+ *   only resolution is an INDEPENDENT readback (never a second
+ *   `transport.execute()`), settling on confirmation or else honestly
+ *   preserving `EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED` until a
+ *   separate, deliberate reconciliation decision resolves it.
+ * - **TERMINAL/RECONCILED** (quota `COMMITTED`/`RECONCILIATION_REQUIRED`):
+ *   unchanged from Rev189 R1 - `ALREADY_RESUMED_SETTLED`, with any missing
+ *   economics correlation recovered idempotently.
+ *
+ * `claimEffectStarted` is itself an atomic single-use claim (the same
+ * `linkSync` pattern as `claimResume`), so it is what gives the transport
+ * boundary exactly one operation owner globally for a `waitRequestId` -
+ * not just `claimResume`'s own single authorization owner. A concurrent
+ * racer who loses this claim, or a losing racer of `claimResume` itself,
+ * is redirected into the SAME reconciliation path a later replay would
+ * use - never a second transport invocation, never a stale blanket
+ * "no effect" that could be false the moment the winner is already
+ * mid-flight.
  */
 export type ResumeAndExecuteConnectorEffectResult =
   | { readonly kind: "EFFECT_EXECUTED"; readonly outcome: VerifiedConnectorEffectOutcome; readonly resume: ProtectedDecisionResumeAuthorization }
-  | { readonly kind: "ALREADY_RESUMED_NO_EFFECT"; readonly resume: ProtectedDecisionResumeAuthorization }
   | { readonly kind: "EFFECT_BLOCKED_STALE_QUOTA"; readonly resume: ProtectedDecisionResumeAuthorization }
   | { readonly kind: "ALREADY_RESUMED_SETTLED"; readonly resume: ProtectedDecisionResumeAuthorization }
   | { readonly kind: "EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED"; readonly resume: ProtectedDecisionResumeAuthorization };
+
+type ResumeAndExecuteConnectorEffectInput = Parameters<typeof resumeProtectedDecisionAndExecuteConnectorEffect>[0];
+
+function deriveQuotaIdentityAndKey(
+  waitRequest: ProtectedDecisionWaitRequest,
+  quotaScope: QuotaAdmissionScope,
+): { readonly quotaIdentity: QuotaReservationIdentity; readonly quotaIdempotencyKey: string } {
+  const quotaIdentity = createQuotaReservationIdentity({
+    scope: quotaScope,
+    jobId: waitRequest.jobId as unknown as string,
+    runId: waitRequest.runId,
+    attemptRef: String(waitRequest.attempt),
+  });
+  return { quotaIdentity, quotaIdempotencyKey: deriveQuotaReservationIdempotencyKey(quotaIdentity) };
+}
+
+/**
+ * Rev190: the ONE reconciliation path for an already-durably-resumed
+ * `waitRequestId` - reached on a genuine replay (`getResume` already
+ * returns a value) AND on a same-call race that lost `claimResume` or
+ * `claimEffectStarted` (both redirect here rather than guessing). See this
+ * module's own top-of-file doc comment for the full CLAIMED_NOT_STARTED /
+ * STARTED_OR_EFFECT_POSSIBLE / TERMINAL disposition contract.
+ */
+async function reconcileExistingResume(
+  input: ResumeAndExecuteConnectorEffectInput,
+  resume: ProtectedDecisionResumeAuthorization,
+): Promise<ResumeAndExecuteConnectorEffectResult> {
+  const { quotaIdentity, quotaIdempotencyKey } = deriveQuotaIdentityAndKey(input.waitRequest, input.quotaEnvelope.scope);
+  const { lineage: economicsLineage, idempotencyKey: economicsIdempotencyKey } = deriveEconomicsLineageAndKey({
+    tenantScope: input.tenantScope,
+    waitRequest: input.waitRequest,
+    currentActivationPlanId: input.currentActivationPlanId,
+    currentActivationPlanVersion: input.currentActivationPlanVersion,
+    economicsTaskRef: input.economicsTaskRef,
+  });
+
+  const settled = await recoverEconomicsIfSettled({
+    quotaAdmission: input.quotaAdmission,
+    quotaIdentity,
+    quotaIdempotencyKey,
+    economicsPort: input.economicsPort,
+    lineage: economicsLineage,
+    economicsIdempotencyKey,
+    economicsUsageSource: input.economicsUsageSource,
+    now: input.now,
+  });
+  if (settled) {
+    return { kind: "ALREADY_RESUMED_SETTLED", resume };
+  }
+
+  const started = input.waitStore.getEffectStarted(input.waitRequest.tenantId, input.waitRequest.waitRequestId);
+  if (!started) {
+    // CLAIMED_NOT_STARTED: the transport boundary was never approached for
+    // this waitRequestId - the reservation admitted when the resume was
+    // first won is still exactly RESERVED, reused as-is (never re-admitted).
+    return await proceedToInvokeEffect(input, resume, quotaIdentity, quotaIdempotencyKey);
+  }
+
+  // STARTED_OR_EFFECT_POSSIBLE and not yet terminally settled - never
+  // blind-reinvoke. The only resolution is an independent readback.
+  const reconciled = reconcileStartedDispositionViaReadback({
+    bound: input.bound,
+    capabilityRef: input.capabilityRef,
+    readback: input.readback,
+  });
+  if (reconciled.disposition === "APPLIED") {
+    await input.quotaAdmission.commit({
+      identity: quotaIdentity,
+      idempotencyKey: quotaIdempotencyKey,
+      actualAmount: { presence: "UNKNOWN" },
+      occurredAt: input.now,
+    });
+    await recordAttemptEconomics({
+      economicsPort: input.economicsPort,
+      lineage: economicsLineage,
+      idempotencyKey: economicsIdempotencyKey,
+      economicsUsageSource: input.economicsUsageSource,
+      now: input.now,
+    });
+    return { kind: "ALREADY_RESUMED_SETTLED", resume };
+  }
+  // Preserve UNKNOWN until a deliberate, separate reconciliation decision
+  // resolves it - never guessed, never retried blindly, here.
+  return { kind: "EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED", resume };
+}
+
+/**
+ * Rev190: the ONLY place `executeConnectorCapabilityAsVerifiedEffect` is
+ * ever called - gated by `claimEffectStarted`'s own atomic single-use
+ * claim, so exactly one caller, ever, becomes the sole operation owner of
+ * the transport boundary for this `waitRequestId`. Reached either from the
+ * first-time path (quota just admitted, resume claim just won) or from
+ * `reconcileExistingResume`'s CLAIMED_NOT_STARTED branch (quota and resume
+ * claim both already exist from an earlier call) - both reuse the SAME
+ * still-`RESERVED` reservation, never re-admitting.
+ */
+async function proceedToInvokeEffect(
+  input: ResumeAndExecuteConnectorEffectInput,
+  resume: ProtectedDecisionResumeAuthorization,
+  quotaIdentity: QuotaReservationIdentity,
+  quotaIdempotencyKey: string,
+): Promise<ResumeAndExecuteConnectorEffectResult> {
+  const startClaim = input.waitStore.claimEffectStarted(input.waitRequest.tenantId, input.waitRequest.waitRequestId);
+  if (!startClaim.created) {
+    // Lost the race to become sole owner of the transport boundary -
+    // someone else is now (or already was) the owner. Re-derive the
+    // current, possibly now-different disposition instead of guessing.
+    return await reconcileExistingResume(input, resume);
+  }
+
+  // item5b: the latest-moment recheck, immediately before invoking the
+  // transport - the claim itself (already durably won) is never undone
+  // by a post-claim staleness finding; only the effect is blocked and
+  // the reservation released for a later retry to re-admit fresh.
+  const stillCurrent = await quotaStillCurrentImmediatelyBeforeEffect({
+    quotaEnvelopeResolver: input.quotaEnvelopeResolver,
+    reservedEnvelope: input.quotaEnvelope,
+  });
+  if (!stillCurrent) {
+    await input.quotaAdmission.release({
+      identity: quotaIdentity,
+      idempotencyKey: quotaIdempotencyKey,
+      occurredAt: input.now,
+      reason: "quota envelope changed between admission and invocation - zero connector effect; reservation released for a later retry to re-admit under current policy",
+    });
+    return { kind: "EFFECT_BLOCKED_STALE_QUOTA", resume };
+  }
+
+  let outcome: VerifiedConnectorEffectOutcome;
+  try {
+    outcome = executeConnectorCapabilityAsVerifiedEffect({
+      tenantScope: input.tenantScope,
+      authority: input.authority,
+      effectIntentId: input.effectIntentId,
+      actionRef: input.actionRef,
+      retryClassification: input.retryClassification,
+      attemptId: input.attemptId,
+      ...(input.approvalEvidenceRef !== undefined ? { approvalEvidenceRef: input.approvalEvidenceRef } : {}),
+      bound: input.bound,
+      capabilityRef: input.capabilityRef,
+      requestingOwnership: input.requestingOwnership,
+      connectionStore: input.connectionStore,
+      secretResolver: input.secretResolver,
+      transport: input.transport,
+      ...(input.requestPayload !== undefined ? { requestPayload: input.requestPayload } : {}),
+      readback: input.readback,
+    });
+  } catch (cause) {
+    // executeConnectorCapabilityAsVerifiedEffect itself normalizes every
+    // connection/transport/readback failure into a FAILED/UNKNOWN outcome -
+    // it never throws for those. A thrown exception here can only be an
+    // authority/validation failure inside that boundary itself, which
+    // means no real effect was ever attempted; still release the
+    // reservation rather than leave it claimed against zero real effect.
+    await input.quotaAdmission.release({
+      identity: quotaIdentity,
+      idempotencyKey: quotaIdempotencyKey,
+      occurredAt: input.now,
+      reason: "executeConnectorCapabilityAsVerifiedEffect threw before any outcome could be recorded - releasing the reservation rather than leaving it claimed against zero real effect",
+    });
+    throw cause;
+  }
+
+  // Rev189 R2: `BLOCKED_NO_EFFECT` is a definitive proof that
+  // `transport.execute()` was NEVER invoked (a pre-transport connection/
+  // secret failure) - the reservation is released exactly like the
+  // stale-quota block above, and no attempted-effect economics is ever
+  // recorded for a call that never attempted anything.
+  if (outcome.kind === "BLOCKED_NO_EFFECT") {
+    await input.quotaAdmission.release({
+      identity: quotaIdentity,
+      idempotencyKey: quotaIdempotencyKey,
+      occurredAt: input.now,
+      reason: "executeConnectorCapabilityAsVerifiedEffect reported BLOCKED_NO_EFFECT - transport.execute() was never invoked; reservation released for a later retry to re-admit under current policy",
+    });
+    return { kind: "EFFECT_EXECUTED", outcome, resume };
+  }
+
+  // item5d/e: G5/G6 - commit actual usage (honestly UNKNOWN; the activated
+  // transport reports no real cost telemetry) after any ATTEMPTED/ambiguous
+  // transport outcome (VERIFIED/FAILED-with-readback/FAILED-authorization/
+  // UNKNOWN - every case where transport.execute() genuinely ran), then
+  // correlate it to exactly one ExecutionEconomicsEvent.
+  await input.quotaAdmission.commit({
+    identity: quotaIdentity,
+    idempotencyKey: quotaIdempotencyKey,
+    actualAmount: { presence: "UNKNOWN" },
+    occurredAt: input.now,
+  });
+  const { lineage: economicsLineage, idempotencyKey: economicsIdempotencyKey } = deriveEconomicsLineageAndKey({
+    tenantScope: input.tenantScope,
+    waitRequest: input.waitRequest,
+    currentActivationPlanId: input.currentActivationPlanId,
+    currentActivationPlanVersion: input.currentActivationPlanVersion,
+    economicsTaskRef: input.economicsTaskRef,
+  });
+  await recordAttemptEconomics({
+    economicsPort: input.economicsPort,
+    lineage: economicsLineage,
+    idempotencyKey: economicsIdempotencyKey,
+    economicsUsageSource: input.economicsUsageSource,
+    now: input.now,
+  });
+
+  return { kind: "EFFECT_EXECUTED", outcome, resume };
+}
 
 export async function resumeProtectedDecisionAndExecuteConnectorEffect(input: {
   readonly waitStore: DurableProtectedDecisionWaitStore;
@@ -385,58 +624,13 @@ export async function resumeProtectedDecisionAndExecuteConnectorEffect(input: {
   readonly economicsTaskRef: unknown;
   readonly economicsUsageSource: unknown;
 }): Promise<ResumeAndExecuteConnectorEffectResult> {
-  // item5 (replay safety) + Rev189 R1 (crash/restart disposition): once a
-  // real attempt has committed or released its quota reservation, that
-  // reservation's idempotencyKey (derived from the exact same jobId/runId/
-  // attempt identity `waitRequestId` is bound to) has reached a genuine
-  // terminal disposition and can never be re-admitted (see
-  // `admitQuotaReservation`'s own terminal-disposition guard). A replayed/
-  // racing call for an ALREADY-durably-resumed `waitRequestId` must
-  // therefore short-circuit here, before touching quota admission again -
-  // but WHICH disposition it reports must be learned, never guessed. A
-  // blanket "no effect" here would be false the moment a prior call
-  // actually reached transport/commit before crashing (R1's own finding);
-  // blindly releasing or re-invoking would corrupt a genuinely still-
-  // in-flight concurrent caller's own reservation. So: peek the quota
-  // ledger's own canonical settlement truth for this exact identity -
-  // `COMMITTED`/`RECONCILIATION_REQUIRED` means a real attempt definitely
-  // reached the finish line (recover any missing economics, idempotently,
-  // and report `ALREADY_RESUMED_SETTLED`); anything else (`RESERVED` or
-  // `RELEASED`, both reported `settled: false` by `peekSettlement`'s own
-  // contract) is genuinely ambiguous from this read alone and is reported
-  // honestly as `EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED`, touching
-  // nothing - reconciliation is a deliberate, separate decision, never an
-  // automatic guess made here.
+  // Rev190: a replay (an already-durably-resumed waitRequestId) is
+  // resolved by the SAME disposition-reconciliation path a losing
+  // same-call racer below also uses - never a separate, potentially
+  // drifting copy of that logic.
   const existingResume = input.waitStore.getResume(input.waitRequest.tenantId, input.waitRequest.waitRequestId);
   if (existingResume !== undefined) {
-    const replayQuotaIdentity = createQuotaReservationIdentity({
-      scope: input.quotaEnvelope.scope,
-      jobId: input.waitRequest.jobId as unknown as string,
-      runId: input.waitRequest.runId,
-      attemptRef: String(input.waitRequest.attempt),
-    });
-    const replayQuotaIdempotencyKey = deriveQuotaReservationIdempotencyKey(replayQuotaIdentity);
-    const { lineage: replayLineage, idempotencyKey: replayEconomicsIdempotencyKey } = deriveEconomicsLineageAndKey({
-      tenantScope: input.tenantScope,
-      waitRequest: input.waitRequest,
-      currentActivationPlanId: input.currentActivationPlanId,
-      currentActivationPlanVersion: input.currentActivationPlanVersion,
-      economicsTaskRef: input.economicsTaskRef,
-    });
-    const settled = await recoverEconomicsIfSettled({
-      quotaAdmission: input.quotaAdmission,
-      quotaIdentity: replayQuotaIdentity,
-      quotaIdempotencyKey: replayQuotaIdempotencyKey,
-      economicsPort: input.economicsPort,
-      lineage: replayLineage,
-      economicsIdempotencyKey: replayEconomicsIdempotencyKey,
-      economicsUsageSource: input.economicsUsageSource,
-      now: input.now,
-    });
-    if (settled) {
-      return { kind: "ALREADY_RESUMED_SETTLED", resume: existingResume };
-    }
-    return { kind: "EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED", resume: existingResume };
+    return await reconcileExistingResume(input, existingResume);
   }
 
   // item3: canonical exact-effect binding - checked before anything else
@@ -490,13 +684,7 @@ export async function resumeProtectedDecisionAndExecuteConnectorEffect(input: {
     currentActivationPlanVersion: input.currentActivationPlanVersion,
   });
   assertCurrentQuotaEnvelope(input.quotaEnvelope, input.currentQuotaSourceFingerprint);
-  const quotaIdentity = createQuotaReservationIdentity({
-    scope: input.quotaEnvelope.scope,
-    jobId: input.waitRequest.jobId as unknown as string,
-    runId: input.waitRequest.runId,
-    attemptRef: String(input.waitRequest.attempt),
-  });
-  const quotaIdempotencyKey = deriveQuotaReservationIdempotencyKey(quotaIdentity);
+  const { quotaIdentity, quotaIdempotencyKey } = deriveQuotaIdentityAndKey(input.waitRequest, input.quotaEnvelope.scope);
   const quotaDecision = await input.quotaAdmission.admit({
     envelope: input.quotaEnvelope,
     identity: quotaIdentity,
@@ -510,102 +698,11 @@ export async function resumeProtectedDecisionAndExecuteConnectorEffect(input: {
 
   const claim = input.waitStore.claimResume(input.waitRequest.tenantId, input.waitRequest.waitRequestId, authorization);
   if (!claim.created) {
-    return { kind: "ALREADY_RESUMED_NO_EFFECT", resume: claim.value };
+    // Lost the race to a concurrent winner - redirect to the SAME
+    // reconciliation path a replay would use (never a stale blanket
+    // "no effect" - the winner may already be mid-flight).
+    return await reconcileExistingResume(input, claim.value);
   }
 
-  // item5b: the latest-moment recheck, immediately before invoking the
-  // transport - the claim itself (already durably won above) is never
-  // undone by a post-claim staleness finding; only the effect is blocked
-  // and the reservation released for a later retry to re-admit fresh.
-  const stillCurrent = await quotaStillCurrentImmediatelyBeforeEffect({
-    quotaEnvelopeResolver: input.quotaEnvelopeResolver,
-    reservedEnvelope: input.quotaEnvelope,
-  });
-  if (!stillCurrent) {
-    await input.quotaAdmission.release({
-      identity: quotaIdentity,
-      idempotencyKey: quotaIdempotencyKey,
-      occurredAt: input.now,
-      reason: "quota envelope changed between admission and invocation - zero connector effect; reservation released for a later retry to re-admit under current policy",
-    });
-    return { kind: "EFFECT_BLOCKED_STALE_QUOTA", resume: claim.value };
-  }
-
-  let outcome: VerifiedConnectorEffectOutcome;
-  try {
-    outcome = executeConnectorCapabilityAsVerifiedEffect({
-      tenantScope: input.tenantScope,
-      authority: input.authority,
-      effectIntentId: input.effectIntentId,
-      actionRef: input.actionRef,
-      retryClassification: input.retryClassification,
-      attemptId: input.attemptId,
-      ...(input.approvalEvidenceRef !== undefined ? { approvalEvidenceRef: input.approvalEvidenceRef } : {}),
-      bound: input.bound,
-      capabilityRef: input.capabilityRef,
-      requestingOwnership: input.requestingOwnership,
-      connectionStore: input.connectionStore,
-      secretResolver: input.secretResolver,
-      transport: input.transport,
-      ...(input.requestPayload !== undefined ? { requestPayload: input.requestPayload } : {}),
-      readback: input.readback,
-    });
-  } catch (cause) {
-    // executeConnectorCapabilityAsVerifiedEffect itself normalizes every
-    // connection/transport/readback failure into a FAILED/UNKNOWN outcome -
-    // it never throws for those. A thrown exception here can only be an
-    // authority/validation failure inside that boundary itself, which
-    // means no real effect was ever attempted; still release the
-    // reservation rather than leave it claimed against zero real effect.
-    await input.quotaAdmission.release({
-      identity: quotaIdentity,
-      idempotencyKey: quotaIdempotencyKey,
-      occurredAt: input.now,
-      reason: "executeConnectorCapabilityAsVerifiedEffect threw before any outcome could be recorded - releasing the reservation rather than leaving it claimed against zero real effect",
-    });
-    throw cause;
-  }
-
-  // Rev189 R2: `BLOCKED_NO_EFFECT` is a definitive proof that
-  // `transport.execute()` was NEVER invoked (a pre-transport connection/
-  // secret failure) - the reservation is released exactly like the
-  // stale-quota block above, and no attempted-effect economics is ever
-  // recorded for a call that never attempted anything.
-  if (outcome.kind === "BLOCKED_NO_EFFECT") {
-    await input.quotaAdmission.release({
-      identity: quotaIdentity,
-      idempotencyKey: quotaIdempotencyKey,
-      occurredAt: input.now,
-      reason: "executeConnectorCapabilityAsVerifiedEffect reported BLOCKED_NO_EFFECT - transport.execute() was never invoked; reservation released for a later retry to re-admit under current policy",
-    });
-    return { kind: "EFFECT_EXECUTED", outcome, resume: claim.value };
-  }
-
-  // item5d/e: G5/G6 - commit actual usage (honestly UNKNOWN; the activated
-  // transport reports no real cost telemetry) after any ATTEMPTED/ambiguous
-  // transport outcome (VERIFIED/FAILED-with-readback/FAILED-authorization/
-  // UNKNOWN - every case where transport.execute() genuinely ran), then
-  // correlate it to exactly one ExecutionEconomicsEvent.
-  await input.quotaAdmission.commit({
-    identity: quotaIdentity,
-    idempotencyKey: quotaIdempotencyKey,
-    actualAmount: { presence: "UNKNOWN" },
-    occurredAt: input.now,
-  });
-  const { lineage: economicsLineage, idempotencyKey: economicsIdempotencyKey } = deriveEconomicsLineageAndKey({
-    tenantScope: input.tenantScope,
-    waitRequest: input.waitRequest,
-    currentActivationPlanId: input.currentActivationPlanId,
-    currentActivationPlanVersion: input.currentActivationPlanVersion,
-    economicsTaskRef: input.economicsTaskRef,
-  });
-  await recordAttemptEconomics({
-    economicsPort: input.economicsPort,
-    lineage: economicsLineage,
-    idempotencyKey: economicsIdempotencyKey,
-    economicsUsageSource: input.economicsUsageSource,
-    now: input.now,
-  });
-
-  return { kind: "EFFECT_EXECUTED", outcome, resume: claim.value };
+  return await proceedToInvokeEffect(input, claim.value, quotaIdentity, quotaIdempotencyKey);
 }

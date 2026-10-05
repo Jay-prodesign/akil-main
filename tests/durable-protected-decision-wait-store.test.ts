@@ -220,3 +220,27 @@ test("D8: claimResume rejects an authorization whose effectRef does not match th
     InvalidDurableProtectedDecisionWaitStoreError,
   );
 });
+
+test("D9 (Rev190 single-use): a second claimEffectStarted for the same waitRequestId is a safe no-op (created: false), never a second winning claim", () => {
+  const { store } = freshStore();
+  assert.equal(store.getEffectStarted(GOLDEN_PATH_TENANT_SCOPE.tenantId, "wait-d9"), false);
+
+  const first = store.claimEffectStarted(GOLDEN_PATH_TENANT_SCOPE.tenantId, "wait-d9");
+  assert.equal(first.created, true);
+  assert.equal(first.value, true);
+  assert.equal(store.getEffectStarted(GOLDEN_PATH_TENANT_SCOPE.tenantId, "wait-d9"), true);
+
+  const second = store.claimEffectStarted(GOLDEN_PATH_TENANT_SCOPE.tenantId, "wait-d9");
+  assert.equal(second.created, false);
+  assert.equal(second.value, true);
+  assert.equal(store.getEffectStarted(GOLDEN_PATH_TENANT_SCOPE.tenantId, "wait-d9"), true);
+});
+
+test("D10: cold restart reconstructs the identical effect-started marker", () => {
+  const { store, baseDir } = freshStore();
+  assert.equal(store.getEffectStarted(GOLDEN_PATH_TENANT_SCOPE.tenantId, "wait-d10"), false);
+  store.claimEffectStarted(GOLDEN_PATH_TENANT_SCOPE.tenantId, "wait-d10");
+  const restarted = new FileDurableProtectedDecisionWaitStore(baseDir);
+  assert.equal(restarted.getEffectStarted(GOLDEN_PATH_TENANT_SCOPE.tenantId, "wait-d10"), true);
+  assert.equal(restarted.getEffectStarted(GOLDEN_PATH_TENANT_SCOPE.tenantId, "wait-other-unclaimed"), false);
+});

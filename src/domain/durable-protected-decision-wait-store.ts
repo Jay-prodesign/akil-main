@@ -172,6 +172,33 @@ function validatePersistedResumeAuthorization(
  * - exactly the "single-use" guarantee this gate requires - never a second
  * effect-authorizing claim.
  */
+/**
+ * Rev190 (F6/R1 remainder): the minimum durable effect-operation lifecycle
+ * marker - `claimEffectStarted`/`getEffectStarted` - distinct from
+ * `claimResume`/`getResume` itself. `claimResume` alone only proves "a
+ * resume was authorized", never "the transport boundary was approached" -
+ * conflating the two is exactly Rev189 R1's unresolved residual (a durable
+ * resume claim is not equivalent to a terminal, or even a started, effect
+ * disposition). This marker is a THIRD independent `linkSync`-based
+ * atomic-creation log, the same proven single-winner pattern as
+ * `claimResume`/`putIfAbsentWaitRequest` above, so a concurrent racer or a
+ * later replay can durably and atomically learn - and, for exactly one
+ * caller ever, DECIDE - whether this `waitRequestId`'s one real transport
+ * invocation has already been approached:
+ *
+ * - absent: `CLAIMED_NOT_STARTED` - the resume was won, but transport was
+ *   never invoked. Safe to continue the full attempt now.
+ * - present: `STARTED_OR_EFFECT_POSSIBLE` - transport may have been invoked
+ *   (or the call crashed immediately before it, after already winning this
+ *   marker) - a caller observing this state must never blind-reinvoke the
+ *   transport; only an independent readback (or the existing settlement
+ *   peek) may resolve it.
+ *
+ * Exactly one caller, ever, wins `claimEffectStarted` for a given
+ * `waitRequestId` - this is what gives the transport boundary itself a
+ * single operation owner, the same way `claimResume`'s own atomicity gives
+ * the resume claim one owner.
+ */
 export interface DurableProtectedDecisionWaitStore {
   putIfAbsentWaitRequest(
     tenantId: TenantScope["tenantId"],
@@ -185,6 +212,8 @@ export interface DurableProtectedDecisionWaitStore {
     authorization: ProtectedDecisionResumeAuthorization,
   ): PersistResult<ProtectedDecisionResumeAuthorization>;
   getResume(tenantId: TenantScope["tenantId"], waitRequestId: string): ProtectedDecisionResumeAuthorization | undefined;
+  claimEffectStarted(tenantId: TenantScope["tenantId"], waitRequestId: string): PersistResult<true>;
+  getEffectStarted(tenantId: TenantScope["tenantId"], waitRequestId: string): boolean;
 }
 
 export class FileDurableProtectedDecisionWaitStore implements DurableProtectedDecisionWaitStore {
@@ -195,6 +224,7 @@ export class FileDurableProtectedDecisionWaitStore implements DurableProtectedDe
     mkdirSync(this.baseDir, { recursive: true });
     mkdirSync(this.waitCreationLockDir(), { recursive: true });
     mkdirSync(this.resumeCreationLockDir(), { recursive: true });
+    mkdirSync(this.effectStartedLockDir(), { recursive: true });
   }
 
   private waitFilePathFor(tenantId: TenantScope["tenantId"]): string {
@@ -215,6 +245,10 @@ export class FileDurableProtectedDecisionWaitStore implements DurableProtectedDe
     return join(this.baseDir, ".resume-creation-locks");
   }
 
+  private effectStartedLockDir(): string {
+    return join(this.baseDir, ".effect-started-locks");
+  }
+
   private waitCreationLockPathFor(tenantId: TenantScope["tenantId"], waitRequestId: string): string {
     const tenantKey = Buffer.from(tenantId, "utf8").toString("base64url");
     const waitKey = Buffer.from(waitRequestId, "utf8").toString("base64url");
@@ -225,6 +259,12 @@ export class FileDurableProtectedDecisionWaitStore implements DurableProtectedDe
     const tenantKey = Buffer.from(tenantId, "utf8").toString("base64url");
     const waitKey = Buffer.from(waitRequestId, "utf8").toString("base64url");
     return join(this.resumeCreationLockDir(), `${tenantKey}.${waitKey}.lock`);
+  }
+
+  private effectStartedLockPathFor(tenantId: TenantScope["tenantId"], waitRequestId: string): string {
+    const tenantKey = Buffer.from(tenantId, "utf8").toString("base64url");
+    const waitKey = Buffer.from(waitRequestId, "utf8").toString("base64url");
+    return join(this.effectStartedLockDir(), `${tenantKey}.${waitKey}.lock`);
   }
 
   private readAllWaitRequests(tenantId: TenantScope["tenantId"]): Array<{ waitRequestId: string; request: ProtectedDecisionWaitRequest }> {
@@ -423,5 +463,42 @@ export class FileDurableProtectedDecisionWaitStore implements DurableProtectedDe
 
   getResume(tenantId: TenantScope["tenantId"], waitRequestId: string): ProtectedDecisionResumeAuthorization | undefined {
     return this.dedupedResumesById(this.readAllResumes(tenantId)).get(waitRequestId);
+  }
+
+  claimEffectStarted(tenantId: TenantScope["tenantId"], waitRequestId: string): PersistResult<true> {
+    if (waitRequestId.trim().length === 0) {
+      throw new InvalidDurableProtectedDecisionWaitStoreError("waitRequestId must be a non-empty string");
+    }
+    // A bare existence marker - no payload content to validate on replay,
+    // since the only fact this log ever records is "transport was
+    // approached for this exact waitRequestId", never a value that could
+    // itself drift or conflict.
+    const lockPath = this.effectStartedLockPathFor(tenantId, waitRequestId);
+    if (existsSync(lockPath)) {
+      return { value: true, created: false };
+    }
+    const tmpPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(tmpPath, waitRequestId, "utf8");
+    let wonCreation: boolean;
+    try {
+      linkSync(tmpPath, lockPath);
+      wonCreation = true;
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw cause;
+      }
+      wonCreation = false;
+    } finally {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        // best-effort cleanup only.
+      }
+    }
+    return { value: true, created: wonCreation };
+  }
+
+  getEffectStarted(tenantId: TenantScope["tenantId"], waitRequestId: string): boolean {
+    return existsSync(this.effectStartedLockPathFor(tenantId, waitRequestId));
   }
 }

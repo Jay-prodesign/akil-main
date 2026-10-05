@@ -11,7 +11,7 @@ import {
 } from "./helpers/golden-path-fixture.js";
 import { createProtectedDecisionWaitRequest } from "../src/domain/protected-decision-wait-gate.js";
 import { createProtectedDecisionRecord, reviseProtectedDecisionRecord, type ProtectedDecisionOutcome } from "../src/domain/protected-decision-record.js";
-import { FileDurableProtectedDecisionWaitStore } from "../src/domain/durable-protected-decision-wait-store.js";
+import { FileDurableProtectedDecisionWaitStore, type DurableProtectedDecisionWaitStore } from "../src/domain/durable-protected-decision-wait-store.js";
 import { FileDurableProtectedDecisionRecordStore } from "../src/domain/durable-protected-decision-record-store.js";
 import { createAuthorityContext } from "../src/domain/authority.js";
 import { createOrganization, activateOrganization, type Organization } from "../src/domain/organization.js";
@@ -399,35 +399,227 @@ test("Rev186 F3 (the core atomicity proof), widened by Rev189 R1 (truthful dispo
   }
 });
 
-test("Rev189 R1 adversarial: a replayed call whose prior attempt never reached a committed/reconciliation-required settlement (quota still RESERVED, as it would be mid-flight before a crash) is reported honestly as EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED, never a false NO_EFFECT or a blind re-release/re-invoke", async () => {
-  const waitStore = new FileDurableProtectedDecisionWaitStore(mkdtempSync(join(tmpdir(), "os-v0-10-rpdce-r1-")));
-  const decisionRecordStore = new FileDurableProtectedDecisionRecordStore(mkdtempSync(join(tmpdir(), "os-v0-10-rpdce-r1-decision-")));
-  const request = waitRequest();
-  waitStore.putIfAbsentWaitRequest(tenantScope.tenantId, request.waitRequestId, request);
-  const record = decisionRecord();
-  decisionRecordStore.putIfAbsentDecisionRecord(tenantScope.tenantId, record.decisionRef, record);
+test("Rev190 (F6/R1 remainder) adversarial: a replayed call whose prior attempt won claimResume and admitted quota but crashed BEFORE the transport boundary was ever approached (CLAIMED_NOT_STARTED - getEffectStarted absent) safely continues the one real attempt exactly once, reaching VERIFIED - never a false NO_EFFECT, and never stranded as UNKNOWN", async () => {
+  const { input, transport, economicsPort } = baseInput();
+  const quotaAdmission = input.quotaAdmission as InMemoryQuotaAdmissionStore;
 
+  const quotaIdentity = createQuotaReservationIdentity({
+    scope: input.quotaEnvelope.scope,
+    jobId: input.waitRequest.jobId as unknown as string,
+    runId: input.waitRequest.runId,
+    attemptRef: String(input.waitRequest.attempt),
+  });
+  const quotaIdempotencyKey = deriveQuotaReservationIdempotencyKey(quotaIdentity);
+  await quotaAdmission.admit({
+    envelope: input.quotaEnvelope,
+    identity: quotaIdentity,
+    idempotencyKey: quotaIdempotencyKey,
+    requestedAmount: input.estimatedCost,
+    occurredAt: input.now,
+  });
   const authorization = {
-    waitRequestId: request.waitRequestId,
-    effectRef: request.effectRef,
+    waitRequestId: input.waitRequest.waitRequestId,
+    effectRef: input.waitRequest.effectRef,
     resolvedAt: "2026-10-02T00:01:00.000Z",
     resolvedByPrincipalRef: RESUMER_PRINCIPAL_REF,
-    decisionRef: request.decisionRef,
+    decisionRef: input.waitRequest.decisionRef,
     decisionEvidenceRef: "evidence:decision-made",
   };
-  // Simulate exactly the crash-after-claim/before-settlement window: the
-  // durable resume claim exists, but quota admission never progressed past
-  // RESERVED (no commit, no release) - the real-world state immediately
-  // after a crash between `claimResume` and transport/settlement.
-  waitStore.claimResume(tenantScope.tenantId, request.waitRequestId, authorization);
+  // Simulate exactly the crash-after-claim/before-transport window: the
+  // durable resume claim exists and quota is admitted (RESERVED), but
+  // `claimEffectStarted` was never reached - the real-world state
+  // immediately after a crash between `claimResume` and the transport
+  // boundary, which Rev189 R1's own fix could only report as
+  // EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED, forever stranding it.
+  input.waitStore.claimResume(tenantScope.tenantId, input.waitRequest.waitRequestId, authorization);
+  assert.equal(input.waitStore.getEffectStarted(tenantScope.tenantId, input.waitRequest.waitRequestId), false);
 
-  const { input, transport } = baseInput({ waitStore, decisionRecordStore });
+  const result = await resumeProtectedDecisionAndExecuteConnectorEffect(input);
+  assert.equal(result.kind, "EFFECT_EXECUTED");
+  if (result.kind === "EFFECT_EXECUTED") {
+    assert.equal(result.outcome.kind, "VERIFIED");
+  }
+  assert.equal(transport.callCount, 1, "CLAIMED_NOT_STARTED must safely continue the one real attempt, invoking the transport exactly once");
+  assert.equal(quotaAdmission.commitCount, 1, "the pre-existing RESERVED reservation must be reused, not re-admitted, then committed exactly once");
+  assert.equal(economicsPort.events.length, 1);
+
+  // A further replay is now terminally settled - idempotent, no second
+  // transport invocation, no second commit.
+  const again = await resumeProtectedDecisionAndExecuteConnectorEffect({ ...input, now: "2026-10-02T00:03:00.000Z" });
+  assert.equal(again.kind, "ALREADY_RESUMED_SETTLED");
+  assert.equal(transport.callCount, 1);
+  assert.equal(quotaAdmission.commitCount, 1);
+  assert.equal(economicsPort.events.length, 1);
+});
+
+test("Rev190 (F6/R1 remainder) adversarial: a restart observing STARTED_OR_EFFECT_POSSIBLE (getEffectStarted present) with an unsettled quota reservation NEVER blind-reinvokes the transport - it is reported as EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED until an independent readback resolves it", async () => {
+  const { input, transport } = baseInput({ readback: { confirmsApplied: () => false, evidenceRef: () => "evidence:not-applied" } });
+  const quotaAdmission = input.quotaAdmission as InMemoryQuotaAdmissionStore;
+
+  const quotaIdentity = createQuotaReservationIdentity({
+    scope: input.quotaEnvelope.scope,
+    jobId: input.waitRequest.jobId as unknown as string,
+    runId: input.waitRequest.runId,
+    attemptRef: String(input.waitRequest.attempt),
+  });
+  const quotaIdempotencyKey = deriveQuotaReservationIdempotencyKey(quotaIdentity);
+  await quotaAdmission.admit({
+    envelope: input.quotaEnvelope,
+    identity: quotaIdentity,
+    idempotencyKey: quotaIdempotencyKey,
+    requestedAmount: input.estimatedCost,
+    occurredAt: input.now,
+  });
+  const authorization = {
+    waitRequestId: input.waitRequest.waitRequestId,
+    effectRef: input.waitRequest.effectRef,
+    resolvedAt: "2026-10-02T00:01:00.000Z",
+    resolvedByPrincipalRef: RESUMER_PRINCIPAL_REF,
+    decisionRef: input.waitRequest.decisionRef,
+    decisionEvidenceRef: "evidence:decision-made",
+  };
+  input.waitStore.claimResume(tenantScope.tenantId, input.waitRequest.waitRequestId, authorization);
+  // Simulate exactly the crash-after-transport-approached window: the
+  // transport boundary WAS approached (claimEffectStarted durably won),
+  // but the call crashed before settlement - quota stays RESERVED.
+  input.waitStore.claimEffectStarted(tenantScope.tenantId, input.waitRequest.waitRequestId);
+
   const result = await resumeProtectedDecisionAndExecuteConnectorEffect(input);
   assert.equal(result.kind, "EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED");
-  assert.equal(transport.callCount, 0, "an ambiguous post-claim disposition must never be resolved by blindly re-invoking the transport");
-  const quotaAdmission = input.quotaAdmission as InMemoryQuotaAdmissionStore;
-  assert.equal(quotaAdmission.releaseCount, 0, "an ambiguous post-claim disposition must never be resolved by blindly releasing a reservation that may belong to a still in-flight concurrent caller");
+  assert.equal(transport.callCount, 0, "STARTED_OR_EFFECT_POSSIBLE must never be resolved by blindly re-invoking the transport");
+  assert.equal(quotaAdmission.releaseCount, 0, "an unresolved disposition must never be resolved by blindly releasing a reservation that may belong to a still in-flight concurrent caller");
   assert.equal(quotaAdmission.commitCount, 0);
+});
+
+test("Rev190 (F6/R1 remainder) adversarial: a restart observing STARTED_OR_EFFECT_POSSIBLE whose independent readback confirms the effect WAS genuinely applied before the crash settles it (commit + economics) without ever re-invoking the transport", async () => {
+  const { input, transport, economicsPort } = baseInput({ readback: { confirmsApplied: () => true, evidenceRef: (result) => `evidence:readback:${result.capabilityRef}` } });
+  const quotaAdmission = input.quotaAdmission as InMemoryQuotaAdmissionStore;
+
+  const quotaIdentity = createQuotaReservationIdentity({
+    scope: input.quotaEnvelope.scope,
+    jobId: input.waitRequest.jobId as unknown as string,
+    runId: input.waitRequest.runId,
+    attemptRef: String(input.waitRequest.attempt),
+  });
+  const quotaIdempotencyKey = deriveQuotaReservationIdempotencyKey(quotaIdentity);
+  await quotaAdmission.admit({
+    envelope: input.quotaEnvelope,
+    identity: quotaIdentity,
+    idempotencyKey: quotaIdempotencyKey,
+    requestedAmount: input.estimatedCost,
+    occurredAt: input.now,
+  });
+  const authorization = {
+    waitRequestId: input.waitRequest.waitRequestId,
+    effectRef: input.waitRequest.effectRef,
+    resolvedAt: "2026-10-02T00:01:00.000Z",
+    resolvedByPrincipalRef: RESUMER_PRINCIPAL_REF,
+    decisionRef: input.waitRequest.decisionRef,
+    decisionEvidenceRef: "evidence:decision-made",
+  };
+  input.waitStore.claimResume(tenantScope.tenantId, input.waitRequest.waitRequestId, authorization);
+  input.waitStore.claimEffectStarted(tenantScope.tenantId, input.waitRequest.waitRequestId);
+
+  const result = await resumeProtectedDecisionAndExecuteConnectorEffect(input);
+  assert.equal(result.kind, "ALREADY_RESUMED_SETTLED");
+  assert.equal(transport.callCount, 0, "applied-before-result-persist must reconcile via the independent readback alone, never a second transport.execute()");
+  assert.equal(quotaAdmission.commitCount, 1);
+  assert.equal(economicsPort.events.length, 1);
+
+  // Idempotent on a further repeated restart - already settled now.
+  const again = await resumeProtectedDecisionAndExecuteConnectorEffect({ ...input, now: "2026-10-02T00:03:00.000Z" });
+  assert.equal(again.kind, "ALREADY_RESUMED_SETTLED");
+  assert.equal(transport.callCount, 0);
+  assert.equal(quotaAdmission.commitCount, 1);
+  assert.equal(economicsPort.events.length, 1);
+});
+
+test("Rev190 (F6/R1 remainder) adversarial: a readback that itself throws while reconciling a STARTED_OR_EFFECT_POSSIBLE disposition fails closed as EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED, never crashing the caller and never guessing", async () => {
+  const { input, transport } = baseInput({
+    readback: { confirmsApplied: () => { throw new Error("provider readback endpoint unreachable"); }, evidenceRef: () => "unused" },
+  });
+  const quotaAdmission = input.quotaAdmission as InMemoryQuotaAdmissionStore;
+  const quotaIdentity = createQuotaReservationIdentity({
+    scope: input.quotaEnvelope.scope,
+    jobId: input.waitRequest.jobId as unknown as string,
+    runId: input.waitRequest.runId,
+    attemptRef: String(input.waitRequest.attempt),
+  });
+  const quotaIdempotencyKey = deriveQuotaReservationIdempotencyKey(quotaIdentity);
+  await quotaAdmission.admit({
+    envelope: input.quotaEnvelope,
+    identity: quotaIdentity,
+    idempotencyKey: quotaIdempotencyKey,
+    requestedAmount: input.estimatedCost,
+    occurredAt: input.now,
+  });
+  const authorization = {
+    waitRequestId: input.waitRequest.waitRequestId,
+    effectRef: input.waitRequest.effectRef,
+    resolvedAt: "2026-10-02T00:01:00.000Z",
+    resolvedByPrincipalRef: RESUMER_PRINCIPAL_REF,
+    decisionRef: input.waitRequest.decisionRef,
+    decisionEvidenceRef: "evidence:decision-made",
+  };
+  input.waitStore.claimResume(tenantScope.tenantId, input.waitRequest.waitRequestId, authorization);
+  input.waitStore.claimEffectStarted(tenantScope.tenantId, input.waitRequest.waitRequestId);
+
+  const result = await resumeProtectedDecisionAndExecuteConnectorEffect(input);
+  assert.equal(result.kind, "EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED");
+  assert.equal(transport.callCount, 0);
+  assert.equal(quotaAdmission.commitCount, 0);
+  assert.equal(quotaAdmission.releaseCount, 0);
+});
+
+test("Rev190 (F6/R1 remainder) adversarial: on the FIRST-TIME path, losing the claimEffectStarted race (a genuine concurrent winner) never invokes the transport from the losing call - exactly one operation owner for the transport boundary", async () => {
+  // A thin wrapper around the real file store: `claimEffectStarted`
+  // reports a concurrent winner already took it (`created: false`)
+  // exactly once, then delegates to the real store from then on -
+  // mirroring a genuine concurrent racer winning an instant before this
+  // call reaches the SAME atomic gate `proceedToInvokeEffect` itself
+  // calls. `getEffectStarted` is left entirely real, so the function's
+  // own subsequent reconciliation read observes a fully consistent
+  // started=true, never a contradiction this test fabricated.
+  class LosesEffectStartedRaceOnce implements DurableProtectedDecisionWaitStore {
+    private armed = true;
+    constructor(private readonly inner: DurableProtectedDecisionWaitStore) {}
+    putIfAbsentWaitRequest(...args: Parameters<DurableProtectedDecisionWaitStore["putIfAbsentWaitRequest"]>) {
+      return this.inner.putIfAbsentWaitRequest(...args);
+    }
+    get(...args: Parameters<DurableProtectedDecisionWaitStore["get"]>) {
+      return this.inner.get(...args);
+    }
+    claimResume(...args: Parameters<DurableProtectedDecisionWaitStore["claimResume"]>) {
+      return this.inner.claimResume(...args);
+    }
+    getResume(...args: Parameters<DurableProtectedDecisionWaitStore["getResume"]>) {
+      return this.inner.getResume(...args);
+    }
+    claimEffectStarted(...args: Parameters<DurableProtectedDecisionWaitStore["claimEffectStarted"]>) {
+      if (this.armed) {
+        this.armed = false;
+        // A genuine concurrent winner durably wins the SAME real claim
+        // first - this call must see it lost, exactly as it would for a
+        // real racer.
+        this.inner.claimEffectStarted(...args);
+        return { value: true as const, created: false };
+      }
+      return this.inner.claimEffectStarted(...args);
+    }
+    getEffectStarted(...args: Parameters<DurableProtectedDecisionWaitStore["getEffectStarted"]>) {
+      return this.inner.getEffectStarted(...args);
+    }
+  }
+
+  const realWaitStore = new FileDurableProtectedDecisionWaitStore(mkdtempSync(join(tmpdir(), "os-v0-10-rpdce-r1-race-")));
+  const request = waitRequest();
+  realWaitStore.putIfAbsentWaitRequest(tenantScope.tenantId, request.waitRequestId, request);
+  const waitStore = new LosesEffectStartedRaceOnce(realWaitStore);
+  const { input, transport } = baseInput({ waitStore });
+
+  const result = await resumeProtectedDecisionAndExecuteConnectorEffect(input);
+  assert.equal(result.kind, "ALREADY_RESUMED_SETTLED", "losing the race must reconcile via the SAME disposition path a replay uses, settling once the (genuine) winner's own effect is independently confirmed applied");
+  assert.equal(transport.callCount, 0, "the losing call must never invoke the transport itself - exactly one operation owner exists for this waitRequestId");
 });
 
 test("Rev189 R1 adversarial: a replayed call whose prior attempt committed quota but crashed before the ExecutionEconomicsEvent was recorded recovers the missing economics idempotently on replay, without re-invoking the transport or re-committing quota", async () => {
@@ -642,6 +834,12 @@ test("Rev188 item5b adversarial: a quota envelope that goes stale between admiss
     quotaEnvelope: admittedEnvelope,
     currentQuotaSourceFingerprint: "qfp-rpdce",
     quotaEnvelopeResolver: { resolveCurrentQuotaEnvelope: () => staleAtInvocationEnvelope } satisfies CurrentQuotaEnvelopeResolver,
+    // Rev190: `claimEffectStarted` is won before this staleness check, so
+    // a replay observes STARTED_OR_EFFECT_POSSIBLE and must reconcile via
+    // readback - a truthful "genuinely not applied" stub (the transport
+    // really was never invoked here) proves the replay stays honestly
+    // unresolved, never a stale `alwaysConfirmsReadback()` false positive.
+    readback: { confirmsApplied: () => false, evidenceRef: () => "evidence:not-applied" },
   });
   const result = await resumeProtectedDecisionAndExecuteConnectorEffect(input);
   assert.equal(result.kind, "EFFECT_BLOCKED_STALE_QUOTA");
@@ -649,12 +847,12 @@ test("Rev188 item5b adversarial: a quota envelope that goes stale between admiss
   assert.equal(quotaAdmission.releaseCount, 1, "the reservation must be released on a post-claim staleness finding");
   assert.equal(quotaAdmission.commitCount, 0);
   // The resume claim itself is never undone - a second call now finds it
-  // already resumed. Rev189 R1: the quota ledger's own canonical
-  // disposition for this identity is RELEASED (never COMMITTED/
-  // RECONCILIATION_REQUIRED), which `peekSettlement` truthfully reports as
-  // unsettled - so the replay is reported as
-  // EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED, never a false
-  // ALREADY_RESUMED_NO_EFFECT, and the transport is still never invoked.
+  // already resumed. Rev190: the transport boundary WAS approached
+  // (claimEffectStarted won before the staleness check), so the replay
+  // reconciles via readback rather than the plain quota-settlement peek
+  // alone; the readback here truthfully confirms nothing was applied, so
+  // it is reported as EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED,
+  // never a false settlement, and the transport is still never invoked.
   const second = await resumeProtectedDecisionAndExecuteConnectorEffect(input);
   assert.equal(second.kind, "EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED");
   assert.equal(transport.callCount, 0);
@@ -752,7 +950,15 @@ test("Rev189 R3: a waitRequest bound with requiresApproval=true (approvalEvidenc
 });
 
 test("Rev189 R2 adversarial (at the resume/quota layer): a BLOCKED_NO_EFFECT outcome (no current durable connector connection) releases the quota reservation and records no attempted-effect economics, but still durably consumes the resume claim exactly once", async () => {
-  const { input, transport, economicsPort } = baseInput({ connectionStore: { get: () => undefined } });
+  const { input, transport, economicsPort } = baseInput({
+    connectionStore: { get: () => undefined },
+    // Rev190: claimEffectStarted is won unconditionally on entry to
+    // proceedToInvokeEffect, so a replay after BLOCKED_NO_EFFECT also
+    // observes STARTED_OR_EFFECT_POSSIBLE and reconciles via readback - a
+    // truthful "genuinely not applied" stub matches reality (no
+    // connection ever existed to apply anything against).
+    readback: { confirmsApplied: () => false, evidenceRef: () => "evidence:not-applied" },
+  });
   const quotaAdmission = input.quotaAdmission as InMemoryQuotaAdmissionStore;
   const result = await resumeProtectedDecisionAndExecuteConnectorEffect(input);
   assert.equal(result.kind, "EFFECT_EXECUTED");

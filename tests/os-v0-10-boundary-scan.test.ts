@@ -205,7 +205,7 @@ test("OS-V0-10: resume-protected-decision-for-connector-effect.ts imports only i
     'type VerifiedConnectorEffectOutcome,',
     'type ConnectorCapabilityReadback,',
     '} from "./connector-capability-verified-effect.js";',
-    'import type { executeConnectorCapability, ConnectorTransport, SecretResolver, CurrentConnectorConnectionReader } from "./connector-execution.js";',
+    'import type { executeConnectorCapability, ConnectorTransport, SecretResolver, CurrentConnectorConnectionReader, ConnectorExecutionResult } from "./connector-execution.js";',
     'import type { ProjectOwnershipRef } from "./project-ownership.js";',
     'import type { ExternalEffectRetryClassification } from "./external-effect-envelope.js";',
     'import type { QuotaAdmissionPort, CurrentQuotaEnvelopeResolver, ExecutionEconomicsPort } from "../application/outcome-job-execution-runtime.js";',
