@@ -137,7 +137,7 @@ export function createProtectedDecisionRecord(input: {
   if (typeof input.outcome !== "string" || !VALID_OUTCOMES.has(input.outcome)) {
     throw new InvalidProtectedDecisionRecordError('outcome must be exactly "APPROVED", "DENIED", or "REVOKED"');
   }
-  const access = resolveAuthenticatedDecisionAccess({
+  resolveAuthenticatedDecisionAccess({
     tenantScope: input.tenantScope,
     organization: input.organization,
     membership: input.membership,
@@ -150,7 +150,13 @@ export function createProtectedDecisionRecord(input: {
     decisionRef,
     tenantId: input.tenantScope.tenantId,
     outcome: input.outcome as ProtectedDecisionOutcome,
-    decidedByPrincipalRef: access.membershipId as string,
+    // Rev189 R4: the proven AUTHENTICATED PRINCIPAL ref, never
+    // `access.membershipId` - a membership id identifies an
+    // OrganizationMembership record, a structurally different identity
+    // from the principal who was actually authenticated. A field named
+    // `decidedByPrincipalRef` must store the principal, not the
+    // membership.
+    decidedByPrincipalRef: input.currentPrincipalRef,
     decidedAt: requireNonEmptyString(input.decidedAt, "decidedAt"),
     evidenceRef: requireNonEmptyString(input.evidenceRef, "evidenceRef"),
   };
@@ -186,7 +192,7 @@ export function reviseProtectedDecisionRecord(input: {
   if (input.current.outcome !== "APPROVED" || targetOutcome !== "REVOKED") {
     throw new ProtectedDecisionRecordTransitionError(input.current.decisionRef, input.current.outcome, targetOutcome);
   }
-  const access = resolveAuthenticatedDecisionAccess({
+  resolveAuthenticatedDecisionAccess({
     tenantScope: input.tenantScope,
     organization: input.organization,
     membership: input.membership,
@@ -199,7 +205,9 @@ export function reviseProtectedDecisionRecord(input: {
     decisionRef: input.current.decisionRef,
     tenantId: input.current.tenantId,
     outcome: "REVOKED",
-    decidedByPrincipalRef: access.membershipId as string,
+    // Rev189 R4: see createProtectedDecisionRecord's own note - the
+    // proven authenticated principal, never the membership id.
+    decidedByPrincipalRef: input.currentPrincipalRef,
     decidedAt: requireNonEmptyString(input.decidedAt, "decidedAt"),
     evidenceRef: requireNonEmptyString(input.evidenceRef, "evidenceRef"),
   };

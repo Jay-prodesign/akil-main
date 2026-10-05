@@ -89,8 +89,10 @@ class FixedSecretResolver implements SecretResolver {
 }
 
 class ScriptedTransport implements ConnectorTransport {
+  public callCount = 0;
   constructor(private readonly behavior: "SUCCESS" | "AUTHORIZATION_FAILED" | "TRANSPORT_ERROR" | "THROW_UNEXPECTED") {}
   execute(request: ConnectorTransportRequest) {
+    this.callCount += 1;
     if (this.behavior === "SUCCESS") {
       return { outcome: "SUCCESS" as const, data: { pong: true } };
     }
@@ -98,6 +100,16 @@ class ScriptedTransport implements ConnectorTransport {
       return { outcome: this.behavior, errorMessage: `mock ${this.behavior}` };
     }
     throw new Error("unexpected transport crash");
+  }
+}
+
+function noCurrentConnectionStore(): CurrentConnectorConnectionReader {
+  return { get: () => undefined };
+}
+
+class ThrowingSecretResolver implements SecretResolver {
+  resolve(): string {
+    throw new Error("secret backend unreachable");
   }
 }
 
@@ -200,6 +212,27 @@ test("executeConnectorCapabilityAsVerifiedEffect fails closed on a cross-tenant 
   const foreignTenant = createTenantScope("tenant-ccve-foreign");
   const foreignAuthority = createAuthorityContext({ tenantScope: foreignTenant, permissions: ["EXECUTE"], canPerformProtectedActions: true });
   assert.throws(() => executeConnectorCapabilityAsVerifiedEffect(baseInput({ authority: foreignAuthority })));
+});
+
+test("Rev189 R2: no current durable connection for the connectionBindingId is a definitive pre-transport no-effect - reported BLOCKED_NO_EFFECT, and transport.execute() is never invoked", () => {
+  const transport = new ScriptedTransport("SUCCESS");
+  const outcome = executeConnectorCapabilityAsVerifiedEffect(baseInput({ connectionStore: noCurrentConnectionStore(), transport }));
+  assert.equal(outcome.kind, "BLOCKED_NO_EFFECT");
+  assert.equal(transport.callCount, 0, "a ConnectorExecutionNotAuthorizedError is thrown strictly before transport.execute() - it must never be invoked");
+});
+
+test("Rev189 R2: an unresolvable secret (secretResolver throws) is a definitive pre-transport no-effect - reported BLOCKED_NO_EFFECT, and transport.execute() is never invoked", () => {
+  const transport = new ScriptedTransport("SUCCESS");
+  const outcome = executeConnectorCapabilityAsVerifiedEffect(baseInput({ secretResolver: new ThrowingSecretResolver(), transport }));
+  assert.equal(outcome.kind, "BLOCKED_NO_EFFECT");
+  assert.equal(transport.callCount, 0, "an UnresolvedConnectorSecretError is thrown strictly before transport.execute() - it must never be invoked");
+});
+
+test("Rev189 R2: BLOCKED_NO_EFFECT is distinct from an attempted-but-rejected AUTHORIZATION_FAILED transport outcome - the latter still invoked the transport and remains FAILED, not BLOCKED_NO_EFFECT", () => {
+  const transport = new ScriptedTransport("AUTHORIZATION_FAILED");
+  const outcome = executeConnectorCapabilityAsVerifiedEffect(baseInput({ transport }));
+  assert.equal(outcome.kind, "FAILED");
+  assert.equal(transport.callCount, 1, "the transport WAS invoked here - the provider itself rejected the request, which is a different (attempted) class than BLOCKED_NO_EFFECT");
 });
 
 test("InvalidVerifiedConnectorEffectError is thrown when the readback's own evidenceRef is empty", () => {

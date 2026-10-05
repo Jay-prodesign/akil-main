@@ -150,6 +150,8 @@ test("OS-V0-10: connector-capability-verified-effect.ts imports only its declare
     'import {',
     'executeConnectorCapability,',
     'ConnectorExecutionAuthorizationError,',
+    'ConnectorExecutionNotAuthorizedError,',
+    'UnresolvedConnectorSecretError,',
     'type ConnectorExecutionResult,',
     'type ConnectorTransport,',
     'type SecretResolver,',
@@ -214,8 +216,13 @@ test("OS-V0-10: resume-protected-decision-for-connector-effect.ts imports only i
     'quotaScopeKey,',
     'type QuotaEnvelope,',
     'type QuotaAdmissionScope,',
+    'type QuotaReservationIdentity,',
     '} from "./execution-quota-admission.js";',
-    'import { createExecutionEconomicsLineage, recordExecutionEconomicsEvent } from "./execution-economics-attribution.js";',
+    'import {',
+    'createExecutionEconomicsLineage,',
+    'recordExecutionEconomicsEvent,',
+    'type ExecutionEconomicsLineage,',
+    '} from "./execution-economics-attribution.js";',
   ]);
 });
 

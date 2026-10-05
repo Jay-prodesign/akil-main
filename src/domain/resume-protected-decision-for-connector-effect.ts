@@ -27,8 +27,13 @@ import {
   quotaScopeKey,
   type QuotaEnvelope,
   type QuotaAdmissionScope,
+  type QuotaReservationIdentity,
 } from "./execution-quota-admission.js";
-import { createExecutionEconomicsLineage, recordExecutionEconomicsEvent } from "./execution-economics-attribution.js";
+import {
+  createExecutionEconomicsLineage,
+  recordExecutionEconomicsEvent,
+  type ExecutionEconomicsLineage,
+} from "./execution-economics-attribution.js";
 
 export class ProtectedDecisionRecordNotFoundError extends Error {
   constructor(tenantId: string, decisionRef: string) {
@@ -99,8 +104,17 @@ export function computeConnectorEffectFingerprint(input: {
   readonly capabilityRef: unknown;
   readonly connectionBindingId: unknown;
   readonly requestPayload?: unknown;
+  readonly approvalEvidenceRef?: unknown;
 }): string {
   const effectIntentId = typeof input.effectIntentId === "string" ? input.effectIntentId : String(input.effectIntentId);
+  // Rev189 R3: `requiresApproval` is bound too, derived the SAME way
+  // `createExternalEffectIntent` derives it (`approvalEvidenceRef !==
+  // undefined`) - never a separately-declared boolean that could drift
+  // from the real intent's own semantics. Keeping the SAME effectIntentId
+  // while flipping approval-required state underneath it must now fail
+  // this fingerprint, not just substituting action/capability/connection/
+  // payload.
+  const requiresApproval = input.approvalEvidenceRef !== undefined;
   return JSON.stringify([
     effectIntentId,
     input.actionRef,
@@ -108,6 +122,7 @@ export function computeConnectorEffectFingerprint(input: {
     input.capabilityRef,
     input.connectionBindingId,
     input.requestPayload ?? null,
+    requiresApproval,
   ]);
 }
 
@@ -162,6 +177,108 @@ async function quotaStillCurrentImmediatelyBeforeEffect(input: {
     freshEnvelope.envelopeRef === input.reservedEnvelope.envelopeRef &&
     freshEnvelope.sourceFingerprint === input.reservedEnvelope.sourceFingerprint
   );
+}
+
+/**
+ * Rev189 R1/R2: the ONE canonical economics-correlation derivation and
+ * append, factored out so both the normal post-transport path and the
+ * crash/restart recovery path (`recoverEconomicsIfSettled` below) use the
+ * exact same lineage/idempotencyKey encoding - never two independent
+ * derivations that could drift. Mirrors `outcome-job-execution-runtime.ts`'s
+ * own `recordExecutionEconomicsForSettledAttempt`/`JSON.stringify`-of-
+ * ordered-tuple convention verbatim.
+ */
+function deriveEconomicsLineageAndKey(input: {
+  readonly tenantScope: TenantScope;
+  readonly waitRequest: ProtectedDecisionWaitRequest;
+  readonly currentActivationPlanId: string;
+  readonly currentActivationPlanVersion: number;
+  readonly economicsTaskRef: unknown;
+}): { readonly lineage: ExecutionEconomicsLineage; readonly idempotencyKey: string } {
+  const lineage = createExecutionEconomicsLineage({
+    tenantScope: input.tenantScope,
+    customerId: input.waitRequest.customerId,
+    projectId: input.waitRequest.projectId,
+    planId: input.currentActivationPlanId,
+    planVersion: input.currentActivationPlanVersion,
+    jobId: input.waitRequest.jobId,
+    taskRef: input.economicsTaskRef,
+    runRef: input.waitRequest.runId,
+    attemptRef: String(input.waitRequest.attempt),
+  });
+  const idempotencyKey = JSON.stringify([
+    lineage.tenantId,
+    lineage.customerId,
+    lineage.projectId,
+    lineage.planId,
+    lineage.planVersion,
+    lineage.jobId,
+    lineage.taskRef,
+    lineage.runRef,
+    lineage.attemptRef,
+  ]);
+  return { lineage, idempotencyKey };
+}
+
+async function recordAttemptEconomics(input: {
+  readonly economicsPort: ExecutionEconomicsPort;
+  readonly lineage: ExecutionEconomicsLineage;
+  readonly idempotencyKey: string;
+  readonly economicsUsageSource: unknown;
+  readonly now: unknown;
+}): Promise<void> {
+  const economicsEvent = recordExecutionEconomicsEvent({
+    lineage: input.lineage,
+    idempotencyKey: input.idempotencyKey,
+    usageSource: input.economicsUsageSource,
+    costBuckets: [{ kind: "MARGINAL_CASH", amount: { presence: "UNKNOWN" } }],
+    attribution: {},
+    capturedAt: input.now,
+  });
+  await input.economicsPort.recordSettledAttempt(economicsEvent);
+}
+
+/**
+ * Rev189 R1 (crash/restart disposition gap): on a REPLAY (an already-
+ * durably-resumed `waitRequestId`), `peekSettlement` is the ONLY safe way
+ * to learn whether the prior/current attempt reached a genuine terminal
+ * settlement (`COMMITTED`/`RECONCILIATION_REQUIRED`) - never a guess, and
+ * never a blind re-release/re-invoke of ambiguous post-claim work (a
+ * still-RESERVED reservation could belong to a call genuinely still
+ * in-flight concurrently, not only a crashed one; releasing it here would
+ * corrupt that in-flight caller's own later commit). When settled, the
+ * commit itself already happened - only the economics correlation might be
+ * missing (a crash in the narrow commit-before-economics window), and
+ * `economicsPort.recordSettledAttempt` is independently idempotent per
+ * `idempotencyKey`, so recovering it here is always a safe no-op if it was
+ * already recorded. Mirrors `outcome-job-execution-runtime.ts`'s own
+ * `recoverMissedEconomicsIfSettled`, reusing the exact same primitives.
+ */
+async function recoverEconomicsIfSettled(input: {
+  readonly quotaAdmission: QuotaAdmissionPort;
+  readonly quotaIdentity: QuotaReservationIdentity;
+  readonly quotaIdempotencyKey: string;
+  readonly economicsPort: ExecutionEconomicsPort;
+  readonly lineage: ExecutionEconomicsLineage;
+  readonly economicsIdempotencyKey: string;
+  readonly economicsUsageSource: unknown;
+  readonly now: unknown;
+}): Promise<boolean> {
+  const peek = await input.quotaAdmission.peekSettlement({
+    identity: input.quotaIdentity,
+    idempotencyKey: input.quotaIdempotencyKey,
+  });
+  if (!peek.settled) {
+    return false;
+  }
+  await recordAttemptEconomics({
+    economicsPort: input.economicsPort,
+    lineage: input.lineage,
+    idempotencyKey: input.economicsIdempotencyKey,
+    economicsUsageSource: input.economicsUsageSource,
+    now: input.now,
+  });
+  return true;
 }
 
 /**
@@ -228,7 +345,9 @@ async function quotaStillCurrentImmediatelyBeforeEffect(input: {
 export type ResumeAndExecuteConnectorEffectResult =
   | { readonly kind: "EFFECT_EXECUTED"; readonly outcome: VerifiedConnectorEffectOutcome; readonly resume: ProtectedDecisionResumeAuthorization }
   | { readonly kind: "ALREADY_RESUMED_NO_EFFECT"; readonly resume: ProtectedDecisionResumeAuthorization }
-  | { readonly kind: "EFFECT_BLOCKED_STALE_QUOTA"; readonly resume: ProtectedDecisionResumeAuthorization };
+  | { readonly kind: "EFFECT_BLOCKED_STALE_QUOTA"; readonly resume: ProtectedDecisionResumeAuthorization }
+  | { readonly kind: "ALREADY_RESUMED_SETTLED"; readonly resume: ProtectedDecisionResumeAuthorization }
+  | { readonly kind: "EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED"; readonly resume: ProtectedDecisionResumeAuthorization };
 
 export async function resumeProtectedDecisionAndExecuteConnectorEffect(input: {
   readonly waitStore: DurableProtectedDecisionWaitStore;
@@ -266,19 +385,58 @@ export async function resumeProtectedDecisionAndExecuteConnectorEffect(input: {
   readonly economicsTaskRef: unknown;
   readonly economicsUsageSource: unknown;
 }): Promise<ResumeAndExecuteConnectorEffectResult> {
-  // item5 (replay safety): once a real attempt has committed or released
-  // its quota reservation, that reservation's idempotencyKey (derived from
-  // the exact same jobId/runId/attempt identity `waitRequestId` is bound
-  // to) has reached a genuine terminal disposition and can never be
-  // re-admitted (see `admitQuotaReservation`'s own terminal-disposition
-  // guard). A replayed/racing call for an ALREADY-durably-resumed
-  // `waitRequestId` must therefore short-circuit here, before touching
-  // quota admission again - exactly the same answer `claimResume` below
-  // would eventually report, just without redoing (or re-erroring on) any
-  // of the re-validated work in between.
+  // item5 (replay safety) + Rev189 R1 (crash/restart disposition): once a
+  // real attempt has committed or released its quota reservation, that
+  // reservation's idempotencyKey (derived from the exact same jobId/runId/
+  // attempt identity `waitRequestId` is bound to) has reached a genuine
+  // terminal disposition and can never be re-admitted (see
+  // `admitQuotaReservation`'s own terminal-disposition guard). A replayed/
+  // racing call for an ALREADY-durably-resumed `waitRequestId` must
+  // therefore short-circuit here, before touching quota admission again -
+  // but WHICH disposition it reports must be learned, never guessed. A
+  // blanket "no effect" here would be false the moment a prior call
+  // actually reached transport/commit before crashing (R1's own finding);
+  // blindly releasing or re-invoking would corrupt a genuinely still-
+  // in-flight concurrent caller's own reservation. So: peek the quota
+  // ledger's own canonical settlement truth for this exact identity -
+  // `COMMITTED`/`RECONCILIATION_REQUIRED` means a real attempt definitely
+  // reached the finish line (recover any missing economics, idempotently,
+  // and report `ALREADY_RESUMED_SETTLED`); anything else (`RESERVED` or
+  // `RELEASED`, both reported `settled: false` by `peekSettlement`'s own
+  // contract) is genuinely ambiguous from this read alone and is reported
+  // honestly as `EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED`, touching
+  // nothing - reconciliation is a deliberate, separate decision, never an
+  // automatic guess made here.
   const existingResume = input.waitStore.getResume(input.waitRequest.tenantId, input.waitRequest.waitRequestId);
   if (existingResume !== undefined) {
-    return { kind: "ALREADY_RESUMED_NO_EFFECT", resume: existingResume };
+    const replayQuotaIdentity = createQuotaReservationIdentity({
+      scope: input.quotaEnvelope.scope,
+      jobId: input.waitRequest.jobId as unknown as string,
+      runId: input.waitRequest.runId,
+      attemptRef: String(input.waitRequest.attempt),
+    });
+    const replayQuotaIdempotencyKey = deriveQuotaReservationIdempotencyKey(replayQuotaIdentity);
+    const { lineage: replayLineage, idempotencyKey: replayEconomicsIdempotencyKey } = deriveEconomicsLineageAndKey({
+      tenantScope: input.tenantScope,
+      waitRequest: input.waitRequest,
+      currentActivationPlanId: input.currentActivationPlanId,
+      currentActivationPlanVersion: input.currentActivationPlanVersion,
+      economicsTaskRef: input.economicsTaskRef,
+    });
+    const settled = await recoverEconomicsIfSettled({
+      quotaAdmission: input.quotaAdmission,
+      quotaIdentity: replayQuotaIdentity,
+      quotaIdempotencyKey: replayQuotaIdempotencyKey,
+      economicsPort: input.economicsPort,
+      lineage: replayLineage,
+      economicsIdempotencyKey: replayEconomicsIdempotencyKey,
+      economicsUsageSource: input.economicsUsageSource,
+      now: input.now,
+    });
+    if (settled) {
+      return { kind: "ALREADY_RESUMED_SETTLED", resume: existingResume };
+    }
+    return { kind: "EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED", resume: existingResume };
   }
 
   // item3: canonical exact-effect binding - checked before anything else
@@ -291,6 +449,7 @@ export async function resumeProtectedDecisionAndExecuteConnectorEffect(input: {
     capabilityRef: input.capabilityRef,
     connectionBindingId,
     requestPayload: input.requestPayload,
+    approvalEvidenceRef: input.approvalEvidenceRef,
   });
   if (input.waitRequest.effectRef !== effectFingerprint) {
     throw new ProtectedEffectBindingMismatchError(input.waitRequest.effectRef, effectFingerprint);
@@ -407,47 +566,46 @@ export async function resumeProtectedDecisionAndExecuteConnectorEffect(input: {
     throw cause;
   }
 
+  // Rev189 R2: `BLOCKED_NO_EFFECT` is a definitive proof that
+  // `transport.execute()` was NEVER invoked (a pre-transport connection/
+  // secret failure) - the reservation is released exactly like the
+  // stale-quota block above, and no attempted-effect economics is ever
+  // recorded for a call that never attempted anything.
+  if (outcome.kind === "BLOCKED_NO_EFFECT") {
+    await input.quotaAdmission.release({
+      identity: quotaIdentity,
+      idempotencyKey: quotaIdempotencyKey,
+      occurredAt: input.now,
+      reason: "executeConnectorCapabilityAsVerifiedEffect reported BLOCKED_NO_EFFECT - transport.execute() was never invoked; reservation released for a later retry to re-admit under current policy",
+    });
+    return { kind: "EFFECT_EXECUTED", outcome, resume: claim.value };
+  }
+
   // item5d/e: G5/G6 - commit actual usage (honestly UNKNOWN; the activated
-  // transport reports no real cost telemetry) after ANY real invoked
-  // outcome, regardless of VERIFIED/FAILED/UNKNOWN, then correlate it to
-  // exactly one ExecutionEconomicsEvent.
+  // transport reports no real cost telemetry) after any ATTEMPTED/ambiguous
+  // transport outcome (VERIFIED/FAILED-with-readback/FAILED-authorization/
+  // UNKNOWN - every case where transport.execute() genuinely ran), then
+  // correlate it to exactly one ExecutionEconomicsEvent.
   await input.quotaAdmission.commit({
     identity: quotaIdentity,
     idempotencyKey: quotaIdempotencyKey,
     actualAmount: { presence: "UNKNOWN" },
     occurredAt: input.now,
   });
-  const economicsLineage = createExecutionEconomicsLineage({
+  const { lineage: economicsLineage, idempotencyKey: economicsIdempotencyKey } = deriveEconomicsLineageAndKey({
     tenantScope: input.tenantScope,
-    customerId: input.waitRequest.customerId,
-    projectId: input.waitRequest.projectId,
-    planId: input.currentActivationPlanId,
-    planVersion: input.currentActivationPlanVersion,
-    jobId: input.waitRequest.jobId,
-    taskRef: input.economicsTaskRef,
-    runRef: input.waitRequest.runId,
-    attemptRef: String(input.waitRequest.attempt),
+    waitRequest: input.waitRequest,
+    currentActivationPlanId: input.currentActivationPlanId,
+    currentActivationPlanVersion: input.currentActivationPlanVersion,
+    economicsTaskRef: input.economicsTaskRef,
   });
-  const economicsIdempotencyKey = JSON.stringify([
-    economicsLineage.tenantId,
-    economicsLineage.customerId,
-    economicsLineage.projectId,
-    economicsLineage.planId,
-    economicsLineage.planVersion,
-    economicsLineage.jobId,
-    economicsLineage.taskRef,
-    economicsLineage.runRef,
-    economicsLineage.attemptRef,
-  ]);
-  const economicsEvent = recordExecutionEconomicsEvent({
+  await recordAttemptEconomics({
+    economicsPort: input.economicsPort,
     lineage: economicsLineage,
     idempotencyKey: economicsIdempotencyKey,
-    usageSource: input.economicsUsageSource,
-    costBuckets: [{ kind: "MARGINAL_CASH", amount: { presence: "UNKNOWN" } }],
-    attribution: {},
-    capturedAt: input.now,
+    economicsUsageSource: input.economicsUsageSource,
+    now: input.now,
   });
-  await input.economicsPort.recordSettledAttempt(economicsEvent);
 
   return { kind: "EFFECT_EXECUTED", outcome, resume: claim.value };
 }

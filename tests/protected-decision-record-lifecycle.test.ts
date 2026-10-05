@@ -319,3 +319,31 @@ test("Rev188 item4 (web layer) adversarial: a forged sessionToken fails inside r
     StaffUnauthenticatedError,
   );
 });
+
+test("Rev189 R4: decidedByPrincipalRef stores the actual authenticated principalRef, never the structurally-different OrganizationMembership membershipId", () => {
+  const principalRef = "principal-decision-lifecycle-r4";
+  const fixture = authoringFixture(principalRef);
+  assert.notEqual(fixture.membership.membershipId, principalRef, "the fixture's membershipId must be a different string than principalRef for this to be a genuine proof");
+
+  const approved = createProtectedDecisionRecord({
+    tenantScope,
+    decisionRef: "decision:lifecycle-r4",
+    outcome: "APPROVED",
+    ...fixture,
+    decidedAt: "2026-10-02T00:00:30.000Z",
+    evidenceRef: "evidence:approved-r4",
+  });
+  assert.equal(approved.decidedByPrincipalRef, principalRef);
+  assert.notEqual(approved.decidedByPrincipalRef, fixture.membership.membershipId);
+
+  const revoked = reviseProtectedDecisionRecord({
+    current: approved,
+    tenantScope,
+    outcome: "REVOKED",
+    ...fixture,
+    decidedAt: "2026-10-02T00:05:00.000Z",
+    evidenceRef: "evidence:revoked-r4",
+  });
+  assert.equal(revoked.decidedByPrincipalRef, principalRef);
+  assert.notEqual(revoked.decidedByPrincipalRef, fixture.membership.membershipId);
+});

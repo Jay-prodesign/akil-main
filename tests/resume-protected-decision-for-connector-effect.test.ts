@@ -35,15 +35,24 @@ import type { ConnectorCapabilityReadback } from "../src/domain/connector-capabi
 import {
   createQuotaAdmissionScope,
   createQuotaEnvelope,
+  createQuotaReservationIdentity,
+  deriveQuotaReservationIdempotencyKey,
   admitQuotaReservation,
   commitQuotaUsage,
   releaseQuotaReservation,
+  findCanonicalLatestForIdempotencyKey,
   EMPTY_QUOTA_LEDGER,
   type QuotaEnvelope,
+  type QuotaReservationIdentity,
   type QuotaLedger,
 } from "../src/domain/execution-quota-admission.js";
-import type { QuotaAdmissionPort, CurrentQuotaEnvelopeResolver, ExecutionEconomicsPort } from "../src/application/outcome-job-execution-runtime.js";
-import type { ExecutionEconomicsEvent } from "../src/domain/execution-economics-attribution.js";
+import type { QuotaAdmissionPort, CurrentQuotaEnvelopeResolver, ExecutionEconomicsPort, QuotaSettlementPeek } from "../src/application/outcome-job-execution-runtime.js";
+import {
+  appendExecutionEconomicsEventAllowingCapturedAtDrift,
+  EMPTY_EXECUTION_ECONOMICS_LEDGER,
+  type ExecutionEconomicsEvent,
+  type ExecutionEconomicsLedger,
+} from "../src/domain/execution-economics-attribution.js";
 import {
   resumeProtectedDecisionAndExecuteConnectorEffect,
   computeConnectorEffectFingerprint,
@@ -86,6 +95,7 @@ function effectFingerprint(overrides: {
   capabilityRef?: unknown;
   connectionBindingId?: unknown;
   requestPayload?: unknown;
+  approvalEvidenceRef?: unknown;
 } = {}) {
   return computeConnectorEffectFingerprint({
     effectIntentId: overrides.effectIntentId ?? EFFECT_INTENT_ID,
@@ -94,6 +104,7 @@ function effectFingerprint(overrides: {
     capabilityRef: overrides.capabilityRef ?? CAPABILITY_REF,
     connectionBindingId: overrides.connectionBindingId ?? CONNECTION_BINDING_ID,
     requestPayload: overrides.requestPayload,
+    approvalEvidenceRef: overrides.approvalEvidenceRef,
   });
 }
 
@@ -241,15 +252,29 @@ class InMemoryQuotaAdmissionStore implements QuotaAdmissionPort {
     this.ledger = ledger;
     return outcome;
   }
-  peekSettlement(): { settled: false } {
+  peekSettlement(input: { identity: QuotaReservationIdentity; idempotencyKey: unknown }): QuotaSettlementPeek {
+    if (typeof input.idempotencyKey !== "string") {
+      throw new Error("idempotencyKey must be a string");
+    }
+    const latest = findCanonicalLatestForIdempotencyKey(this.ledger, input.identity.scope.tenantId, input.idempotencyKey);
+    if (latest !== undefined && (latest.type === "COMMITTED" || latest.type === "RECONCILIATION_REQUIRED")) {
+      return { settled: true, event: latest };
+    }
     return { settled: false };
   }
 }
 
 class InMemoryEconomicsPort implements ExecutionEconomicsPort {
-  public events: ExecutionEconomicsEvent[] = [];
+  private ledger: ExecutionEconomicsLedger = EMPTY_EXECUTION_ECONOMICS_LEDGER;
+  // Rev189 R1: mirrors `outcome-job-execution-runtime.test.ts`'s own
+  // `InMemoryExecutionEconomicsStore` - idempotent by idempotencyKey, the
+  // same real-store discipline the R1 crash-recovery replay path relies on
+  // to make a repeated `recordAttemptEconomics` call a safe no-op.
   recordSettledAttempt(event: ExecutionEconomicsEvent): void {
-    this.events.push(event);
+    this.ledger = appendExecutionEconomicsEventAllowingCapturedAtDrift(this.ledger, event);
+  }
+  get events(): ReadonlyArray<ExecutionEconomicsEvent> {
+    return this.ledger.events;
   }
 }
 
@@ -352,7 +377,7 @@ test("Rev186 F3: the first resumeProtectedDecisionAndExecuteConnectorEffect call
   assert.equal(economicsPort.events[0]!.costBuckets[0]!.amount.presence, "UNKNOWN");
 });
 
-test("Rev186 F3 (the core atomicity proof): a second resumeProtectedDecisionAndExecuteConnectorEffect call for the SAME waitRequestId never invokes the transport again - it finds the claim already taken and returns ALREADY_RESUMED_NO_EFFECT", async () => {
+test("Rev186 F3 (the core atomicity proof), widened by Rev189 R1 (truthful disposition): a second resumeProtectedDecisionAndExecuteConnectorEffect call for the SAME waitRequestId never invokes the transport again - it finds the claim already taken, learns from the quota ledger's own canonical settlement truth that the first call's effect genuinely COMMITTED, and reports ALREADY_RESUMED_SETTLED rather than a blanket (and here false) NO_EFFECT", async () => {
   const { input, transport } = baseInput();
   const first = await resumeProtectedDecisionAndExecuteConnectorEffect(input);
   assert.equal(first.kind, "EFFECT_EXECUTED");
@@ -367,11 +392,89 @@ test("Rev186 F3 (the core atomicity proof): a second resumeProtectedDecisionAndE
     ...input,
     now: "2026-10-02T00:02:00.000Z",
   });
-  assert.equal(second.kind, "ALREADY_RESUMED_NO_EFFECT");
+  assert.equal(second.kind, "ALREADY_RESUMED_SETTLED");
   assert.equal(transport.callCount, 1, "the transport must NOT have been invoked a second time");
-  if (first.kind === "EFFECT_EXECUTED" && second.kind === "ALREADY_RESUMED_NO_EFFECT") {
+  if (first.kind === "EFFECT_EXECUTED" && second.kind === "ALREADY_RESUMED_SETTLED") {
     assert.deepEqual(second.resume, first.resume);
   }
+});
+
+test("Rev189 R1 adversarial: a replayed call whose prior attempt never reached a committed/reconciliation-required settlement (quota still RESERVED, as it would be mid-flight before a crash) is reported honestly as EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED, never a false NO_EFFECT or a blind re-release/re-invoke", async () => {
+  const waitStore = new FileDurableProtectedDecisionWaitStore(mkdtempSync(join(tmpdir(), "os-v0-10-rpdce-r1-")));
+  const decisionRecordStore = new FileDurableProtectedDecisionRecordStore(mkdtempSync(join(tmpdir(), "os-v0-10-rpdce-r1-decision-")));
+  const request = waitRequest();
+  waitStore.putIfAbsentWaitRequest(tenantScope.tenantId, request.waitRequestId, request);
+  const record = decisionRecord();
+  decisionRecordStore.putIfAbsentDecisionRecord(tenantScope.tenantId, record.decisionRef, record);
+
+  const authorization = {
+    waitRequestId: request.waitRequestId,
+    effectRef: request.effectRef,
+    resolvedAt: "2026-10-02T00:01:00.000Z",
+    resolvedByPrincipalRef: RESUMER_PRINCIPAL_REF,
+    decisionRef: request.decisionRef,
+    decisionEvidenceRef: "evidence:decision-made",
+  };
+  // Simulate exactly the crash-after-claim/before-settlement window: the
+  // durable resume claim exists, but quota admission never progressed past
+  // RESERVED (no commit, no release) - the real-world state immediately
+  // after a crash between `claimResume` and transport/settlement.
+  waitStore.claimResume(tenantScope.tenantId, request.waitRequestId, authorization);
+
+  const { input, transport } = baseInput({ waitStore, decisionRecordStore });
+  const result = await resumeProtectedDecisionAndExecuteConnectorEffect(input);
+  assert.equal(result.kind, "EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED");
+  assert.equal(transport.callCount, 0, "an ambiguous post-claim disposition must never be resolved by blindly re-invoking the transport");
+  const quotaAdmission = input.quotaAdmission as InMemoryQuotaAdmissionStore;
+  assert.equal(quotaAdmission.releaseCount, 0, "an ambiguous post-claim disposition must never be resolved by blindly releasing a reservation that may belong to a still in-flight concurrent caller");
+  assert.equal(quotaAdmission.commitCount, 0);
+});
+
+test("Rev189 R1 adversarial: a replayed call whose prior attempt committed quota but crashed before the ExecutionEconomicsEvent was recorded recovers the missing economics idempotently on replay, without re-invoking the transport or re-committing quota", async () => {
+  const { input, transport, economicsPort } = baseInput();
+  const quotaAdmission = input.quotaAdmission as InMemoryQuotaAdmissionStore;
+
+  const quotaIdentity = createQuotaReservationIdentity({
+    scope: input.quotaEnvelope.scope,
+    jobId: input.waitRequest.jobId as unknown as string,
+    runId: input.waitRequest.runId,
+    attemptRef: String(input.waitRequest.attempt),
+  });
+  const quotaIdempotencyKey = deriveQuotaReservationIdempotencyKey(quotaIdentity);
+  await quotaAdmission.admit({
+    envelope: input.quotaEnvelope,
+    identity: quotaIdentity,
+    idempotencyKey: quotaIdempotencyKey,
+    requestedAmount: input.estimatedCost,
+    occurredAt: input.now,
+  });
+  await quotaAdmission.commit({
+    identity: quotaIdentity,
+    idempotencyKey: quotaIdempotencyKey,
+    actualAmount: { presence: "UNKNOWN" },
+    occurredAt: input.now,
+  });
+  const authorization = {
+    waitRequestId: input.waitRequest.waitRequestId,
+    effectRef: input.waitRequest.effectRef,
+    resolvedAt: "2026-10-02T00:01:00.000Z",
+    resolvedByPrincipalRef: RESUMER_PRINCIPAL_REF,
+    decisionRef: input.waitRequest.decisionRef,
+    decisionEvidenceRef: "evidence:decision-made",
+  };
+  input.waitStore.claimResume(tenantScope.tenantId, input.waitRequest.waitRequestId, authorization);
+
+  assert.equal(economicsPort.events.length, 0, "economics was never recorded - simulating the exact commit-before-economics crash window");
+  const result = await resumeProtectedDecisionAndExecuteConnectorEffect({ ...input, now: "2026-10-02T00:02:00.000Z" });
+  assert.equal(result.kind, "ALREADY_RESUMED_SETTLED");
+  assert.equal(transport.callCount, 0, "the transport must never be re-invoked to recover a missing economics correlation");
+  assert.equal(quotaAdmission.commitCount, 1, "quota must never be re-committed on replay recovery");
+  assert.equal(economicsPort.events.length, 1, "the missing ExecutionEconomicsEvent must be recovered exactly once on replay");
+
+  // A further replay must be a safe idempotent no-op - never a duplicate.
+  const again = await resumeProtectedDecisionAndExecuteConnectorEffect({ ...input, now: "2026-10-02T00:03:00.000Z" });
+  assert.equal(again.kind, "ALREADY_RESUMED_SETTLED");
+  assert.equal(economicsPort.events.length, 1, "recovering already-recorded economics must be idempotent, never duplicated");
 });
 
 test("Rev186 F3 adversarial: a stale activation fingerprint at resume time blocks the effect with zero transport invocations, before any durable claim is attempted", async () => {
@@ -546,10 +649,16 @@ test("Rev188 item5b adversarial: a quota envelope that goes stale between admiss
   assert.equal(quotaAdmission.releaseCount, 1, "the reservation must be released on a post-claim staleness finding");
   assert.equal(quotaAdmission.commitCount, 0);
   // The resume claim itself is never undone - a second call now finds it
-  // already resumed, never re-attempting (and never re-blocking) it.
+  // already resumed. Rev189 R1: the quota ledger's own canonical
+  // disposition for this identity is RELEASED (never COMMITTED/
+  // RECONCILIATION_REQUIRED), which `peekSettlement` truthfully reports as
+  // unsettled - so the replay is reported as
+  // EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED, never a false
+  // ALREADY_RESUMED_NO_EFFECT, and the transport is still never invoked.
   const second = await resumeProtectedDecisionAndExecuteConnectorEffect(input);
-  assert.equal(second.kind, "ALREADY_RESUMED_NO_EFFECT");
+  assert.equal(second.kind, "EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED");
   assert.equal(transport.callCount, 0);
+  assert.equal(quotaAdmission.releaseCount, 1, "the replay must never re-release an already-released reservation");
   void waitStore;
   void request;
 });
@@ -606,4 +715,60 @@ test("Rev188 item4 capstone: a decision APPROVED at wait time but REVOKED (via t
   await assert.rejects(() => resumeProtectedDecisionAndExecuteConnectorEffect(input));
   assert.equal(transport.callCount, 0, "a decision revoked between wait and resume must never invoke the transport");
   assert.equal(waitStore.getResume(tenantScope.tenantId, request.waitRequestId), undefined);
+});
+
+test("Rev189 R3 adversarial (approval-substitution attack): keeping the SAME effectIntentId but switching requiresApproval (via approvalEvidenceRef presence) blocks the effect with zero transport invocations", async () => {
+  const { input, transport, waitStore, request } = baseInput({ approvalEvidenceRef: "evidence:a-substituted-approval" });
+  await assert.rejects(() => resumeProtectedDecisionAndExecuteConnectorEffect(input), ProtectedEffectBindingMismatchError);
+  assert.equal(transport.callCount, 0);
+  assert.equal(waitStore.getResume(tenantScope.tenantId, request.waitRequestId), undefined);
+});
+
+test("Rev189 R3: a waitRequest bound with requiresApproval=true (approvalEvidenceRef present) and resumed with the SAME approvalEvidenceRef reaches the effect normally", async () => {
+  const waitStore = new FileDurableProtectedDecisionWaitStore(mkdtempSync(join(tmpdir(), "os-v0-10-rpdce-r3-")));
+  const decisionRecordStore = new FileDurableProtectedDecisionRecordStore(mkdtempSync(join(tmpdir(), "os-v0-10-rpdce-r3-decision-")));
+  const requestWithApproval = waitRequest({
+    effectRef: effectFingerprint({ approvalEvidenceRef: "evidence:founder-approved" }),
+  });
+  // Unlike `baseInput`, the wait request actually PUT into the durable
+  // store below must be the SAME `requestWithApproval` object whose
+  // effectRef includes the approval-bound fingerprint - `baseInput` always
+  // stores its own default (no-approval) request, so overriding only
+  // `input.waitRequest` there would desync the durable record's own
+  // effectRef from the one this test means to exercise.
+  waitStore.putIfAbsentWaitRequest(tenantScope.tenantId, requestWithApproval.waitRequestId, requestWithApproval);
+  const record = decisionRecord();
+  decisionRecordStore.putIfAbsentDecisionRecord(tenantScope.tenantId, record.decisionRef, record);
+
+  const { input, transport } = baseInput({
+    waitStore,
+    decisionRecordStore,
+    waitRequest: requestWithApproval,
+    approvalEvidenceRef: "evidence:founder-approved",
+  });
+  const result = await resumeProtectedDecisionAndExecuteConnectorEffect(input);
+  assert.equal(result.kind, "EFFECT_EXECUTED");
+  assert.equal(transport.callCount, 1);
+});
+
+test("Rev189 R2 adversarial (at the resume/quota layer): a BLOCKED_NO_EFFECT outcome (no current durable connector connection) releases the quota reservation and records no attempted-effect economics, but still durably consumes the resume claim exactly once", async () => {
+  const { input, transport, economicsPort } = baseInput({ connectionStore: { get: () => undefined } });
+  const quotaAdmission = input.quotaAdmission as InMemoryQuotaAdmissionStore;
+  const result = await resumeProtectedDecisionAndExecuteConnectorEffect(input);
+  assert.equal(result.kind, "EFFECT_EXECUTED");
+  if (result.kind === "EFFECT_EXECUTED") {
+    assert.equal(result.outcome.kind, "BLOCKED_NO_EFFECT");
+  }
+  assert.equal(transport.callCount, 0, "the transport must never be invoked for a pre-transport connection failure");
+  assert.equal(quotaAdmission.releaseCount, 1, "a BLOCKED_NO_EFFECT outcome must release the reservation, never commit it");
+  assert.equal(quotaAdmission.commitCount, 0);
+  assert.equal(economicsPort.events.length, 0, "no attempted-effect economics may ever be recorded for a transport that was never invoked");
+
+  // The resume claim itself is still single-use: a replay now finds the
+  // quota ledger's own disposition RELEASED (not settled), so it is
+  // reported honestly as unresolved, not re-released or re-invoked.
+  const second = await resumeProtectedDecisionAndExecuteConnectorEffect(input);
+  assert.equal(second.kind, "EFFECT_DISPOSITION_UNKNOWN_RECONCILE_REQUIRED");
+  assert.equal(transport.callCount, 0);
+  assert.equal(quotaAdmission.releaseCount, 1, "a replay must never re-release an already-released reservation");
 });

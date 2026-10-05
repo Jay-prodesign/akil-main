@@ -2,6 +2,8 @@ import type { TenantScope } from "./tenant-scope.js";
 import {
   executeConnectorCapability,
   ConnectorExecutionAuthorizationError,
+  ConnectorExecutionNotAuthorizedError,
+  UnresolvedConnectorSecretError,
   type ConnectorExecutionResult,
   type ConnectorTransport,
   type SecretResolver,
@@ -60,18 +62,33 @@ export class InvalidVerifiedConnectorEffectError extends Error {
  * no Founder credential/approval is requested here since no such edge is
  * genuinely required by this bounded task.
  *
- * Rev186 F4: only a `ConnectorExecutionAuthorizationError` is a definitive,
- * classified no-effect proof (the request was rejected before any provider
- * effect could occur). Every other exception - including a
- * `ConnectorExecutionTransportError`, since `ConnectorTransport`'s own
- * contract never guarantees the external system did not apply the request
- * before a transport-level error occurred, and any other unclassified
- * exception such as the injected transport itself throwing - is reported as
- * UNKNOWN unless a future adapter supplies explicit, definitive no-effect
- * evidence/classification. This function never retries UNKNOWN itself;
- * `retryExternalEffectAttempt` (`external-effect-envelope.ts`, unmodified)
- * remains the only governed path out of UNKNOWN, and only for a
- * `SAFE_TO_RETRY` intent.
+ * Rev189 R2 (definitive pre-transport no-effect): `ConnectorExecutionNotAuthorizedError`
+ * (no current/matching/VERIFIED connection) and `UnresolvedConnectorSecretError`
+ * (missing/unresolvable secret) are both thrown by `executeConnectorCapability`
+ * strictly BEFORE `transport.execute()` is ever called - `transport.execute`
+ * is reached only after both checks pass (verified directly against
+ * `connector-execution.ts`'s own source order). These are therefore a
+ * STRONGER proof than `ConnectorExecutionAuthorizationError` below: not
+ * merely "no effect applied", but "the transport was never even invoked" -
+ * reported as the dedicated `BLOCKED_NO_EFFECT` kind so a caller (the
+ * resume/quota consumer) can release an admitted reservation and record no
+ * attempted-effect economics, rather than treating a never-attempted call
+ * the same as a genuinely attempted one.
+ *
+ * Rev186 F4: a `ConnectorExecutionAuthorizationError` is thrown AFTER
+ * `transport.execute()` returns `AUTHORIZATION_FAILED` - the transport WAS
+ * invoked (an attempt was genuinely made against the provider), so it
+ * remains classified `FAILED` (definitive no-effect-applied, but an
+ * attempted transport call) rather than `BLOCKED_NO_EFFECT`. Every other
+ * exception - including a `ConnectorExecutionTransportError`, since
+ * `ConnectorTransport`'s own contract never guarantees the external system
+ * did not apply the request before a transport-level error occurred, and
+ * any other unclassified exception such as the injected transport itself
+ * throwing - is reported as UNKNOWN unless a future adapter supplies
+ * explicit, definitive no-effect evidence/classification. This function
+ * never retries UNKNOWN itself; `retryExternalEffectAttempt` (`external-
+ * effect-envelope.ts`, unmodified) remains the only governed path out of
+ * UNKNOWN, and only for a `SAFE_TO_RETRY` intent.
  */
 export interface ConnectorCapabilityReadback {
   confirmsApplied(result: ConnectorExecutionResult): boolean;
@@ -81,7 +98,8 @@ export interface ConnectorCapabilityReadback {
 export type VerifiedConnectorEffectOutcome =
   | { readonly kind: "VERIFIED"; readonly attempt: ExternalEffectAttempt; readonly result: ConnectorExecutionResult }
   | { readonly kind: "FAILED"; readonly attempt: ExternalEffectAttempt }
-  | { readonly kind: "UNKNOWN"; readonly attempt: ExternalEffectAttempt };
+  | { readonly kind: "UNKNOWN"; readonly attempt: ExternalEffectAttempt }
+  | { readonly kind: "BLOCKED_NO_EFFECT"; readonly attempt: ExternalEffectAttempt };
 
 function requireNonEmptyString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
@@ -130,6 +148,7 @@ export function executeConnectorCapabilityAsVerifiedEffect(input: {
   let result: ConnectorExecutionResult | undefined;
   let outcome: "APPLIED" | "FAILED" | "UNKNOWN";
   let externalCorrelationRef: string;
+  let blockedNoEffect = false;
   try {
     result = executeConnectorCapability({
       bound: input.bound,
@@ -143,10 +162,16 @@ export function executeConnectorCapabilityAsVerifiedEffect(input: {
     outcome = "APPLIED";
     externalCorrelationRef = `${result.connectorKind}:${result.connectionBindingId}:${result.capabilityRef}`;
   } catch (cause) {
-    if (cause instanceof ConnectorExecutionAuthorizationError) {
-      // Rev186 F4: an authorization failure is the one definitive,
-      // classified no-effect proof - the request was rejected before the
-      // provider could have applied it.
+    if (cause instanceof ConnectorExecutionNotAuthorizedError || cause instanceof UnresolvedConnectorSecretError) {
+      // Rev189 R2: thrown strictly before transport.execute() - a
+      // stronger, definitive "never even attempted" proof.
+      outcome = "FAILED";
+      externalCorrelationRef = `error:${cause.name}`;
+      blockedNoEffect = true;
+    } else if (cause instanceof ConnectorExecutionAuthorizationError) {
+      // Rev186 F4: an authorization failure is a definitive no-effect-
+      // applied proof, but the transport WAS invoked (the provider itself
+      // rejected the request) - an attempted call, not a blocked one.
       outcome = "FAILED";
       externalCorrelationRef = `error:${cause.name}`;
     } else {
@@ -167,6 +192,9 @@ export function executeConnectorCapabilityAsVerifiedEffect(input: {
 
   attempt = reportExternalEffectOutcome({ attempt, outcome, externalCorrelationRef });
 
+  if (blockedNoEffect) {
+    return { kind: "BLOCKED_NO_EFFECT", attempt };
+  }
   if (outcome === "FAILED" || outcome === "UNKNOWN") {
     return { kind: outcome, attempt };
   }
