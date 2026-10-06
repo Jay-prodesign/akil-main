@@ -31,6 +31,24 @@ See `docs/engineering/CURRENT_STATE.md` for the live detail and `docs/exec-plans
 - [`docs/exec-plans/active/`](./docs/exec-plans/active/) — in-progress task execution records.
 - [`docs/exec-plans/completed/`](./docs/exec-plans/completed/README.md) — completed task records.
 
+## Legal, IP, privacy and security posture
+
+This authoritative engineering source repository is **private and proprietary**.
+Public availability of an AKILTA product or service does not grant public-source
+rights.
+
+- [`LICENSE`](./LICENSE) — proprietary / all-rights-reserved source license.
+- [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) — current repository dependency/third-party posture.
+- [`SECURITY.md`](./SECURITY.md) — security reporting and secret-handling rules.
+- [`CONTRIBUTING.md`](./CONTRIBUTING.md) — contribution, ownership, provenance and AI-assisted contribution rules.
+- [`docs/legal/RELEASE_LEGAL_PRIVACY_READINESS.md`](./docs/legal/RELEASE_LEGAL_PRIVACY_READINESS.md) — release-time legal/privacy/IP/security readiness gate.
+
+No public Privacy Policy, Terms of Service, or EULA is asserted by this
+repository yet because this repository does not currently represent a declared
+production/customer-facing release. Those documents must be generated from the
+actual shipping architecture, data flows, commercial model and distribution
+surface before the relevant public/commercial release.
+
 ## Project boundary
 
 This repository is AKILTA only. AKILTA Commerce / AI Commerce is a separate project with a separate repository — see `docs/engineering/ACCEPTANCE_CRITERIA.md` (Invariant 6) and `CLAUDE.md`.
