@@ -1,0 +1,62 @@
+Proprietary Software License — All Rights Reserved
+
+Copyright © 2026 AKILTA and the applicable AKILTA rights holder(s).
+All rights reserved.
+
+1. Proprietary rights
+
+Except for third-party material expressly identified as such, the original source
+code, documentation, designs, specifications, workflows, tests, schemas, prompts,
+configuration, and other original material in this repository are proprietary.
+
+No license or permission is granted to copy, modify, publish, distribute,
+sublicense, sell, repackage, create derivative products from, incorporate into
+another product, or otherwise exploit AKILTA-owned material except under a
+separate written authorization from the applicable rights holder.
+
+Access to this repository, possession of a copy, prior public visibility, commit
+authorship, AI-assisted generation, or technical ability to fork or clone does
+not by itself grant a license to AKILTA-owned material.
+
+2. Internal authorized use
+
+Authorized contributors and agents may use repository material only for
+authorized AKILTA work and only within their assigned authority. Access does not
+transfer ownership and does not authorize unrelated reuse, redistribution, or
+publication.
+
+3. Third-party material
+
+Third-party software, assets, models, datasets, fonts, documentation, or other
+material remain governed by their own licenses and rights. This proprietary
+license does not replace, narrow, or contradict third-party rights. See
+THIRD_PARTY_NOTICES.md and any component-local license or provenance record.
+
+4. Confidential and trade-secret material
+
+Material that has not been publicly disclosed and that is designated or treated
+as confidential must be handled under applicable AKILTA confidentiality and
+access-control rules. This notice does not claim trade-secret status for material
+that was already lawfully made public.
+
+5. Trademarks and branding
+
+No rights are granted to AKILTA names, product names, logos, trade dress,
+domains, or other brand identifiers except through separate written
+authorization.
+
+6. No warranty
+
+To the maximum extent permitted by applicable law, repository material is
+provided for authorized development use without warranties of any kind. Nothing
+in this notice excludes or limits liability where exclusion or limitation is
+prohibited by applicable law.
+
+7. Ownership and attribution
+
+Legal ownership of particular material follows the applicable AKILTA company or
+project records, contributor/assignment evidence, and valid third-party rights.
+This file must not be used to relabel third-party material as AKILTA-owned.
+
+For licensing or rights questions, use the repository's authorized private
+project channel.
