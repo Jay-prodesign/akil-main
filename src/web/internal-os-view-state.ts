@@ -9,6 +9,7 @@ import type {
   OrganizationBindingState,
   OrganizationResourceBindingStatus,
 } from "../domain/organization-resource-binding.js";
+import type { OperationalObservabilityView } from "../domain/operational-observability-view.js";
 import {
   requireInternalOsProjectAccess,
   InternalOsAccessDeniedError,
@@ -453,11 +454,43 @@ export function resolveResourceBindingView(
   };
 }
 
+/**
+ * OS-V0-12: caller-injected read source for the Organization's current
+ * operational observability view - mirrors `OrganizationResourceBindingSource`'s
+ * own established optional-source pattern exactly. No durable wiring exists
+ * in production Admin/shell composition yet (a separate, later decision,
+ * the same discipline already applied to `resourceBindingSource` by Rev183
+ * F3 and only threaded into the live `/os/admin` route by the later Rev184
+ * F3-residual correction); an absent source renders `NOT_ACTIVE`, never
+ * fabricated content. A wired source always returns a real (possibly
+ * empty-dimensioned) `OperationalObservabilityView` - there is no separate
+ * "never bootstrapped" state here, since every dimension of the view is
+ * already independently optional/empty by construction.
+ */
+export interface OperationalObservabilitySource {
+  resolveView(organization: Organization): OperationalObservabilityView;
+}
+
+export type OperationalObservabilityViewState =
+  | { readonly kind: "NOT_ACTIVE" }
+  | { readonly kind: "READY"; readonly view: OperationalObservabilityView };
+
+export function resolveOperationalObservabilityView(
+  organization: Organization,
+  source: OperationalObservabilitySource | undefined,
+): OperationalObservabilityViewState {
+  if (source === undefined) {
+    return { kind: "NOT_ACTIVE" };
+  }
+  return { kind: "READY", view: source.resolveView(organization) };
+}
+
 export interface AdminViewState {
   readonly kind: "READY";
   readonly organization: OrganizationSummary;
   readonly access: AccessSummary;
   readonly resourceBinding: AdminResourceBindingViewState;
+  readonly operationalObservability: OperationalObservabilityViewState;
   readonly notActiveConcepts: ReadonlyArray<string>;
 }
 
@@ -487,12 +520,14 @@ export function resolveAdminView(input: {
   organization: Organization;
   context: InternalOsAccessContext;
   resourceBindingSource?: OrganizationResourceBindingSource;
+  operationalObservabilitySource?: OperationalObservabilitySource;
 }): AdminViewState {
   return {
     kind: "READY",
     organization: summarizeOrganization(input.organization),
     access: summarizeAccess(input.context.access),
     resourceBinding: resolveResourceBindingView(input.organization, input.resourceBindingSource),
+    operationalObservability: resolveOperationalObservabilityView(input.organization, input.operationalObservabilitySource),
     notActiveConcepts: ADMIN_NOT_ACTIVE_CONCEPTS,
   };
 }

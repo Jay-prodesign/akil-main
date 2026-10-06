@@ -139,6 +139,7 @@ test("Admin renders the organization/access it was given plus every NOT_ACTIVE c
     organization: { displayName: "Org", state: "ACTIVE" },
     access: { role: "ADMIN", permissions: ["READ"], canPerformProtectedActions: false },
     resourceBinding: { kind: "NOT_ACTIVE" },
+    operationalObservability: { kind: "NOT_ACTIVE" },
     notActiveConcepts: ["Workers", "Connections", "Policies"],
   };
   const rendered = renderInternalOsPage(adminPageContent(NAV_DESTINATIONS, "Org", view));
@@ -163,6 +164,7 @@ test("Rev183 F3: Admin renders the Organization's current resource-binding state
         unresolvedGates: ["CONNECTION_NOT_CURRENT"],
       },
     },
+    operationalObservability: { kind: "NOT_ACTIVE" },
     notActiveConcepts: [],
   };
   const rendered = renderInternalOsPage(adminPageContent(NAV_DESTINATIONS, "Org", view));
@@ -179,6 +181,7 @@ test("Rev183 F3: Admin renders NOT_BOUND distinctly from NOT_ACTIVE when the Org
     organization: { displayName: "Org", state: "ACTIVE" },
     access: { role: "ADMIN", permissions: ["READ"], canPerformProtectedActions: false },
     resourceBinding: { kind: "NOT_BOUND" },
+    operationalObservability: { kind: "NOT_ACTIVE" },
     notActiveConcepts: [],
   };
   const rendered = renderInternalOsPage(adminPageContent(NAV_DESTINATIONS, "Org", view));
@@ -251,7 +254,7 @@ test("no rendered page across any content kind ever contains a mutating form or 
     renderInternalOsPage(workPageContent(NAV_DESTINATIONS, "Org", homeView.work)),
     renderInternalOsPage(peoplePageContent(NAV_DESTINATIONS, "Org", { kind: "READY", self: { principalDisplayName: "X", organizationRole: "STAFF", membershipState: "ACTIVE" } })),
     renderInternalOsPage(productsPageContent(NAV_DESTINATIONS, "Org", { kind: "READY", products: [{ name: "X", status: "ACTIVE" }] })),
-    renderInternalOsPage(adminPageContent(NAV_DESTINATIONS, "Org", { kind: "READY", organization: { displayName: "Org", state: "ACTIVE" }, access: { role: "OWNER", permissions: ["READ", "WRITE", "EXECUTE"], canPerformProtectedActions: true }, resourceBinding: { kind: "NOT_ACTIVE" }, notActiveConcepts: ["Workers"] })),
+    renderInternalOsPage(adminPageContent(NAV_DESTINATIONS, "Org", { kind: "READY", organization: { displayName: "Org", state: "ACTIVE" }, access: { role: "OWNER", permissions: ["READ", "WRITE", "EXECUTE"], canPerformProtectedActions: true }, resourceBinding: { kind: "NOT_ACTIVE" }, operationalObservability: { kind: "NOT_ACTIVE" }, notActiveConcepts: ["Workers"] })),
   ];
   for (const page of pages) {
     assert.doesNotMatch(page.html, /<button/i);
