@@ -107,15 +107,19 @@ test("O4: rollbackConfigurationPolicyDecision appends a NEW entry copying the ta
     now: "2026-10-06T00:01:00.000Z",
   });
 
-  const rolledBack = rollbackConfigurationPolicyDecision({
+  const rollbackResult = rollbackConfigurationPolicyDecision({
     store,
     identity,
     authority: protectedAuthority(),
     rollbackToDecisionId: "decision-1",
+    currentControls: [platformControl({ sourceRef: "platform-theme-dark", version: "2" })],
     decisionId: "decision-3",
     now: "2026-10-06T00:02:00.000Z",
   });
 
+  assert.equal(rollbackResult.kind, "ROLLED_BACK");
+  assert.ok(rollbackResult.kind === "ROLLED_BACK");
+  const rolledBack = rollbackResult.entry;
   assert.equal(rolledBack.entryKind, "ROLLBACK");
   assert.equal(rolledBack.rolledBackToDecisionId, "decision-1");
   assert.deepEqual(rolledBack.resolution, first.resolution);
@@ -147,6 +151,7 @@ test("O5: rollbackConfigurationPolicyDecision rejects an authority lacking EXECU
         identity,
         authority: protectedAuthority({ permissions: ["READ"] }),
         rollbackToDecisionId: "decision-1",
+        currentControls: [platformControl()],
         decisionId: "decision-2",
         now: "2026-10-06T00:01:00.000Z",
       }),
@@ -166,6 +171,7 @@ test("O6: rollbackConfigurationPolicyDecision rejects an authority with EXECUTE 
         identity,
         authority: protectedAuthority({ canPerformProtectedActions: false }),
         rollbackToDecisionId: "decision-1",
+        currentControls: [platformControl()],
         decisionId: "decision-2",
         now: "2026-10-06T00:01:00.000Z",
       }),
@@ -185,6 +191,7 @@ test("O7: rollbackConfigurationPolicyDecision rejects a cross-tenant authority -
         identity,
         authority: createAuthorityContext({ tenantScope: foreignTenantScope, permissions: ["EXECUTE"], canPerformProtectedActions: true }),
         rollbackToDecisionId: "decision-1",
+        currentControls: [platformControl()],
         decisionId: "decision-2",
         now: "2026-10-06T00:01:00.000Z",
       }),
@@ -203,6 +210,7 @@ test("O8: rollbackConfigurationPolicyDecision targeting a decisionId that was ne
         identity,
         authority: protectedAuthority(),
         rollbackToDecisionId: "decision-never-existed",
+        currentControls: [platformControl()],
         decisionId: "decision-2",
         now: "2026-10-06T00:01:00.000Z",
       }),
@@ -228,4 +236,87 @@ test("O9: distinct identities (different jobId) within the same tenant maintain 
   });
   assert.notEqual(jobA.entry.decisionKey, jobB.entry.decisionKey);
   assert.notDeepEqual(jobA.resolution, jobB.resolution);
+});
+
+test("Rev193 adversarial: a newer PLATFORM protected-floor control established after the target decision blocks the historical rollback - zero mutation, active entry unchanged", () => {
+  const store = freshStore();
+  const identity = { tenantId: tenantScope.tenantId };
+  resolveAndProjectConfigurationPolicyDecision({
+    store,
+    identity,
+    controls: [platformControl({ sourceRef: "platform-theme-default", version: "1" })],
+    decisionId: "decision-1",
+    now: "2026-10-06T00:00:00.000Z",
+  });
+  const second = resolveAndProjectConfigurationPolicyDecision({
+    store,
+    identity,
+    controls: [platformControl({ sourceRef: "platform-theme-dark", version: "2" })],
+    decisionId: "decision-2",
+    now: "2026-10-06T00:01:00.000Z",
+  });
+
+  const result = rollbackConfigurationPolicyDecision({
+    store,
+    identity,
+    authority: protectedAuthority(),
+    rollbackToDecisionId: "decision-1",
+    // A PLATFORM protectedFloor control for "theme" was established AFTER
+    // decision-1 was originally computed - decision-1's own selection
+    // ("platform-theme-default") can never be legitimately resurrected now.
+    currentControls: [platformControl({ sourceRef: "platform-theme-protected", version: "3", protectedFloor: true })],
+    decisionId: "decision-3",
+    now: "2026-10-06T00:02:00.000Z",
+  });
+
+  assert.equal(result.kind, "BLOCKED_PROTECTED_FLOOR_CONFLICT");
+  assert.ok(result.kind === "BLOCKED_PROTECTED_FLOOR_CONFLICT");
+  assert.equal(result.conflicts.length, 1);
+  assert.equal(result.conflicts[0]?.key, "theme");
+  assert.equal(result.conflicts[0]?.freshControl?.sourceRef, "platform-theme-protected");
+
+  const history = store.getDecisionProjectionHistory(tenantScope.tenantId, second.entry.decisionKey);
+  assert.equal(history.length, 2, "a blocked rollback must append nothing");
+  const active = store.getActiveDecisionProjection(tenantScope.tenantId, second.entry.decisionKey);
+  assert.deepEqual(active, second.entry, "the active entry must remain exactly what it was before the blocked rollback attempt");
+});
+
+test("Rev193: a historical rollback target that remains compatible with the current controls (no protected-floor conflict) succeeds normally", () => {
+  const store = freshStore();
+  const identity = { tenantId: tenantScope.tenantId };
+  const first = resolveAndProjectConfigurationPolicyDecision({
+    store,
+    identity,
+    controls: [platformControl({ sourceRef: "platform-theme-default", version: "1" })],
+    decisionId: "decision-1",
+    now: "2026-10-06T00:00:00.000Z",
+  });
+  resolveAndProjectConfigurationPolicyDecision({
+    store,
+    identity,
+    controls: [platformControl({ sourceRef: "platform-theme-dark", version: "2" })],
+    decisionId: "decision-2",
+    now: "2026-10-06T00:01:00.000Z",
+  });
+
+  const result = rollbackConfigurationPolicyDecision({
+    store,
+    identity,
+    authority: protectedAuthority(),
+    rollbackToDecisionId: "decision-1",
+    // The current control for "theme" is ordinary (not protectedFloor) - a
+    // drift from the target exists, but since it is not a protected floor,
+    // rollback is not disqualified.
+    currentControls: [platformControl({ sourceRef: "platform-theme-dark", version: "2" })],
+    decisionId: "decision-3",
+    now: "2026-10-06T00:02:00.000Z",
+  });
+
+  assert.equal(result.kind, "ROLLED_BACK");
+  assert.ok(result.kind === "ROLLED_BACK");
+  assert.deepEqual(result.entry.resolution, first.resolution);
+  assert.equal(result.entry.rolledBackToDecisionId, "decision-1");
+
+  const active = store.getActiveDecisionProjection(tenantScope.tenantId, first.entry.decisionKey);
+  assert.deepEqual(active, result.entry);
 });

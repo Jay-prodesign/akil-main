@@ -108,7 +108,7 @@ test("OS-V0-11: resolve-and-project-configuration-policy-decision.ts imports onl
     'type ConfigurationPolicyDecisionDrift,',
     '} from "./configuration-policy-decision-projection.js";',
     'import type { DurableConfigurationPolicyDecisionStore } from "./durable-configuration-policy-decision-store.js";',
-    'import type { EffectiveConfigurationPolicyResolution } from "./effective-configuration-policy.js";',
+    'import { resolveEffectiveConfigurationPolicy, type EffectiveConfigurationPolicyResolution } from "./effective-configuration-policy.js";',
   ]);
 });
 
