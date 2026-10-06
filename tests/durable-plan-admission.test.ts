@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createSoldScope } from "../src/domain/sold-scope.js";
-import { compilePlan } from "../src/domain/project-plan.js";
+import { compilePlan, type ProjectPlanVersion } from "../src/domain/project-plan.js";
 import { createApprovalReference } from "../src/domain/approval-reference.js";
 import { admitPlan } from "../src/domain/plan-admission.js";
 import {
@@ -12,6 +12,7 @@ import {
   recordEvaluation,
   recordAnswer,
   InvalidPlanAdmissionAnswerError,
+  CorruptedPlanAdmissionEventLineError,
 } from "../src/domain/durable-plan-admission-store.js";
 import { createEvaluationRecordedEvent, createAnswerRecordedEvent } from "../src/domain/plan-admission-event.js";
 import { buildWebsiteBuildV1Fixture } from "../src/fixtures/website-build-v1.js";
@@ -19,6 +20,14 @@ import { buildFullReadinessAssertions } from "./helpers/readiness-fixture.js";
 
 function freshStoreDir(): string {
   return mkdtempSync(join(tmpdir(), "del-003-plan-admission-store-"));
+}
+
+// Mirrors FileDurablePlanAdmissionStore's own (private) filePathFor/planKey
+// encoding, so these adversarial tests can inject a raw corrupted/forged
+// line directly into the exact file the store itself reads on replay.
+function filePathFor(dir: string, tenantId: string, projectId: string, planId: string): string {
+  const safeKey = Buffer.from(`${tenantId}::${projectId}::${planId}`, "utf8").toString("base64url");
+  return join(dir, `${safeKey}.jsonl`);
 }
 
 test("T7: a durably recorded WAITING evaluation survives a simulated process restart (fresh store instance over the same directory)", () => {
@@ -258,6 +267,327 @@ test("T8: duplicate ANSWER_RECORDED delivery at the raw event-log level is idemp
       waitingPlan.planId,
     );
     assert.equal(state?.answeredEntities.length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AUD-DURABILITY-GAP: a corrupted (malformed JSON) persisted plan-admission line fails closed with CorruptedPlanAdmissionEventLineError", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const store = new FileDurablePlanAdmissionStore(dir);
+    const plan = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: fixture.project,
+      planId: "plan-durable-corruption-1",
+      version: 1,
+      blueprint: fixture.blueprint,
+      soldScope: fixture.soldScope,
+      evidence: fixture.evidence,
+      now: "2026-08-19T00:00:00.000Z",
+    });
+    const result = admitPlan({ plan, blueprint: fixture.blueprint });
+    recordEvaluation({ store, result, recordedAt: "2026-08-19T00:00:00.000Z" });
+
+    appendFileSync(
+      filePathFor(dir, fixture.tenantScope.tenantId, fixture.project.projectId, plan.planId),
+      "{not valid json\n",
+      "utf8",
+    );
+    assert.throws(
+      () => store.getEvents(fixture.tenantScope.tenantId, fixture.project.projectId, plan.planId),
+      (error: unknown) => {
+        if (!(error instanceof CorruptedPlanAdmissionEventLineError)) {
+          return false;
+        }
+        assert.match(error.message, /:2\)/);
+        assert.match(error.message, /not valid JSON/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AUD-DURABILITY-GAP: a forged line with an unknown type discriminant fails closed with CorruptedPlanAdmissionEventLineError", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const store = new FileDurablePlanAdmissionStore(dir);
+    appendFileSync(
+      filePathFor(dir, fixture.tenantScope.tenantId, fixture.project.projectId, "plan-durable-corruption-2"),
+      `${JSON.stringify({
+        type: "SOMETHING_ELSE",
+        eventId: "forged-1",
+        tenantId: fixture.tenantScope.tenantId,
+        projectId: fixture.project.projectId,
+        planId: "plan-durable-corruption-2",
+        planVersion: 1,
+        recordedAt: "2026-08-19T00:00:00.000Z",
+      })}\n`,
+      "utf8",
+    );
+    assert.throws(
+      () =>
+        store.getEvents(
+          fixture.tenantScope.tenantId,
+          fixture.project.projectId,
+          "plan-durable-corruption-2" as ProjectPlanVersion["planId"],
+        ),
+      (error: unknown) => {
+        if (!(error instanceof CorruptedPlanAdmissionEventLineError)) {
+          return false;
+        }
+        assert.match(error.message, /:1\)/);
+        assert.match(error.message, /type must be one of/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AUD-DURABILITY-GAP: a forged EVALUATION_RECORDED line with an invalid nested result.status fails closed with CorruptedPlanAdmissionEventLineError", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const store = new FileDurablePlanAdmissionStore(dir);
+    appendFileSync(
+      filePathFor(dir, fixture.tenantScope.tenantId, fixture.project.projectId, "plan-durable-corruption-3"),
+      `${JSON.stringify({
+        type: "EVALUATION_RECORDED",
+        eventId: "forged-2",
+        tenantId: fixture.tenantScope.tenantId,
+        projectId: fixture.project.projectId,
+        planId: "plan-durable-corruption-3",
+        planVersion: 1,
+        recordedAt: "2026-08-19T00:00:00.000Z",
+        result: {
+          tenantId: fixture.tenantScope.tenantId,
+          projectId: fixture.project.projectId,
+          planId: "plan-durable-corruption-3",
+          planVersion: 1,
+          status: "NOT_A_REAL_STATUS",
+          blockedReasons: [],
+        },
+      })}\n`,
+      "utf8",
+    );
+    assert.throws(
+      () =>
+        store.getEvents(
+          fixture.tenantScope.tenantId,
+          fixture.project.projectId,
+          "plan-durable-corruption-3" as ProjectPlanVersion["planId"],
+        ),
+      (error: unknown) => {
+        if (!(error instanceof CorruptedPlanAdmissionEventLineError)) {
+          return false;
+        }
+        assert.match(error.message, /:1\)/);
+        assert.match(error.message, /status must be one of/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Rev77 F3: a forged EVALUATION_RECORDED line whose nested result carries an impossible ADMITTED-with-blockedReasons combination fails closed with CorruptedPlanAdmissionEventLineError", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const store = new FileDurablePlanAdmissionStore(dir);
+    appendFileSync(
+      filePathFor(dir, fixture.tenantScope.tenantId, fixture.project.projectId, "plan-durable-corruption-4"),
+      `${JSON.stringify({
+        type: "EVALUATION_RECORDED",
+        eventId: "plan-durable-corruption-4:v1:evaluation",
+        tenantId: fixture.tenantScope.tenantId,
+        projectId: fixture.project.projectId,
+        planId: "plan-durable-corruption-4",
+        planVersion: 1,
+        recordedAt: "2026-08-19T00:00:00.000Z",
+        result: {
+          tenantId: fixture.tenantScope.tenantId,
+          projectId: fixture.project.projectId,
+          planId: "plan-durable-corruption-4",
+          planVersion: 1,
+          status: "ADMITTED",
+          blockedReasons: ["this must never coexist with ADMITTED"],
+          evaluatedApprovalId: "approval-forged",
+        },
+      })}\n`,
+      "utf8",
+    );
+    assert.throws(
+      () =>
+        store.getEvents(
+          fixture.tenantScope.tenantId,
+          fixture.project.projectId,
+          "plan-durable-corruption-4" as ProjectPlanVersion["planId"],
+        ),
+      (error: unknown) => {
+        if (!(error instanceof CorruptedPlanAdmissionEventLineError)) {
+          return false;
+        }
+        assert.match(error.message, /:1\)/);
+        assert.match(error.message, /ADMITTED.*must not carry any blockedReasons/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Rev77 F3: a forged EVALUATION_RECORDED line whose nested result carries an impossible BLOCKED-with-awaiting combination fails closed with CorruptedPlanAdmissionEventLineError", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const store = new FileDurablePlanAdmissionStore(dir);
+    appendFileSync(
+      filePathFor(dir, fixture.tenantScope.tenantId, fixture.project.projectId, "plan-durable-corruption-5"),
+      `${JSON.stringify({
+        type: "EVALUATION_RECORDED",
+        eventId: "plan-durable-corruption-5:v1:evaluation",
+        tenantId: fixture.tenantScope.tenantId,
+        projectId: fixture.project.projectId,
+        planId: "plan-durable-corruption-5",
+        planVersion: 1,
+        recordedAt: "2026-08-19T00:00:00.000Z",
+        result: {
+          tenantId: fixture.tenantScope.tenantId,
+          projectId: fixture.project.projectId,
+          planId: "plan-durable-corruption-5",
+          planVersion: 1,
+          status: "BLOCKED",
+          blockedReasons: ["a real blocking reason"],
+          awaiting: { entity: "req-1", reason: "this must never coexist with BLOCKED" },
+        },
+      })}\n`,
+      "utf8",
+    );
+    assert.throws(
+      () =>
+        store.getEvents(
+          fixture.tenantScope.tenantId,
+          fixture.project.projectId,
+          "plan-durable-corruption-5" as ProjectPlanVersion["planId"],
+        ),
+      (error: unknown) => {
+        if (!(error instanceof CorruptedPlanAdmissionEventLineError)) {
+          return false;
+        }
+        assert.match(error.message, /:1\)/);
+        assert.match(error.message, /BLOCKED.*must not carry an awaiting entity/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Rev77 F1: a forged EVALUATION_RECORDED line whose enclosing event identity does not match its own nested result identity fails closed with CorruptedPlanAdmissionEventLineError", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const store = new FileDurablePlanAdmissionStore(dir);
+    appendFileSync(
+      filePathFor(dir, fixture.tenantScope.tenantId, fixture.project.projectId, "plan-durable-corruption-6"),
+      `${JSON.stringify({
+        type: "EVALUATION_RECORDED",
+        // outer event claims planId "plan-durable-corruption-6" ...
+        eventId: "plan-durable-corruption-6:v1:evaluation",
+        tenantId: fixture.tenantScope.tenantId,
+        projectId: fixture.project.projectId,
+        planId: "plan-durable-corruption-6",
+        planVersion: 1,
+        recordedAt: "2026-08-19T00:00:00.000Z",
+        result: {
+          // ... but the nested result smuggles a different planId entirely.
+          tenantId: fixture.tenantScope.tenantId,
+          projectId: fixture.project.projectId,
+          planId: "plan-durable-corruption-6-DIFFERENT",
+          planVersion: 1,
+          status: "WAITING",
+          blockedReasons: [],
+          awaiting: { entity: "req-1", reason: "some reason" },
+        },
+      })}\n`,
+      "utf8",
+    );
+    assert.throws(
+      () =>
+        store.getEvents(
+          fixture.tenantScope.tenantId,
+          fixture.project.projectId,
+          "plan-durable-corruption-6" as ProjectPlanVersion["planId"],
+        ),
+      (error: unknown) => {
+        if (!(error instanceof CorruptedPlanAdmissionEventLineError)) {
+          return false;
+        }
+        assert.match(error.message, /:1\)/);
+        assert.match(error.message, /must match its own nested result's identity exactly/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Rev77 F2: a forged EVALUATION_RECORDED line whose eventId does not match the deterministic eventId derived from its own result fails closed with CorruptedPlanAdmissionEventLineError", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const store = new FileDurablePlanAdmissionStore(dir);
+    appendFileSync(
+      filePathFor(dir, fixture.tenantScope.tenantId, fixture.project.projectId, "plan-durable-corruption-7"),
+      `${JSON.stringify({
+        type: "EVALUATION_RECORDED",
+        // eventId does not match "plan-durable-corruption-7:v1:evaluation",
+        // the deterministic id evaluationEventId(result) would derive.
+        eventId: "some-unrelated-forged-eventId",
+        tenantId: fixture.tenantScope.tenantId,
+        projectId: fixture.project.projectId,
+        planId: "plan-durable-corruption-7",
+        planVersion: 1,
+        recordedAt: "2026-08-19T00:00:00.000Z",
+        result: {
+          tenantId: fixture.tenantScope.tenantId,
+          projectId: fixture.project.projectId,
+          planId: "plan-durable-corruption-7",
+          planVersion: 1,
+          status: "WAITING",
+          blockedReasons: [],
+          awaiting: { entity: "req-1", reason: "some reason" },
+        },
+      })}\n`,
+      "utf8",
+    );
+    assert.throws(
+      () =>
+        store.getEvents(
+          fixture.tenantScope.tenantId,
+          fixture.project.projectId,
+          "plan-durable-corruption-7" as ProjectPlanVersion["planId"],
+        ),
+      (error: unknown) => {
+        if (!(error instanceof CorruptedPlanAdmissionEventLineError)) {
+          return false;
+        }
+        assert.match(error.message, /:1\)/);
+        assert.match(error.message, /does not match the deterministic eventId/);
+        return true;
+      },
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -8,7 +8,12 @@ import { createSoldScope, type SoldScope } from "../src/domain/sold-scope.js";
 import { compilePlan } from "../src/domain/project-plan.js";
 import { deriveOutcomeJobSpecs } from "../src/domain/outcome-job-spec.js";
 import { createApprovalReference } from "../src/domain/approval-reference.js";
-import { admitPlan, admitJobs, InvalidPlanAdmissionError } from "../src/domain/plan-admission.js";
+import {
+  admitPlan,
+  admitJobs,
+  InvalidPlanAdmissionError,
+  validatePersistedPlanAdmissionResult,
+} from "../src/domain/plan-admission.js";
 import {
   WEBSITE_BUILD_V1_BLUEPRINT,
   buildWebsiteBuildV1Fixture,
@@ -384,4 +389,81 @@ test("T9: a BLOCKED or WAITING plan never reports an ADMITTED job", () => {
 
 test("sanity: WEBSITE_BUILD_v1 blueprint identity is stable across this test file's independent compilations", () => {
   assert.equal(WEBSITE_BUILD_V1_BLUEPRINT.blueprintId, "website-build-v1");
+});
+
+test("Rev77 F3: validatePersistedPlanAdmissionResult rejects a persisted ADMITTED result missing its required evaluatedApprovalId", () => {
+  assert.throws(
+    () =>
+      validatePersistedPlanAdmissionResult({
+        tenantId: "tenant-1",
+        projectId: "project-1",
+        planId: "plan-1",
+        planVersion: 1,
+        status: "ADMITTED",
+        blockedReasons: [],
+      }),
+    (error: unknown) => {
+      if (!(error instanceof InvalidPlanAdmissionError)) {
+        return false;
+      }
+      assert.match(error.message, /ADMITTED.*must carry an evaluatedApprovalId/);
+      return true;
+    },
+  );
+});
+
+test("Rev77 F3: validatePersistedPlanAdmissionResult rejects a persisted WAITING result carrying an evaluatedApprovalId (impossible - WAITING never resolved an approval)", () => {
+  assert.throws(
+    () =>
+      validatePersistedPlanAdmissionResult({
+        tenantId: "tenant-1",
+        projectId: "project-1",
+        planId: "plan-1",
+        planVersion: 1,
+        status: "WAITING",
+        blockedReasons: [],
+        awaiting: { entity: "plan-approval", reason: "some reason" },
+        evaluatedApprovalId: "approval-forged",
+      }),
+    (error: unknown) => {
+      if (!(error instanceof InvalidPlanAdmissionError)) {
+        return false;
+      }
+      assert.match(error.message, /WAITING.*must not carry an evaluatedApprovalId/);
+      return true;
+    },
+  );
+});
+
+test("Rev77 F3: validatePersistedPlanAdmissionResult accepts every one of admitPlan's own three legal status shapes (ADMITTED/BLOCKED/WAITING) round-tripped through JSON", () => {
+  const admitted = {
+    tenantId: "tenant-1",
+    projectId: "project-1",
+    planId: "plan-1",
+    planVersion: 1,
+    status: "ADMITTED",
+    blockedReasons: [],
+    evaluatedApprovalId: "approval-1",
+  };
+  const blocked = {
+    tenantId: "tenant-1",
+    projectId: "project-1",
+    planId: "plan-1",
+    planVersion: 1,
+    status: "BLOCKED",
+    blockedReasons: ["a real blocking reason"],
+  };
+  const waiting = {
+    tenantId: "tenant-1",
+    projectId: "project-1",
+    planId: "plan-1",
+    planVersion: 1,
+    status: "WAITING",
+    blockedReasons: [],
+    awaiting: { entity: "plan-approval", reason: "some reason" },
+  };
+  for (const legal of [admitted, blocked, waiting]) {
+    const roundTripped = JSON.parse(JSON.stringify(legal)) as unknown;
+    assert.deepEqual(validatePersistedPlanAdmissionResult(roundTripped), legal);
+  }
 });

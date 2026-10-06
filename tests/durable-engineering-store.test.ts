@@ -1,9 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FileDurableEngineeringStore } from "../src/domain/durable-engineering-store.js";
+import {
+  FileDurableEngineeringStore,
+  CorruptedEngineeringEventLineError,
+} from "../src/domain/durable-engineering-store.js";
 import type { TaskId, RunId } from "../src/domain/engineering-event-envelope.js";
 import { invokeSafely, type WorkerInvoker } from "../src/domain/worker-invoker.js";
 import { makeEvent } from "./helpers/engineering-event-helpers.js";
@@ -17,6 +20,14 @@ const RUN_2 = "run-2" as RunId;
 
 function freshStoreDir(): string {
   return mkdtempSync(join(tmpdir(), "eng-orch-001-store-"));
+}
+
+// Mirrors FileDurableEngineeringStore's own (private) filePathFor/runKey
+// encoding, so these adversarial tests can inject a raw corrupted/forged
+// line directly into the exact file the store itself reads on replay.
+function filePathFor(dir: string, projectRef: string, taskId: TaskId, runId: RunId): string {
+  const safeKey = Buffer.from(`${projectRef}::${taskId}::${runId}`, "utf8").toString("base64url");
+  return join(dir, `${safeKey}.jsonl`);
 }
 
 test("E4: a persisted WAITING state survives a simulated process-restart (fresh store instance over the same durable directory)", () => {
@@ -175,6 +186,67 @@ test("E10: a temporary invoker/dependency failure (invokeSafely -> TIMEOUT) pers
     assert.notEqual(stateAfterStrayResolve?.status, "PASS");
     assert.notEqual(stateAfterStrayResolve?.status, "RESUME_AUTHORIZED");
     assert.equal(stateAfterStrayResolve?.status, "BLOCKED");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AUD-DURABILITY-GAP: a corrupted (malformed JSON) persisted line fails closed with CorruptedEngineeringEventLineError, not a silent skip or an uncaught SyntaxError", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableEngineeringStore(dir);
+    store.appendEvent(makeEvent({ eventType: "CHECKPOINT", branch, baseSha, checkpointSha, fencingToken: 1 }));
+    appendFileSync(filePathFor(dir, "AKILTA", TASK_ID, RUN_1), "{not valid json\n", "utf8");
+    assert.throws(() => store.getEvents("AKILTA", TASK_ID, RUN_1), (error: unknown) => {
+      if (!(error instanceof CorruptedEngineeringEventLineError)) {
+        return false;
+      }
+      assert.match(error.message, /:2\)/);
+      assert.match(error.message, /not valid JSON/);
+      return true;
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AUD-DURABILITY-GAP: a forged line (valid JSON, but missing required envelope fields) fails closed with CorruptedEngineeringEventLineError rather than flowing a malformed record into the reducer", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableEngineeringStore(dir);
+    store.appendEvent(makeEvent({ eventType: "CHECKPOINT", branch, baseSha, checkpointSha, fencingToken: 1 }));
+    // Valid JSON, valid object, but missing the required `eventType` field -
+    // a hand-edited/injected line, not a real envelope.
+    appendFileSync(
+      filePathFor(dir, "AKILTA", TASK_ID, RUN_1),
+      `${JSON.stringify({ eventId: "forged-1", projectRef: "AKILTA", taskId: TASK_ID, runId: RUN_1 })}\n`,
+      "utf8",
+    );
+    assert.throws(() => store.getEvents("AKILTA", TASK_ID, RUN_1), (error: unknown) => {
+      if (!(error instanceof CorruptedEngineeringEventLineError)) {
+        return false;
+      }
+      assert.match(error.message, /:2\)/);
+      assert.match(error.message, /failed envelope\/provenance validation/);
+      return true;
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AUD-DURABILITY-GAP: a JSON line that parses to a non-object (e.g. a bare array) fails closed with CorruptedEngineeringEventLineError", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableEngineeringStore(dir);
+    appendFileSync(filePathFor(dir, "AKILTA", TASK_ID, RUN_1), "[1,2,3]\n", "utf8");
+    assert.throws(() => store.getEvents("AKILTA", TASK_ID, RUN_1), (error: unknown) => {
+      if (!(error instanceof CorruptedEngineeringEventLineError)) {
+        return false;
+      }
+      assert.match(error.message, /not a JSON object/);
+      return true;
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

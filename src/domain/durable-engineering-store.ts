@@ -1,7 +1,20 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, appendFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import type { EngineeringEventEnvelope, TaskId, RunId } from "./engineering-event-envelope.js";
+import {
+  createEngineeringEventEnvelope,
+  type EngineeringEventEnvelope,
+  type TaskId,
+  type RunId,
+} from "./engineering-event-envelope.js";
+import { createDec138Provenance } from "./dec-138-provenance.js";
 import { reconstructState, type EngineeringRunState } from "./engineering-run-state.js";
+
+export class CorruptedEngineeringEventLineError extends Error {
+  constructor(filePath: string, lineNumber: number, reason: string) {
+    super(`Corrupted durable engineering event line (${filePath}:${lineNumber}): ${reason}`);
+    this.name = "CorruptedEngineeringEventLineError";
+  }
+}
 
 export class InvalidDurableEngineeringStoreError extends Error {
   constructor(reason: string) {
@@ -52,17 +65,31 @@ export class FileDurableEngineeringStore implements DurableEngineeringStore {
     return join(this.baseDir, `${safeKey}.jsonl`);
   }
 
+  /**
+   * AUD-DURABILITY-GAP: appends via a single OS-level `appendFileSync` call
+   * (`O_APPEND`), never a read-full-file-then-rewrite-full-file cycle. The
+   * previous read-modify-write shape was a genuine lost-update race - a
+   * second writer's read of the "current" content, taken before the first
+   * writer's rewrite lands, silently drops the first writer's line when the
+   * second writer's rewrite completes. An OS-level append cannot lose
+   * already-written bytes: every writer's line is positioned at the current
+   * end-of-file by the kernel at write time, not computed from a stale
+   * in-process read.
+   */
   appendEvent(event: EngineeringEventEnvelope): void {
     const filePath = this.filePathFor(event.projectRef, event.taskId, event.runId);
     const line = `${JSON.stringify(event)}\n`;
-    if (existsSync(filePath)) {
-      const existing = readFileSync(filePath, "utf8");
-      writeFileSync(filePath, existing + line, "utf8");
-    } else {
-      writeFileSync(filePath, line, "utf8");
-    }
+    appendFileSync(filePath, line, "utf8");
   }
 
+  /**
+   * AUD-DURABILITY-GAP: replay no longer trusts `JSON.parse(line) as
+   * EngineeringEventEnvelope` - a corrupted (partial write, disk error) or
+   * forged (hand-edited/injected) line is re-run through
+   * `createEngineeringEventEnvelope`/`createDec138Provenance`'s own
+   * ingress validation and fails closed (throws) rather than silently
+   * flowing a malformed record into the reducer.
+   */
   getEvents(
     projectRef: string,
     taskId: TaskId,
@@ -73,10 +100,38 @@ export class FileDurableEngineeringStore implements DurableEngineeringStore {
       return [];
     }
     const content = readFileSync(filePath, "utf8");
-    return content
-      .split("\n")
-      .filter((line) => line.trim().length > 0)
-      .map((line) => JSON.parse(line) as EngineeringEventEnvelope);
+    const lines = content.split("\n").filter((line) => line.trim().length > 0);
+    return lines.map((line, index) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch (cause) {
+        throw new CorruptedEngineeringEventLineError(
+          filePath,
+          index + 1,
+          `line is not valid JSON (${(cause as Error).message})`,
+        );
+      }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new CorruptedEngineeringEventLineError(filePath, index + 1, "line is not a JSON object");
+      }
+      const record = parsed as Record<string, unknown>;
+      try {
+        const provenance = createDec138Provenance(
+          record.provenance as Parameters<typeof createDec138Provenance>[0],
+        );
+        return createEngineeringEventEnvelope({
+          ...(record as Parameters<typeof createEngineeringEventEnvelope>[0]),
+          provenance,
+        });
+      } catch (cause) {
+        throw new CorruptedEngineeringEventLineError(
+          filePath,
+          index + 1,
+          `line failed envelope/provenance validation (${(cause as Error).message})`,
+        );
+      }
+    });
   }
 
   getState(projectRef: string, taskId: TaskId, runId: RunId): EngineeringRunState | undefined {
