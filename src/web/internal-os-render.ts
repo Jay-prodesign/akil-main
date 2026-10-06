@@ -1,4 +1,4 @@
-import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, AdminResourceBindingViewState, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary } from "./internal-os-view-state.js";
+import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, AdminResourceBindingViewState, OperationalObservabilityViewState, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary } from "./internal-os-view-state.js";
 
 export interface RenderedInternalOsPage {
   readonly status: number;
@@ -279,6 +279,74 @@ function renderResourceBindingCard(view: AdminResourceBindingViewState): string 
   </section>`;
 }
 
+/**
+ * Rev195 F1: read-only operational observability - task/worker, connection
+ * health and the real scoped kill-switch signal, cost/quota, pending
+ * approvals, and audit/evidence - all escaped, never a mutation control
+ * (same discipline as `renderResourceBindingCard`). `NOT_ACTIVE` stays the
+ * honest default when no source is wired.
+ */
+function renderOperationalObservabilityCard(view: OperationalObservabilityViewState): string {
+  if (view.kind === "NOT_ACTIVE") {
+    return `
+  <section aria-labelledby="admin-observability-heading" class="card">
+    <h2 id="admin-observability-heading">Observability, audit &amp; recovery</h2>
+    <p class="status status-neutral" role="status">NOT ACTIVE</p>
+    <p>This area is not yet connected to a live data source in this build.</p>
+  </section>`;
+  }
+  const v = view.view;
+  const taskHtml =
+    v.task !== undefined
+      ? `<p>Task status: <span class="status status-neutral" role="status">${escapeHtml(v.task.runStatus)}</span> — attempt ${v.task.currentAttempt}${v.task.currentAttemptStatus !== undefined ? ` (${escapeHtml(v.task.currentAttemptStatus)})` : ""}</p>
+    <p>Worker health: <span class="status status-neutral" role="status">${escapeHtml(v.task.workerHealth)}</span></p>`
+      : `<p>No task currently tracked.</p>`;
+  const connectionsHtml =
+    v.connections.length > 0
+      ? `<ul>\n      ${v.connections
+          .map(
+            (connection) =>
+              `<li>${escapeHtml(connection.connectionBindingId)}: <span class="status status-${connection.killSwitchEngaged ? "danger" : connection.degraded ? "warning" : "neutral"}" role="status">${escapeHtml(connection.connectionState)}</span>${connection.killSwitchEngaged ? " — kill switch engaged" : ""}</li>`,
+          )
+          .join("\n      ")}\n    </ul>`
+      : `<p>No connections tracked.</p>`;
+  const quotaHtml =
+    v.quota !== undefined
+      ? `<p>Quota: ${v.quota.unitReserved}/${v.quota.unitLimit} reserved, ${v.quota.unitCommitted} committed, ${v.quota.unitRemaining} remaining</p>`
+      : `<p>No quota data tracked.</p>`;
+  const approvalsHtml =
+    v.pendingApprovals.length > 0
+      ? `<ul>\n      ${v.pendingApprovals
+          .map(
+            (approval) =>
+              `<li>${escapeHtml(approval.waitRequestId)}: <span class="status status-${approval.resolved ? "neutral" : "warning"}" role="status">${approval.resolved ? "RESOLVED" : "PENDING"}</span></li>`,
+          )
+          .join("\n      ")}\n    </ul>`
+      : `<p>No pending approvals tracked.</p>`;
+  const evidenceHtml =
+    v.auditEvidence.length > 0
+      ? `<ul>\n      ${v.auditEvidence
+          .map(
+            (evidence) =>
+              `<li>${escapeHtml(evidence.evidenceId)} (${escapeHtml(evidence.evidenceType)}): <span class="status status-neutral" role="status">${evidence.verificationStatus !== undefined ? escapeHtml(evidence.verificationStatus) : "UNVERIFIED"}</span></li>`,
+          )
+          .join("\n      ")}\n    </ul>`
+      : `<p>No audit/evidence tracked.</p>`;
+  return `
+  <section aria-labelledby="admin-observability-heading" class="card">
+    <h2 id="admin-observability-heading">Observability, audit &amp; recovery</h2>
+    ${taskHtml}
+    <h3>Connections</h3>
+    ${connectionsHtml}
+    <h3>Cost / quota</h3>
+    ${quotaHtml}
+    <h3>Pending approvals</h3>
+    ${approvalsHtml}
+    <h3>Audit / evidence</h3>
+    ${evidenceHtml}
+  </section>`;
+}
+
 function renderAdminBody(view: AdminViewState): string {
   const notActiveItems = view.notActiveConcepts
     .map((concept) => `<li>${escapeHtml(concept)}: <span class="status status-neutral" role="status">NOT ACTIVE</span></li>`)
@@ -287,6 +355,7 @@ function renderAdminBody(view: AdminViewState): string {
   ${renderOrganizationCard(view.organization)}
   ${renderAccessCard(view.access)}
   ${renderResourceBindingCard(view.resourceBinding)}
+  ${renderOperationalObservabilityCard(view.operationalObservability)}
   <section aria-labelledby="admin-not-active-heading" class="card">
     <h2 id="admin-not-active-heading">Not yet active in this build</h2>
     <ul>

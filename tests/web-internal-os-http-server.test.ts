@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { createInternalOsHttpServer } from "../src/web/internal-os-http-server.js";
 import { STAFF_SESSION_TOKEN_HEADER } from "../src/web/internal-os-request-handler.js";
-import type { OrganizationResourceBindingSource } from "../src/web/internal-os-view-state.js";
+import type { OrganizationResourceBindingSource, OperationalObservabilitySource } from "../src/web/internal-os-view-state.js";
+import type { OperationalObservabilityView } from "../src/domain/operational-observability-view.js";
 import {
   REVIEW_ORGANIZATION,
   buildReviewStaffSessionFixtureMap,
@@ -214,5 +215,54 @@ test("Rev184 F3-residual: /os/admin with a READY current status renders READY th
     const response = await fetch(`${baseUrl}/os/admin`, { headers: { [STAFF_SESSION_TOKEN_HEADER]: FOUNDER_REVIEW_FIXTURE.sessionToken } });
     const body = await response.text();
     assert.match(body, /READY/);
+  });
+});
+
+// --- Rev195 F1: the real /os/admin route must actually thread operationalObservabilitySource, not just define it ---
+
+test("Rev195 F1: /os/admin with no operationalObservabilitySource wired renders the honest NOT_ACTIVE posture through the real production-shaped route", async () => {
+  await withServer(devDeps, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/os/admin`, { headers: { [STAFF_SESSION_TOKEN_HEADER]: FOUNDER_REVIEW_FIXTURE.sessionToken } });
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    assert.match(body, /Observability, audit/);
+    assert.match(body, /NOT ACTIVE/);
+  });
+});
+
+test("Rev195 F1: /os/admin with a wired operationalObservabilitySource renders its real task/worker, REVOKED kill-switch, quota, pending-approval, and audit/evidence truth through the real route", async () => {
+  const view: OperationalObservabilityView = {
+    task: { runStatus: "RUNNING", currentAttempt: 1, currentAttemptStatus: "RUNNING", workerHealth: "ACTIVE" },
+    connections: [{ connectionBindingId: "conn-admin-route-1", connectionState: "REVOKED", killSwitchEngaged: true, degraded: false }],
+    quota: { unitLimit: 100, unitReserved: 10, unitCommitted: 5, unitRemaining: 85, monetary: { status: "NOT_CONFIGURED" } },
+    pendingApprovals: [{ waitRequestId: "wait-admin-route-1", effectRef: "effect-1", decisionRef: "decision-1", raisedAt: "2026-10-06T00:00:00.000Z", resolved: false }],
+    auditEvidence: [{ evidenceId: "evidence-admin-route-1", evidenceType: "SCREENSHOT", capturedAt: "2026-10-06T00:00:00.000Z", verificationStatus: "PASSED" }],
+  };
+  const source: OperationalObservabilitySource = { resolveView: () => view };
+  await withServer({ ...devDeps, operationalObservabilitySource: source }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/os/admin`, { headers: { [STAFF_SESSION_TOKEN_HEADER]: FOUNDER_REVIEW_FIXTURE.sessionToken } });
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    assert.match(body, /RUNNING/);
+    assert.match(body, /ACTIVE/);
+    assert.match(body, /conn-admin-route-1/);
+    assert.match(body, /REVOKED/);
+    assert.match(body, /kill switch engaged/);
+    assert.match(body, /85 remaining/);
+    assert.match(body, /wait-admin-route-1/);
+    assert.match(body, /PENDING/);
+    assert.match(body, /evidence-admin-route-1/);
+    assert.match(body, /PASSED/);
+    assert.doesNotMatch(body, /<button/i);
+    assert.doesNotMatch(body, /<form/i);
+  });
+});
+
+test("Rev195 F1: access denial on /os/admin remains fail-closed with a wired operationalObservabilitySource - a Member fixture (no WRITE) still gets 403", async () => {
+  const view: OperationalObservabilityView = { connections: [], pendingApprovals: [], auditEvidence: [] };
+  const source: OperationalObservabilitySource = { resolveView: () => view };
+  await withServer({ ...devDeps, operationalObservabilitySource: source }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/os/admin`, { headers: { [STAFF_SESSION_TOKEN_HEADER]: MEMBER_REVIEW_FIXTURE.sessionToken } });
+    assert.equal(response.status, 403);
   });
 });

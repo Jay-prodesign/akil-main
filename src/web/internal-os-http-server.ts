@@ -39,6 +39,9 @@ export function createInternalOsHttpServer(
     ...(deps.projectSource !== undefined ? { projectSource: deps.projectSource } : {}),
     ...(deps.jobSource !== undefined ? { jobSource: deps.jobSource } : {}),
     ...(deps.resourceBindingSource !== undefined ? { resourceBindingSource: deps.resourceBindingSource } : {}),
+    ...(deps.operationalObservabilitySource !== undefined
+      ? { operationalObservabilitySource: deps.operationalObservabilitySource }
+      : {}),
   });
 
   return createServer((req, res) => {
