@@ -5,7 +5,8 @@
   "description": "AKILTA backend domain/application kernel (AKI-BE-001)",
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/tests/*.test.js"
   },
   "devDependencies": {
