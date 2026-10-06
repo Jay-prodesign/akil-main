@@ -1,0 +1,41 @@
+AKILTA PROPRIETARY SOURCE LICENSE — ALL RIGHTS RESERVED
+
+Copyright © 2026. All rights reserved.
+
+This repository and all AKILTA-owned source code, documentation, designs,
+schemas, configuration, tests, prompts, specifications, and other original
+materials contained in it are proprietary.
+
+No license or permission is granted to copy, use, modify, merge, publish,
+distribute, sublicense, sell, commercialize, create derivative works from,
+repackage, disclose, or incorporate AKILTA-owned materials into another
+product or service except to the extent expressly authorized in writing by
+the applicable AKILTA rights holder or required by applicable law.
+
+Authorized employees, contractors, agents, and collaborators may access and
+use these materials only for work that is within their granted AKILTA
+authority and subject to the agreements, confidentiality obligations, and
+repository permissions applicable to that work.
+
+Third-party code, packages, assets, models, datasets, fonts, documentation,
+and other third-party materials remain governed by their own licenses and
+rights. This proprietary notice does not replace, narrow, or override any
+valid third-party or open-source license. See THIRD_PARTY_NOTICES.md and the
+applicable dependency/source records.
+
+Repository visibility does not itself grant public-source or open-source
+rights. No patent, trademark, trade-name, brand, or endorsement right is
+granted by this notice.
+
+Any end-user rights for a distributed AKILTA application, binary, SaaS
+service, website, SDK, or other release are governed separately by the
+product-specific EULA, Terms, Privacy Policy, open-source license, or other
+release documents that apply to that distribution.
+
+Ownership and legal attribution follow AKILTA's current canonical ownership
+and legal records. This file records the repository's proprietary
+distribution posture; it does not by itself create or transfer ownership.
+
+To the maximum extent permitted by applicable law, repository materials are
+provided to authorized users on an "AS IS" basis without warranties of
+merchantability, fitness for a particular purpose, or non-infringement.

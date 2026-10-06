@@ -34,3 +34,20 @@ See `docs/engineering/CURRENT_STATE.md` for the live detail and `docs/exec-plans
 ## Project boundary
 
 This repository is AKILTA only. AKILTA Commerce / AI Commerce is a separate project with a separate repository — see `docs/engineering/ACCEPTANCE_CRITERIA.md` (Invariant 6) and `CLAUDE.md`.
+
+## Repository legal posture
+
+This authoritative engineering repository is **private** and AKILTA-owned
+source is **proprietary / all rights reserved**. Public product availability,
+when later authorized, does not imply public source availability.
+
+- [Proprietary LICENSE](./LICENSE)
+- [Third-party notices](./THIRD_PARTY_NOTICES.md)
+- [Security policy](./SECURITY.md)
+- [Legal / IP readiness](./docs/legal/README.md)
+- [Release legal / privacy readiness](./docs/legal/RELEASE_LEGAL_READINESS.md)
+
+Final customer-facing EULA, Terms, Privacy Policy, store disclosures, and
+similar release documents are created only when the actual shipping product
+surface and data flows make them applicable; they must match implemented
+behavior rather than generic template claims.
