@@ -633,7 +633,14 @@ export function admitQuotaReservation(input: {
       sourceFingerprint: input.envelope.sourceFingerprint,
       type: "REJECTED",
       occurredAt,
-      ...(requestedAmount.presence === "REPORTED" ? { amount: requestedAmount } : {}),
+      // OS-V0-15 (Rev197 #11 retry-storm witness): always set, mirroring the
+      // RESERVED event below - previously omitted for a non-REPORTED
+      // (UNKNOWN) requestedAmount, which left `existing.amount` undefined
+      // while every later replay's freshly-derived `requestedAmount` was a
+      // real `{presence:"UNKNOWN"}` object; `amountsEqual` then disagreed on
+      // the very next identical retry, throwing `QuotaReservationConflictError`
+      // instead of safely replaying the cached REJECTED outcome.
+      amount: requestedAmount,
       reason,
     };
     return { ledger: appendToLedger(input.ledger, event), outcome: { status: "REJECTED", event } };

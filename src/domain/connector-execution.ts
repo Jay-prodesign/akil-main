@@ -217,9 +217,15 @@ export function executeConnectorCapability(input: {
   let authSecretValue: string;
   try {
     authSecretValue = input.secretResolver.resolve(instance.binding.secretRef);
-  } catch (cause) {
+  } catch {
+    // OS-V0-15 (Rev197 #13 secret-exfiltration witness): the resolver's own
+    // thrown message is never forwarded verbatim - an untrusted/third-party
+    // resolver implementation could embed the real secret value (or other
+    // sensitive request content) in its own exception text, and this layer
+    // must never become a channel that echoes that text back out. Only the
+    // opaque secretRef id is ever cited.
     throw new UnresolvedConnectorSecretError(
-      `secretResolver could not resolve secretRef "${instance.binding.secretRef}" (${(cause as Error).message})`,
+      `secretResolver could not resolve secretRef "${instance.binding.secretRef}"`,
     );
   }
   if (typeof authSecretValue !== "string" || authSecretValue.length === 0) {
