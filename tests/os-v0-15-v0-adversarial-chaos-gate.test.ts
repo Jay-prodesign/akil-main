@@ -42,6 +42,8 @@ import { createGenericApiConnectorDefinition } from "../src/domain/generic-conne
 import {
   executeConnectorCapability,
   UnresolvedConnectorSecretError,
+  ConnectorExecutionAuthorizationError,
+  ConnectorExecutionTransportError,
   type SecretResolver,
   type ConnectorTransport,
   type ConnectorTransportRequest,
@@ -253,6 +255,59 @@ test("OS-V0-15 (#13 secret-exfiltration): executeConnectorCapability never surfa
   assert.equal(capturedRequest?.authSecretValue, REAL_SECRET, "the injected transport boundary IS the one place authSecretValue is intentionally handed over");
   assert.ok(!("authSecretValue" in result), "the function's own ConnectorExecutionResult must never itself carry the resolved secret as a field");
   assert.ok(!JSON.stringify(result).includes(REAL_SECRET), "the function's own serialized return value must never contain the real secret value under any outcome");
+
+  // Case 4 (Rev198 F1): a real/careless/malicious transport that received
+  // the real secret echoes it back in its own AUTHORIZATION_FAILED
+  // errorMessage. The transport is the one boundary that actually receives
+  // authSecretValue, so this is the load-bearing exfiltration path - the
+  // thrown ConnectorExecutionAuthorizationError must never forward that
+  // transport-provided text verbatim.
+  const leakyAuthFailedTransport: ConnectorTransport = {
+    execute: (request) => ({
+      outcome: "AUTHORIZATION_FAILED",
+      errorMessage: `upstream rejected credential "${request.authSecretValue}"`,
+    }),
+  };
+  assert.throws(
+    () =>
+      executeConnectorCapability({
+        bound,
+        capabilityRef: "cap-chaos-generic-read",
+        requestingOwnership: OWNERSHIP,
+        connectionStore,
+        secretResolver: { resolve: () => REAL_SECRET },
+        transport: leakyAuthFailedTransport,
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof ConnectorExecutionAuthorizationError);
+      assert.ok(!(error as Error).message.includes(REAL_SECRET), "a transport-reported AUTHORIZATION_FAILED errorMessage containing the real secret must never be forwarded verbatim into the thrown error");
+      return true;
+    },
+  );
+
+  // Case 5 (Rev198 F1): same exfiltration path, TRANSPORT_ERROR outcome.
+  const leakyTransportErrorTransport: ConnectorTransport = {
+    execute: (request) => ({
+      outcome: "TRANSPORT_ERROR",
+      errorMessage: `connection reset while sending credential "${request.authSecretValue}"`,
+    }),
+  };
+  assert.throws(
+    () =>
+      executeConnectorCapability({
+        bound,
+        capabilityRef: "cap-chaos-generic-read",
+        requestingOwnership: OWNERSHIP,
+        connectionStore,
+        secretResolver: { resolve: () => REAL_SECRET },
+        transport: leakyTransportErrorTransport,
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof ConnectorExecutionTransportError);
+      assert.ok(!(error as Error).message.includes(REAL_SECRET), "a transport-reported TRANSPORT_ERROR errorMessage containing the real secret must never be forwarded verbatim into the thrown error");
+      return true;
+    },
+  );
 });
 
 // --- #17: crash-loop / repeated-startup failure (2+ consecutive restart cycles) ---

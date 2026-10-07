@@ -249,12 +249,20 @@ export function executeConnectorCapability(input: {
   const response = input.transport.execute(transportRequest);
 
   if (response.outcome === "AUTHORIZATION_FAILED") {
+    // Rev198 F1 (OS-V0-15 #13 secret-exfiltration): the transport is the one
+    // boundary that actually receives the resolved authSecretValue - an
+    // untrusted/careless/malicious transport implementation could embed
+    // that value in its own `errorMessage`, so that text is never forwarded
+    // verbatim. Only the capability/connection identity (never transport
+    // free text) is cited.
     throw new ConnectorExecutionAuthorizationError(
-      response.errorMessage ?? "transport reported an authorization failure",
+      `transport reported an authorization failure for capability "${endpoint.capabilityRef}" on connectionBindingId "${instance.binding.connectionBindingId}"`,
     );
   }
   if (response.outcome === "TRANSPORT_ERROR") {
-    throw new ConnectorExecutionTransportError(response.errorMessage ?? "transport reported an error");
+    throw new ConnectorExecutionTransportError(
+      `transport reported an error for capability "${endpoint.capabilityRef}" on connectionBindingId "${instance.binding.connectionBindingId}"`,
+    );
   }
 
   return {
