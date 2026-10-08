@@ -15,6 +15,15 @@ import {
   createOrganizationAccessRoleContext,
   type OrganizationAccessRoleContext,
 } from "./organization-access-role.js";
+import { createCustomer, type Customer } from "./customer.js";
+import { createProject, type Project } from "./project.js";
+import { createProjectOwnershipRef, type ProjectOwnershipRef } from "./project-ownership.js";
+import {
+  createOrganizationResourceBinding,
+  resolveOrganizationResourceBindingStatus,
+  type OrganizationResourceBinding,
+  type OrganizationResourceBindingStatus,
+} from "./organization-resource-binding.js";
 
 export class InvalidControlledOrganizationProvisioningError extends Error {
   constructor(reason: string) {
@@ -39,49 +48,59 @@ export class ConflictingControlledOrganizationProvisioningReplayError extends Er
 
 /**
  * OS-V1-01 "Controlled Organization Provisioning & Switching": the durable,
- * replay-safe owner `organization.ts` itself explicitly leaves to V1 (its
- * own OS-V0-01 doc comment: "richer suspend/reactivate/offboarding
- * semantics are a V1 concern, not invented in this bounded slice"). This
+ * replay-safe owner `organization.ts` itself explicitly leaves to V1. This
  * module invents NO second IAM/workflow/provisioning framework - it is a
  * thin, deterministic, event-sourced orchestration layer over already-
  * accepted primitives (`createOrganization`/`activateOrganization`/
  * `suspendOrganization`/`reactivateOrganization`, `createOrganizationMembership`/
- * `revokeOrganizationMembership`, `createOrganizationAccessRoleContext`),
- * mirroring two already-established house patterns exactly: the
- * idempotencyKey-keyed replay-safety ledger of `execution-quota-admission.ts`
- * (`durable-quota-reservation-store.ts`), and the deterministic-composition-
- * plus-durable-store split of `external-sale-bootstrap.ts`/
- * `durable-external-sale-bootstrap-store.ts`.
+ * `revokeOrganizationMembership`, `createOrganizationAccessRoleContext`,
+ * `createCustomer`/`createProject`/`createProjectOwnershipRef`,
+ * `createOrganizationResourceBinding`/`resolveOrganizationResourceBindingStatus`).
  *
- * Every public function here is pure (no fs/network/randomness/wall-clock
- * read) - the durable persistence boundary is
- * `durable-controlled-organization-provisioning-store.ts`, which calls
- * these exactly as `FileDurableQuotaReservationStore` calls
- * `admitQuotaReservation`/`commitQuotaUsage`/`releaseQuotaReservation`.
+ * Rev203 correction round (F1-F4):
  *
- * DELIBERATE SCOPE DISCIPLINE (Rev202's own explicit prohibition): no public
- * signup/onboarding, no live provider credential/effect, no billing/DNS/
- * spend, no customer/public effect, no merge/MAIN mutation, no V1-02 work.
- * "Switching" between two controlled Organizations is not a separate
- * runtime concept to invent - it falls out for free from this module's own
- * per-(tenantId, organizationId) ledger scoping (see the durable store):
- * resolving Organization A's current state and Organization B's current
- * state are two independent, freshly-re-derived calls against two
- * independent ledgers, with no shared mutable cache to leak between them.
+ * **F1** - the baseline snapshot now composes a full `OrganizationResourceBinding`
+ * (OS-V0-09) alongside the `Organization`, not just the founder identity.
+ * `effectiveConfigRefs`/`effectivePolicyRefs`/`usageQuotaNamespaceRefs`/
+ * `auditRecoveryRefs`/etc default to `[]` exactly as OS-V0-09 itself already
+ * does for a candidate with no durable "current" registry yet for those
+ * categories - an honest "not currently admitted" posture, not a fabricated
+ * placeholder, per that module's own established discipline.
+ *
+ * **F2** - `resolveControlledOrganizationSwitch` is the new, explicit,
+ * server-authoritative switch-admission check: it delegates WHOLESALE to
+ * `resolveOrganizationResourceBindingStatus` (OS-V0-09, Rev183), which
+ * already proves "is this exact membership currently, coherently, tenant-
+ * correctly bound to THIS organization's own binding.membershipRefs" - the
+ * precise check that makes a stale/foreign A-bound membership fail closed
+ * against organization B (its id is simply never in B's own membershipRefs).
+ * Per-organization ledger-file scoping still gives storage isolation; this
+ * is the separate, now-present, admission-authority layer on top.
+ *
+ * **F3** - the persisted snapshot NEVER stores a founder `OrganizationMembership`/
+ * `OrganizationAccessRoleContext` object at all - only the opaque
+ * `founderMembershipId`/`founderPrincipalRef` REFS, mirroring
+ * `OrganizationResourceBinding`'s own "opaque ref, never a copy of a
+ * resource's own mutable state" discipline exactly. There is structurally
+ * nothing in this module's own durable state for `reactivateControlledOrganization`
+ * (which touches only the `Organization` lifecycle bit) to expose as a
+ * stale membership state - membership currentness is always a fresh,
+ * separately-supplied check via `resolveControlledOrganizationSwitch`/
+ * `resolveOrganizationResourceBindingStatus`, never this module's own cached
+ * copy.
+ *
+ * **F4** - `reinitializeControlledOrganization` now requires the CALLER's
+ * own fresh, current founder-membership evidence (`currentFounderMembership`)
+ * to revoke, rather than trusting any value this module might have cached -
+ * consistent with F3's same "never cache authority state" discipline.
  */
 
-/**
- * The current, freshly-composed truth for one controlled Organization at
- * one point in its own history. Every lifecycle event below carries one of
- * these verbatim - there is no separate "current pointer" a caller could
- * read instead; `projectCurrentControlledOrganizationState` (below) is the
- * ONLY way to ask "what is true now," and it always re-scans the ledger
- * rather than trusting any cached value.
- */
 export interface ControlledOrganizationProvisioningSnapshot {
   readonly organization: Organization;
-  readonly founderMembership: OrganizationMembership;
-  readonly founderAccessRoleContext: OrganizationAccessRoleContext;
+  readonly project: Project;
+  readonly resourceBinding: OrganizationResourceBinding;
+  readonly founderMembershipId: OrganizationMembership["membershipId"];
+  readonly founderPrincipalRef: string;
 }
 
 interface BaseProvisioningEvent {
@@ -109,7 +128,7 @@ export interface ReactivatedEvent extends BaseProvisioningEvent {
 export interface ReinitializedEvent extends BaseProvisioningEvent {
   readonly type: "REINITIALIZED";
   readonly snapshot: ControlledOrganizationProvisioningSnapshot;
-  /** Rev202 "no stale resurrection": the founder membership this reinitialization explicitly superseded, carried as evidence - never deleted, never silently dropped. */
+  /** Rev202/Rev203 "no stale resurrection": the founder membership this reinitialization explicitly superseded, carried as evidence - never deleted, never silently dropped. */
   readonly supersededFounderMembership: OrganizationMembership;
 }
 
@@ -138,6 +157,9 @@ export interface ControlledOrganizationProvisioningOutcome {
     | "REINITIALIZED"
     | "ALREADY_REINITIALIZED";
   readonly snapshot: ControlledOrganizationProvisioningSnapshot;
+  /** Freshly (re)minted only on PROVISIONED/REINITIALIZED - the exact founder identity just created. Never read back from durable state; pure/deterministic given the same inputs. Absent on SUSPENDED/REACTIVATED (nothing minted) and on ALREADY_* idempotent replays (nothing newly minted). */
+  readonly mintedFounderMembership?: OrganizationMembership;
+  readonly mintedFounderAccessRoleContext?: OrganizationAccessRoleContext;
 }
 
 function requireNonEmptyString(value: unknown, field: string): string {
@@ -183,7 +205,10 @@ export function provisionControlledOrganization(input: {
   readonly founderPrincipalRef: unknown;
   readonly idempotencyKey: unknown;
   readonly occurredAt: unknown;
-}): { readonly ledger: ControlledOrganizationProvisioningLedger; readonly outcome: ControlledOrganizationProvisioningOutcome } {
+}): {
+  readonly ledger: ControlledOrganizationProvisioningLedger;
+  readonly outcome: ControlledOrganizationProvisioningOutcome;
+} {
   const idempotencyKey = requireNonEmptyString(input.idempotencyKey, "idempotencyKey");
   const organizationId = requireNonEmptyString(input.organizationId, "organizationId");
 
@@ -194,8 +219,8 @@ export function provisionControlledOrganization(input: {
       existingForKey.tenantId === input.tenantScope.tenantId &&
       existingForKey.organizationId === organizationId &&
       existingForKey.snapshot.organization.displayName === input.displayName &&
-      existingForKey.snapshot.founderMembership.principalRef === input.founderPrincipalRef &&
-      existingForKey.snapshot.founderMembership.membershipId === input.founderMembershipId
+      existingForKey.snapshot.founderMembershipId === input.founderMembershipId &&
+      existingForKey.snapshot.founderPrincipalRef === input.founderPrincipalRef
     ) {
       return { ledger: input.ledger, outcome: { status: "ALREADY_PROVISIONED", snapshot: existingForKey.snapshot } };
     }
@@ -211,15 +236,15 @@ export function provisionControlledOrganization(input: {
     );
   }
 
-  const createdAt = requireNonEmptyString(input.occurredAt, "occurredAt");
+  const occurredAt = requireNonEmptyString(input.occurredAt, "occurredAt");
   const organization = activateOrganization({
     organization: createOrganization({
       organizationId,
       tenantScope: input.tenantScope,
       displayName: input.displayName,
-      createdAt,
+      createdAt: occurredAt,
     }),
-    activatedAt: createdAt,
+    activatedAt: occurredAt,
   });
   const founderMembership = createOrganizationMembership({
     membershipId: input.founderMembershipId,
@@ -232,22 +257,49 @@ export function provisionControlledOrganization(input: {
     role: "OWNER",
   });
 
+  const customer = createCustomer({
+    tenantScope: input.tenantScope,
+    customerId: `org-customer:${organizationId}`,
+    displayName: input.displayName,
+  });
+  const project = createProject({
+    tenantScope: input.tenantScope,
+    customer,
+    projectId: `org-baseline-project:${organizationId}`,
+    ownerRef: `membership:${founderMembership.membershipId}`,
+    state: "active",
+  });
+  const ownership = createProjectOwnershipRef({
+    tenantId: input.tenantScope.tenantId,
+    customerId: customer.customerId,
+    projectId: project.projectId,
+  });
+  const resourceBinding = createOrganizationResourceBinding({
+    organization,
+    memberships: [founderMembership],
+    project,
+    ownership,
+    boundAt: occurredAt,
+  });
+
   const snapshot: ControlledOrganizationProvisioningSnapshot = {
     organization,
-    founderMembership,
-    founderAccessRoleContext,
+    project,
+    resourceBinding,
+    founderMembershipId: founderMembership.membershipId,
+    founderPrincipalRef: founderMembership.principalRef,
   };
   const event: ProvisionedEvent = {
     type: "PROVISIONED",
     tenantId: input.tenantScope.tenantId,
     organizationId: organizationId as Organization["organizationId"],
     idempotencyKey,
-    occurredAt: createdAt,
+    occurredAt,
     snapshot,
   };
   return {
     ledger: { events: [...input.ledger.events, event] },
-    outcome: { status: "PROVISIONED", snapshot },
+    outcome: { status: "PROVISIONED", snapshot, mintedFounderMembership: founderMembership, mintedFounderAccessRoleContext: founderAccessRoleContext },
   };
 }
 
@@ -257,7 +309,10 @@ export function suspendControlledOrganization(input: {
   readonly organizationId: unknown;
   readonly suspendedAt: unknown;
   readonly idempotencyKey: unknown;
-}): { readonly ledger: ControlledOrganizationProvisioningLedger; readonly outcome: ControlledOrganizationProvisioningOutcome } {
+}): {
+  readonly ledger: ControlledOrganizationProvisioningLedger;
+  readonly outcome: ControlledOrganizationProvisioningOutcome;
+} {
   const idempotencyKey = requireNonEmptyString(input.idempotencyKey, "idempotencyKey");
   const organizationId = requireNonEmptyString(input.organizationId, "organizationId");
 
@@ -310,15 +365,16 @@ export function suspendControlledOrganization(input: {
 }
 
 /**
- * Rev202 "reactivation without stale membership/connection/config/session
- * resurrection": this function touches ONLY the `Organization` lifecycle
- * bit via `reactivateOrganization` - it never reads, re-validates, or
- * re-issues `founderMembership`/`founderAccessRoleContext` at all, so a
- * membership independently revoked while the organization was SUSPENDED
- * stays revoked straight through reactivation (the carried-forward
- * `snapshot.founderMembership` below is whatever the caller's own current
- * membership evidence says it is, never silently re-activated by this
- * function).
+ * Rev203 F3: this function touches ONLY the `Organization` lifecycle bit
+ * via `reactivateOrganization`. It never reads, re-validates, or re-issues
+ * any founder-membership evidence at all, and the snapshot it returns
+ * carries no membership STATE claim whatsoever (only the opaque
+ * `founderMembershipId`/`founderPrincipalRef` refs, unchanged) - there is
+ * structurally nothing here that could expose a stale ACTIVE membership,
+ * because this module never stores a membership's live state in the first
+ * place. A caller who needs to know whether the founder membership is
+ * CURRENTLY active must ask via `resolveControlledOrganizationSwitch`
+ * (which re-resolves it fresh every time, never from a cache).
  */
 export function reactivateControlledOrganization(input: {
   readonly ledger: ControlledOrganizationProvisioningLedger;
@@ -326,7 +382,10 @@ export function reactivateControlledOrganization(input: {
   readonly organizationId: unknown;
   readonly reactivatedAt: unknown;
   readonly idempotencyKey: unknown;
-}): { readonly ledger: ControlledOrganizationProvisioningLedger; readonly outcome: ControlledOrganizationProvisioningOutcome } {
+}): {
+  readonly ledger: ControlledOrganizationProvisioningLedger;
+  readonly outcome: ControlledOrganizationProvisioningOutcome;
+} {
   const idempotencyKey = requireNonEmptyString(input.idempotencyKey, "idempotencyKey");
   const organizationId = requireNonEmptyString(input.organizationId, "organizationId");
 
@@ -379,29 +438,34 @@ export function reactivateControlledOrganization(input: {
 }
 
 /**
- * Rev202 "independent reset/reinitialize": deliberately requires the
- * CURRENT organization to be `ACTIVE` - reinitializing a `SUSPENDED`
- * organization is rejected (this IS the "suspend blocking new effects"
- * witness: suspension blocks this new-founder-provisioning effect exactly
- * as it blocks everything else gated on organization currentness). The
- * prior founder membership is explicitly `revokeOrganizationMembership`'d
- * (never silently superseded/ignored - its revocation is itself durable
- * evidence, carried in `supersededFounderMembership`), and a genuinely NEW
- * `OrganizationMembership`/`OrganizationAccessRoleContext` pair is minted
- * for the new founder. The `Organization` value itself is untouched (no
- * lifecycle transition) - reinitialize is a founder-identity reset, not a
- * suspend/reactivate cycle.
+ * Rev202 "independent reset/reinitialize", Rev203 F3/F4: requires the
+ * CALLER's own fresh, current founder-membership evidence
+ * (`currentFounderMembership`) to revoke - never a value this module might
+ * have cached (it never caches one at all). Its identity must match this
+ * organization's own current `founderMembershipId`/tenantId, and it must
+ * still be a coherent ACTIVE record (a caller who already knows it is
+ * revoked has nothing live left here to supersede). Mints a genuinely NEW
+ * founder membership/access-role/baseline-project/resource-binding
+ * (deterministically derived from the new idempotencyKey, never reusing
+ * the old project/binding) - the current organization must be `ACTIVE`
+ * (this IS the "suspend blocking new effects" witness: suspension blocks
+ * this provisioning-layer effect exactly as `resolveOrganizationResourceBindingStatus`
+ * already blocks resource-binding readiness while suspended).
  */
 export function reinitializeControlledOrganization(input: {
   readonly ledger: ControlledOrganizationProvisioningLedger;
   readonly tenantScope: TenantScope;
   readonly organizationId: unknown;
+  readonly currentFounderMembership: OrganizationMembership;
   readonly newFounderMembershipId: unknown;
   readonly newFounderPrincipalRef: unknown;
   readonly supersessionReason: unknown;
   readonly occurredAt: unknown;
   readonly idempotencyKey: unknown;
-}): { readonly ledger: ControlledOrganizationProvisioningLedger; readonly outcome: ControlledOrganizationProvisioningOutcome } {
+}): {
+  readonly ledger: ControlledOrganizationProvisioningLedger;
+  readonly outcome: ControlledOrganizationProvisioningOutcome;
+} {
   const idempotencyKey = requireNonEmptyString(input.idempotencyKey, "idempotencyKey");
   const organizationId = requireNonEmptyString(input.organizationId, "organizationId");
 
@@ -411,8 +475,8 @@ export function reinitializeControlledOrganization(input: {
       existingForKey.type === "REINITIALIZED" &&
       existingForKey.tenantId === input.tenantScope.tenantId &&
       existingForKey.organizationId === organizationId &&
-      existingForKey.snapshot.founderMembership.membershipId === input.newFounderMembershipId &&
-      existingForKey.snapshot.founderMembership.principalRef === input.newFounderPrincipalRef
+      existingForKey.snapshot.founderMembershipId === input.newFounderMembershipId &&
+      existingForKey.snapshot.founderPrincipalRef === input.newFounderPrincipalRef
     ) {
       return { ledger: input.ledger, outcome: { status: "ALREADY_REINITIALIZED", snapshot: existingForKey.snapshot } };
     }
@@ -437,10 +501,18 @@ export function reinitializeControlledOrganization(input: {
       `organization must be ACTIVE to reinitialize (got "${current.organization.state}") - reactivate first`,
     );
   }
+  if (
+    input.currentFounderMembership.membershipId !== current.founderMembershipId ||
+    input.currentFounderMembership.tenantId !== input.tenantScope.tenantId
+  ) {
+    throw new InvalidControlledOrganizationProvisioningTransitionError(
+      "currentFounderMembership does not match this organization's own current founderMembershipId/tenant - fresh, correctly-identified evidence is required, never a cached or substituted value",
+    );
+  }
 
   const occurredAt = requireNonEmptyString(input.occurredAt, "occurredAt");
   const supersededFounderMembership = revokeOrganizationMembership({
-    membership: current.founderMembership,
+    membership: input.currentFounderMembership,
     revokedAt: occurredAt,
     revokedReason: input.supersessionReason,
   });
@@ -455,10 +527,37 @@ export function reinitializeControlledOrganization(input: {
     role: "OWNER",
   });
 
+  const customer = createCustomer({
+    tenantScope: input.tenantScope,
+    customerId: `org-customer:${organizationId}:${idempotencyKey}`,
+    displayName: current.organization.displayName,
+  });
+  const project = createProject({
+    tenantScope: input.tenantScope,
+    customer,
+    projectId: `org-baseline-project:${organizationId}:${idempotencyKey}`,
+    ownerRef: `membership:${newFounderMembership.membershipId}`,
+    state: "active",
+  });
+  const ownership = createProjectOwnershipRef({
+    tenantId: input.tenantScope.tenantId,
+    customerId: customer.customerId,
+    projectId: project.projectId,
+  });
+  const resourceBinding = createOrganizationResourceBinding({
+    organization: current.organization,
+    memberships: [newFounderMembership],
+    project,
+    ownership,
+    boundAt: occurredAt,
+  });
+
   const snapshot: ControlledOrganizationProvisioningSnapshot = {
     organization: current.organization,
-    founderMembership: newFounderMembership,
-    founderAccessRoleContext: newFounderAccessRoleContext,
+    project,
+    resourceBinding,
+    founderMembershipId: newFounderMembership.membershipId,
+    founderPrincipalRef: newFounderMembership.principalRef,
   };
   const event: ReinitializedEvent = {
     type: "REINITIALIZED",
@@ -471,6 +570,51 @@ export function reinitializeControlledOrganization(input: {
   };
   return {
     ledger: { events: [...input.ledger.events, event] },
-    outcome: { status: "REINITIALIZED", snapshot },
+    outcome: {
+      status: "REINITIALIZED",
+      snapshot,
+      mintedFounderMembership: newFounderMembership,
+      mintedFounderAccessRoleContext: newFounderAccessRoleContext,
+    },
   };
+}
+
+/**
+ * Rev203 F2: the genuine, explicit, server-authoritative switch-admission
+ * check (not merely "two files exist independently"). Delegates WHOLESALE
+ * to the already-accepted `resolveOrganizationResourceBindingStatus`
+ * (OS-V0-09, Rev183) - no second admission model is invented. A caller
+ * requesting to switch INTO `organizationId` supplies their own current,
+ * freshly-resolved membership evidence (`currentMemberships`, exactly the
+ * same shape `resolveOrganizationResourceBindingStatus` already consumes
+ * elsewhere); the result is `READY` only when that resolver's own full
+ * gate chain passes, including the exact "is this membership's id
+ * currently in THIS organization's own binding.membershipRefs" check that
+ * makes a stale/foreign (e.g. Organization-A-bound) membership fail closed
+ * against Organization B.
+ */
+export function resolveControlledOrganizationSwitch(input: {
+  readonly ledger: ControlledOrganizationProvisioningLedger;
+  readonly organizationId: unknown;
+  readonly currentMemberships: ReadonlyArray<OrganizationMembership>;
+}): OrganizationResourceBindingStatus {
+  const organizationId = requireNonEmptyString(input.organizationId, "organizationId");
+  const current = projectCurrentControlledOrganizationState(input.ledger, organizationId);
+  if (current === undefined) {
+    throw new InvalidControlledOrganizationProvisioningTransitionError(
+      `organizationId "${organizationId}" has no provisioning history to switch into`,
+    );
+  }
+  return resolveOrganizationResourceBindingStatus({
+    binding: current.resourceBinding,
+    organization: current.organization,
+    currentMemberships: input.currentMemberships,
+    currentServicePrincipals: [],
+    currentConnections: [],
+    currentProject: current.project,
+    currentEffectiveConfigRefs: current.resourceBinding.effectiveConfigRefs,
+    currentEffectivePolicyRefs: current.resourceBinding.effectivePolicyRefs,
+    currentWorkerRouteDecisions: [],
+    currentKnowledgeEvidenceRefs: current.resourceBinding.knowledgeEvidenceRefs,
+  });
 }

@@ -2,13 +2,15 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { TenantScope } from "./tenant-scope.js";
 import type { Organization, OrganizationLifecycleState } from "./organization.js";
+import type { Project } from "./project.js";
 import type { OrganizationMembership, OrganizationMembershipLifecycleState, OrganizationRole } from "./organization-membership.js";
-import type { OrganizationAccessRoleContext, OrganizationAccessRole } from "./organization-access-role.js";
+import type { OrganizationResourceBinding, OrganizationResourceBindingStatus } from "./organization-resource-binding.js";
 import {
   provisionControlledOrganization,
   suspendControlledOrganization,
   reactivateControlledOrganization,
   reinitializeControlledOrganization,
+  resolveControlledOrganizationSwitch,
   projectCurrentControlledOrganizationState,
   EMPTY_CONTROLLED_ORGANIZATION_PROVISIONING_LEDGER,
   type ControlledOrganizationProvisioningLedger,
@@ -39,7 +41,6 @@ const RECOGNIZED_MEMBERSHIP_ROLES: ReadonlySet<string> = new Set<OrganizationRol
   "STUDENT",
   "CLIENT_ASSOCIATE",
 ]);
-const RECOGNIZED_ACCESS_ROLES: ReadonlySet<string> = new Set<OrganizationAccessRole>(["OWNER", "ADMIN", "MEMBER"]);
 const RECOGNIZED_EVENT_TYPES: ReadonlySet<string> = new Set(["PROVISIONED", "SUSPENDED", "REACTIVATED", "REINITIALIZED"]);
 
 function fail(filePath: string, reason: string): never {
@@ -65,6 +66,19 @@ function optionalStr(record: Record<string, unknown>, field: string, filePath: s
   return value as string;
 }
 
+function strArray(record: Record<string, unknown>, field: string, filePath: string): ReadonlyArray<string> {
+  const value = record[field];
+  if (!Array.isArray(value)) {
+    fail(filePath, `${field} must be an array`);
+  }
+  return value.map((entry, index) => {
+    if (typeof entry !== "string" || entry.trim().length === 0) {
+      fail(filePath, `${field}[${index}] must be a non-empty string`);
+    }
+    return entry as string;
+  });
+}
+
 function obj(raw: unknown, field: string, filePath: string): Record<string, unknown> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     fail(filePath, `${field} must be a JSON object`);
@@ -72,7 +86,6 @@ function obj(raw: unknown, field: string, filePath: string): Record<string, unkn
   return raw as Record<string, unknown>;
 }
 
-/** Revalidates structural shape only (every nested value was already business-rule-validated by its own constructor before being persisted; replay re-checks shape/enum coherence against this exact tenant/org, never blind-casts). */
 function validateOrganization(raw: unknown, expectedTenantId: string, field: string, filePath: string): Organization {
   const record = obj(raw, field, filePath);
   const organizationId = str(record, "organizationId", filePath);
@@ -96,6 +109,25 @@ function validateOrganization(raw: unknown, expectedTenantId: string, field: str
     createdAt,
     ...(activatedAt !== undefined ? { activatedAt } : {}),
     ...(suspendedAt !== undefined ? { suspendedAt } : {}),
+  };
+}
+
+function validateProject(raw: unknown, expectedTenantId: string, field: string, filePath: string): Project {
+  const record = obj(raw, field, filePath);
+  const tenantId = str(record, "tenantId", filePath);
+  if (tenantId !== expectedTenantId) {
+    fail(filePath, `${field}.tenantId "${tenantId}" does not match the expected tenant "${expectedTenantId}"`);
+  }
+  const customerId = str(record, "customerId", filePath);
+  const projectId = str(record, "projectId", filePath);
+  const ownerRef = str(record, "ownerRef", filePath);
+  const state = str(record, "state", filePath);
+  return {
+    tenantId: tenantId as TenantScope["tenantId"],
+    customerId: customerId as unknown as Project["customerId"],
+    projectId: projectId as unknown as Project["projectId"],
+    ownerRef,
+    state,
   };
 }
 
@@ -128,28 +160,68 @@ function validateMembership(raw: unknown, expectedTenantId: string, field: strin
   };
 }
 
-function validateAccessRoleContext(
+function validateResourceBinding(
   raw: unknown,
   expectedTenantId: string,
   field: string,
   filePath: string,
-): OrganizationAccessRoleContext {
+): OrganizationResourceBinding {
   const record = obj(raw, field, filePath);
+  const version = record["version"];
+  if (version !== 1) {
+    fail(filePath, `${field}.version must be 1`);
+  }
   const tenantId = str(record, "tenantId", filePath);
   if (tenantId !== expectedTenantId) {
     fail(filePath, `${field}.tenantId "${tenantId}" does not match the expected tenant "${expectedTenantId}"`);
   }
-  const membershipId = str(record, "membershipId", filePath);
-  const principalRef = str(record, "principalRef", filePath);
-  const role = record["role"];
-  if (typeof role !== "string" || !RECOGNIZED_ACCESS_ROLES.has(role)) {
-    fail(filePath, `${field}.role is not a recognized OrganizationAccessRole`);
+  const organizationId = str(record, "organizationId", filePath);
+  const projectRef = str(record, "projectRef", filePath);
+  const rawOwnership = obj(record["ownership"], `${field}.ownership`, filePath);
+  const ownershipTenantId = str(rawOwnership, "tenantId", filePath);
+  if (ownershipTenantId !== expectedTenantId) {
+    fail(filePath, `${field}.ownership.tenantId "${ownershipTenantId}" does not match the expected tenant "${expectedTenantId}"`);
   }
+  const ownershipCustomerId = str(rawOwnership, "customerId", filePath);
+  const ownershipProjectId = str(rawOwnership, "projectId", filePath);
+  const boundAt = str(record, "boundAt", filePath);
+
+  const membershipRefs = strArray(record, "membershipRefs", filePath);
+  const servicePrincipalRefs = strArray(record, "servicePrincipalRefs", filePath);
+  const connectionBindingRefs = strArray(record, "connectionBindingRefs", filePath);
+  const effectiveConfigRefs = strArray(record, "effectiveConfigRefs", filePath);
+  const effectivePolicyRefs = strArray(record, "effectivePolicyRefs", filePath);
+  const workerRouteRefs = strArray(record, "workerRouteRefs", filePath);
+  const knowledgeEvidenceRefs = strArray(record, "knowledgeEvidenceRefs", filePath);
+  const outcomeIdentityRefs = strArray(record, "outcomeIdentityRefs", filePath);
+  const repositoryWorkspaceRefs = strArray(record, "repositoryWorkspaceRefs", filePath);
+  const usageQuotaNamespaceRefs = strArray(record, "usageQuotaNamespaceRefs", filePath);
+  const auditRecoveryRefs = strArray(record, "auditRecoveryRefs", filePath);
+  const admittedCapabilityRefs = strArray(record, "admittedCapabilityRefs", filePath);
+
   return {
+    version: 1,
     tenantId: tenantId as TenantScope["tenantId"],
-    membershipId: membershipId as OrganizationMembership["membershipId"],
-    principalRef,
-    role: role as OrganizationAccessRole,
+    organizationId: organizationId as Organization["organizationId"],
+    membershipRefs: membershipRefs as ReadonlyArray<OrganizationMembership["membershipId"]>,
+    servicePrincipalRefs: servicePrincipalRefs as ReadonlyArray<never>,
+    projectRef: projectRef as unknown as Project["projectId"],
+    ownership: {
+      tenantId: ownershipTenantId as TenantScope["tenantId"],
+      customerId: ownershipCustomerId as unknown as Project["customerId"],
+      projectId: ownershipProjectId as unknown as Project["projectId"],
+    },
+    connectionBindingRefs: connectionBindingRefs as ReadonlyArray<never>,
+    effectiveConfigRefs,
+    effectivePolicyRefs,
+    workerRouteRefs,
+    knowledgeEvidenceRefs,
+    outcomeIdentityRefs,
+    repositoryWorkspaceRefs,
+    usageQuotaNamespaceRefs,
+    auditRecoveryRefs,
+    admittedCapabilityRefs,
+    boundAt,
   };
 }
 
@@ -157,13 +229,10 @@ function validateSnapshot(raw: unknown, expectedTenantId: string, filePath: stri
   const record = obj(raw, "snapshot", filePath);
   return {
     organization: validateOrganization(record["organization"], expectedTenantId, "snapshot.organization", filePath),
-    founderMembership: validateMembership(record["founderMembership"], expectedTenantId, "snapshot.founderMembership", filePath),
-    founderAccessRoleContext: validateAccessRoleContext(
-      record["founderAccessRoleContext"],
-      expectedTenantId,
-      "snapshot.founderAccessRoleContext",
-      filePath,
-    ),
+    project: validateProject(record["project"], expectedTenantId, "snapshot.project", filePath),
+    resourceBinding: validateResourceBinding(record["resourceBinding"], expectedTenantId, "snapshot.resourceBinding", filePath),
+    founderMembershipId: str(record, "founderMembershipId", filePath) as unknown as OrganizationMembership["membershipId"],
+    founderPrincipalRef: str(record, "founderPrincipalRef", filePath),
   };
 }
 
@@ -207,18 +276,15 @@ function validatePersistedEvent(
  * Reference/local durable implementation using only `node:fs`, mirroring
  * `FileDurableQuotaReservationStore`'s own exact pattern: one append-only
  * JSON-lines ledger file per scope - here, scoped per (tenantId,
- * organizationId) pair rather than per budget scope, which is precisely
- * what gives "A<->B switch isolation" (Rev202's required witness) for
- * free: two different organizationIds under the same tenant are two
- * physically separate files, so there is no shared mutable state for one
- * organization's provisioning history to leak into the other's, even under
- * deliberately adversarial idempotencyKey reuse across the two.
- *
+ * organizationId) pair, which is what gives storage-level A<->B isolation.
  * Real single-process atomicity comes from `provision`/`suspend`/
  * `reactivate`/`reinitialize` being fully SYNCHRONOUS methods with no
- * `await` anywhere in their read-decide-write critical section, exactly
- * the same discipline the quota/outcome-job/connector stores already rely
- * on.
+ * `await` anywhere in their read-decide-write critical section.
+ *
+ * `writeLedger` is `protected` (not `private`) specifically so a test
+ * double can override it to inject a deterministic crash point between
+ * pure computation and durable persistence (Rev203 F4's own required
+ * intermediate-failure/restart-resume witness).
  */
 export class FileDurableControlledOrganizationProvisioningStore {
   private readonly baseDir: string;
@@ -257,7 +323,7 @@ export class FileDurableControlledOrganizationProvisioningStore {
     return { events };
   }
 
-  private writeLedger(
+  protected writeLedger(
     tenantId: TenantScope["tenantId"],
     organizationId: string,
     ledger: ControlledOrganizationProvisioningLedger,
@@ -312,6 +378,7 @@ export class FileDurableControlledOrganizationProvisioningStore {
   reinitialize(input: {
     readonly tenantScope: TenantScope;
     readonly organizationId: unknown;
+    readonly currentFounderMembership: OrganizationMembership;
     readonly newFounderMembershipId: unknown;
     readonly newFounderPrincipalRef: unknown;
     readonly supersessionReason: unknown;
@@ -330,5 +397,21 @@ export class FileDurableControlledOrganizationProvisioningStore {
     organizationId: string,
   ): ControlledOrganizationProvisioningSnapshot | undefined {
     return projectCurrentControlledOrganizationState(this.readLedger(tenantScope.tenantId, organizationId), organizationId);
+  }
+
+  /**
+   * Rev203 F2: the real switch-admission check, re-resolved fresh from the
+   * target organization's own durable ledger every call - never cached.
+   */
+  resolveSwitch(
+    tenantScope: TenantScope,
+    organizationId: string,
+    currentMemberships: ReadonlyArray<OrganizationMembership>,
+  ): OrganizationResourceBindingStatus {
+    return resolveControlledOrganizationSwitch({
+      ledger: this.readLedger(tenantScope.tenantId, organizationId),
+      organizationId,
+      currentMemberships,
+    });
   }
 }
