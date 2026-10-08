@@ -187,6 +187,62 @@ export function activateOrganization(input: {
  * be chronologically before `activatedAt`; equal is accepted (immediate
  * suspension).
  */
+/**
+ * OS-V1-01: the reactivation transition explicitly left to V1 by this
+ * file's own original OS-V0-01 doc comment ("No reactivation is
+ * representable here - richer suspend/reactivate... semantics are a V1
+ * concern"). Only `SUSPENDED -> ACTIVE`. Revalidates the FULL pre-existing
+ * `SUSPENDED` record first (mirrors `suspendOrganization`'s own
+ * revalidation of its `ACTIVE` predecessor) - `createdAt <= activatedAt <=
+ * suspendedAt` must all still hold before this transition is even
+ * considered, closing the same forged-record gap Rev126 F1 closed for
+ * `activateOrganization`/`suspendOrganization`. `reactivatedAt` must not be
+ * chronologically before `suspendedAt` (equal accepted, immediate
+ * reactivation).
+ *
+ * The returned `ACTIVE` value has EXACTLY the same shape as any other
+ * coherent `ACTIVE` record (valid `createdAt` + valid `activatedAt` with
+ * `activatedAt >= createdAt`, no `suspendedAt`) - reactivation is treated as
+ * a fresh activation instant (`activatedAt` becomes `reactivatedAt`), not a
+ * parallel third state, so every existing `ACTIVE`-gated check elsewhere in
+ * the repository (e.g. `resolveOrganizationResourceBindingStatus`) needs no
+ * new branch to handle a reactivated organization. This function touches
+ * nothing beyond the `Organization` value itself: it grants no permission,
+ * restores no membership/connection/config, and resurrects no stale
+ * evidence of any kind - `OrganizationMembership`/`ConnectionBinding`/
+ * `OrganizationResourceBinding` currentness remain entirely their own
+ * separate primitives' concern, re-resolved fresh exactly as before.
+ */
+export function reactivateOrganization(input: {
+  organization: Organization;
+  reactivatedAt: unknown;
+}): Organization {
+  if (input.organization.state !== "SUSPENDED") {
+    throw new InvalidOrganizationTransitionError(
+      `organization must be SUSPENDED to reactivate (got "${input.organization.state}")`,
+    );
+  }
+  const createdAt = requireValidTimestamp(input.organization.createdAt, "organization.createdAt");
+  const activatedAt = requireValidTimestamp(input.organization.activatedAt, "organization.activatedAt");
+  if (activatedAt.ms < createdAt.ms) {
+    throw new InvalidOrganizationTransitionError("organization.activatedAt must not be before organization.createdAt");
+  }
+  const suspendedAt = requireValidTimestamp(input.organization.suspendedAt, "organization.suspendedAt");
+  if (suspendedAt.ms < activatedAt.ms) {
+    throw new InvalidOrganizationTransitionError("organization.suspendedAt must not be before organization.activatedAt");
+  }
+  const reactivatedAt = requireValidTimestamp(input.reactivatedAt, "reactivatedAt");
+  if (reactivatedAt.ms < suspendedAt.ms) {
+    throw new InvalidOrganizationTransitionError("reactivatedAt must not be before organization.suspendedAt");
+  }
+  const { suspendedAt: _droppedSuspendedAt, ...reactivatedBase } = input.organization;
+  return {
+    ...reactivatedBase,
+    state: "ACTIVE",
+    activatedAt: reactivatedAt.raw,
+  };
+}
+
 export function suspendOrganization(input: {
   organization: Organization;
   suspendedAt: unknown;
