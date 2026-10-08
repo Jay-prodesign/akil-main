@@ -3,8 +3,9 @@ import { join } from "node:path";
 import type { TenantScope } from "./tenant-scope.js";
 import type { Organization, OrganizationLifecycleState } from "./organization.js";
 import type { Project } from "./project.js";
-import type { OrganizationMembership, OrganizationMembershipLifecycleState, OrganizationRole } from "./organization-membership.js";
+import type { OrganizationMembership, OrganizationMembershipLifecycleState, OrganizationRole, AssignmentReference } from "./organization-membership.js";
 import type { OrganizationResourceBinding, OrganizationResourceBindingStatus } from "./organization-resource-binding.js";
+import type { AuthorityContext } from "./authority.js";
 import {
   provisionControlledOrganization,
   suspendControlledOrganization,
@@ -400,18 +401,28 @@ export class FileDurableControlledOrganizationProvisioningStore {
   }
 
   /**
-   * Rev203 F2: the real switch-admission check, re-resolved fresh from the
-   * target organization's own durable ledger every call - never cached.
+   * Rev203 F2 / Rev204 F2-R1: the real switch-admission check, re-resolved
+   * fresh from the target organization's own durable ledger every call -
+   * never cached. Binds `currentMembership` to `currentPrincipalRef` via
+   * `resolveEffectiveOrganizationAccess` before even reaching the
+   * organization-currentness/binding gate - see
+   * `resolveControlledOrganizationSwitch`'s own doc comment.
    */
-  resolveSwitch(
-    tenantScope: TenantScope,
-    organizationId: string,
-    currentMemberships: ReadonlyArray<OrganizationMembership>,
-  ): OrganizationResourceBindingStatus {
+  resolveSwitch(input: {
+    readonly tenantScope: TenantScope;
+    readonly organizationId: string;
+    readonly currentMembership: OrganizationMembership;
+    readonly currentPrincipalRef: unknown;
+    readonly authority: AuthorityContext;
+    readonly assignments?: ReadonlyArray<AssignmentReference>;
+  }): OrganizationResourceBindingStatus {
     return resolveControlledOrganizationSwitch({
-      ledger: this.readLedger(tenantScope.tenantId, organizationId),
-      organizationId,
-      currentMemberships,
+      ledger: this.readLedger(input.tenantScope.tenantId, input.organizationId),
+      organizationId: input.organizationId,
+      currentMembership: input.currentMembership,
+      currentPrincipalRef: input.currentPrincipalRef,
+      authority: input.authority,
+      ...(input.assignments !== undefined ? { assignments: input.assignments } : {}),
     });
   }
 }

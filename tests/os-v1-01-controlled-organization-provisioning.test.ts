@@ -4,7 +4,12 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTenantScope, type TenantScope } from "../src/domain/tenant-scope.js";
-import { createOrganizationMembership, revokeOrganizationMembership } from "../src/domain/organization-membership.js";
+import {
+  createOrganizationMembership,
+  revokeOrganizationMembership,
+  createAssignmentReference,
+} from "../src/domain/organization-membership.js";
+import { createAuthorityContext } from "../src/domain/authority.js";
 import {
   provisionControlledOrganization,
   suspendControlledOrganization,
@@ -37,6 +42,16 @@ const OTHER_TENANT = createTenantScope("t-os-v1-01-other");
 
 function newStoreDir(label: string): string {
   return mkdtempSync(join(tmpdir(), `os-v1-01-${label}-`));
+}
+
+/** Rev204 F2-R1: a minimum READ-only authority context - the switch check's own "minimum existing READ authority" requirement. */
+function readAuthority() {
+  return createAuthorityContext({ tenantScope: TENANT, permissions: ["READ"], canPerformProtectedActions: false });
+}
+
+/** An authority context deliberately lacking READ, for the "insufficient authority" denial witness. */
+function noPermissionsAuthority() {
+  return createAuthorityContext({ tenantScope: TENANT, permissions: [], canPerformProtectedActions: false });
 }
 
 /** Rev203 F4: injects a deterministic crash point between pure computation and durable persistence, exactly once, then allows the retry through - exercising `writeLedger`'s `protected` seam. */
@@ -231,10 +246,18 @@ test("W5 (reactivation without stale membership resurrection): the snapshot stru
   assert.equal(reactivated.snapshot.founderMembershipId, revokedMembership.membershipId);
 
   // The genuine currentness check, re-resolved fresh with the CALLER's own
-  // current (revoked) membership evidence, correctly denies.
-  const switchResult = store.resolveSwitch(TENANT, "org-w5", [revokedMembership]);
+  // current (revoked) membership evidence, correctly denies - now at the
+  // Rev204 F2-R1 access-resolution layer itself (membership currentness is
+  // checked before principalRef/assignment), never reaching the binding gate.
+  const switchResult = store.resolveSwitch({
+    tenantScope: TENANT,
+    organizationId: "org-w5",
+    currentMembership: revokedMembership,
+    currentPrincipalRef: revokedMembership.principalRef,
+    authority: readAuthority(),
+  });
   assert.equal(switchResult.state, "BLOCKED");
-  assert.equal(switchResult.unresolvedGates[0], "NO_ACTIVE_BOUND_MEMBERSHIP");
+  assert.equal(switchResult.unresolvedGates[0], "EFFECTIVE_ACCESS_DENIED");
 });
 
 test("W6 (A<->B switch isolation - storage): two controlled Organizations under the same tenant, provisioned with the SAME idempotencyKey (adversarial reuse), resolve independently with zero cross-contamination", () => {
@@ -277,39 +300,246 @@ test("W6 (A<->B switch isolation - storage): two controlled Organizations under 
   assert.notEqual(currentA?.organization.organizationId, currentB?.organization.organizationId);
 });
 
-test("W6b (Rev203 F2 - A<->B switch admission is server-authoritative, not merely storage isolation): the real founder of B is granted switch access into B; the SAME tenant's A-bound founder membership fails closed against B", () => {
-  const store = new FileDurableControlledOrganizationProvisioningStore(newStoreDir("w6b"));
-  const resultA = store.provision({
+test("W6b-1 (Rev204 F2-R1 - valid B founder: correct membership, correct principal, current project assignment, sufficient authority => READY)", () => {
+  const store = new FileDurableControlledOrganizationProvisioningStore(newStoreDir("w6b1"));
+  const resultB = store.provision({
     tenantScope: TENANT,
-    organizationId: "org-w6b-a",
-    displayName: "Org W6b-A",
-    founderMembershipId: "founder-w6b-a",
-    founderPrincipalRef: "principal-w6b-a",
-    idempotencyKey: "provision-w6b-a",
+    organizationId: "org-w6b1-b",
+    displayName: "Org W6b1-B",
+    founderMembershipId: "founder-w6b1-b",
+    founderPrincipalRef: "principal-w6b1-b",
+    idempotencyKey: "provision-w6b1-b",
+    occurredAt: "2026-10-08T00:00:00.000Z",
+  });
+  const membershipB = resultB.mintedFounderMembership!;
+  const assignmentB = createAssignmentReference({
+    assignmentId: "assignment-w6b1-b",
+    membership: membershipB,
+    customerId: resultB.snapshot.project.customerId,
+    projectId: resultB.snapshot.project.projectId,
+  });
+
+  const validSwitch = store.resolveSwitch({
+    tenantScope: TENANT,
+    organizationId: "org-w6b1-b",
+    currentMembership: membershipB,
+    currentPrincipalRef: membershipB.principalRef,
+    authority: readAuthority(),
+    assignments: [assignmentB],
+  });
+  assert.equal(validSwitch.state, "READY");
+  assert.equal(validSwitch.nextRequiredActor, "NONE");
+});
+
+test("W6b-2 (Rev204 F2-R1 - A's own principal presenting B's real, correctly-bound membership OBJECT ('stolen membership') is denied at the access layer, never reaching the binding gate)", () => {
+  const store = new FileDurableControlledOrganizationProvisioningStore(newStoreDir("w6b2"));
+  store.provision({
+    tenantScope: TENANT,
+    organizationId: "org-w6b2-a",
+    displayName: "Org W6b2-A",
+    founderMembershipId: "founder-w6b2-a",
+    founderPrincipalRef: "principal-w6b2-a",
+    idempotencyKey: "provision-w6b2-a",
     occurredAt: "2026-10-08T00:00:00.000Z",
   });
   const resultB = store.provision({
     tenantScope: TENANT,
-    organizationId: "org-w6b-b",
-    displayName: "Org W6b-B",
-    founderMembershipId: "founder-w6b-b",
-    founderPrincipalRef: "principal-w6b-b",
-    idempotencyKey: "provision-w6b-b",
+    organizationId: "org-w6b2-b",
+    displayName: "Org W6b2-B",
+    founderMembershipId: "founder-w6b2-b",
+    founderPrincipalRef: "principal-w6b2-b",
+    idempotencyKey: "provision-w6b2-b",
     occurredAt: "2026-10-08T00:00:00.000Z",
   });
+  const membershipB = resultB.mintedFounderMembership!;
+  const assignmentB = createAssignmentReference({
+    assignmentId: "assignment-w6b2-b",
+    membership: membershipB,
+    customerId: resultB.snapshot.project.customerId,
+    projectId: resultB.snapshot.project.projectId,
+  });
 
-  const validSwitch = store.resolveSwitch(TENANT, "org-w6b-b", [resultB.mintedFounderMembership!]);
-  assert.equal(validSwitch.state, "READY");
-  assert.equal(validSwitch.nextRequiredActor, "NONE");
-
-  // Org A's own real, currently-ACTIVE, same-tenant founder membership is
-  // never bound to B's own resourceBinding.membershipRefs - fails closed.
-  const foreignSwitch = store.resolveSwitch(TENANT, "org-w6b-b", [resultA.mintedFounderMembership!]);
-  assert.equal(foreignSwitch.state, "BLOCKED");
-  assert.equal(foreignSwitch.unresolvedGates[0], "NO_ACTIVE_BOUND_MEMBERSHIP");
+  // The caller asserts A's own principal identity, but presents B's real,
+  // currently-ACTIVE, correctly-bound membership OBJECT (e.g. leaked/stolen
+  // in transit). The exact membership.principalRef === currentPrincipalRef
+  // equality in resolveEffectiveOrganizationAccess catches this - a
+  // binding-isolation check alone (W6) never would, since the membership
+  // object itself really is bound to B.
+  const stolenSwitch = store.resolveSwitch({
+    tenantScope: TENANT,
+    organizationId: "org-w6b2-b",
+    currentMembership: membershipB,
+    currentPrincipalRef: "principal-w6b2-a",
+    authority: readAuthority(),
+    assignments: [assignmentB],
+  });
+  assert.equal(stolenSwitch.state, "BLOCKED");
+  assert.equal(stolenSwitch.unresolvedGates[0], "EFFECTIVE_ACCESS_DENIED");
+  assert.equal(
+    stolenSwitch.nextRequiredAction?.reason,
+    "membership belongs to a different principal than the current caller identity",
+  );
 });
 
-test("W6c (switch admission denies a SUSPENDED target organization): resolveControlledOrganizationSwitch reuses resolveOrganizationResourceBindingStatus's own ORGANIZATION_SUSPENDED gate", () => {
+test("W6b-3 (Rev204 F2-R1 - same real-world principal holding SEPARATE memberships in A and B: the A-bound membership still fails closed against B even with a matching principal; only the B-bound membership, with B's own current assignment, succeeds)", () => {
+  const store = new FileDurableControlledOrganizationProvisioningStore(newStoreDir("w6b3"));
+  const sharedPrincipal = "principal-w6b3-shared";
+  const resultA = store.provision({
+    tenantScope: TENANT,
+    organizationId: "org-w6b3-a",
+    displayName: "Org W6b3-A",
+    founderMembershipId: "founder-w6b3-a",
+    founderPrincipalRef: sharedPrincipal,
+    idempotencyKey: "provision-w6b3-a",
+    occurredAt: "2026-10-08T00:00:00.000Z",
+  });
+  const resultB = store.provision({
+    tenantScope: TENANT,
+    organizationId: "org-w6b3-b",
+    displayName: "Org W6b3-B",
+    founderMembershipId: "founder-w6b3-b",
+    founderPrincipalRef: sharedPrincipal,
+    idempotencyKey: "provision-w6b3-b",
+    occurredAt: "2026-10-08T00:00:00.000Z",
+  });
+  const membershipA = resultA.mintedFounderMembership!;
+  const membershipB = resultB.mintedFounderMembership!;
+
+  const assignmentAAgainstB = createAssignmentReference({
+    assignmentId: "assignment-w6b3-a-against-b",
+    membership: membershipA,
+    customerId: resultB.snapshot.project.customerId,
+    projectId: resultB.snapshot.project.projectId,
+  });
+  const aAgainstB = store.resolveSwitch({
+    tenantScope: TENANT,
+    organizationId: "org-w6b3-b",
+    currentMembership: membershipA,
+    currentPrincipalRef: sharedPrincipal,
+    authority: readAuthority(),
+    assignments: [assignmentAAgainstB],
+  });
+  assert.equal(aAgainstB.state, "BLOCKED");
+  assert.equal(aAgainstB.unresolvedGates[0], "NO_ACTIVE_BOUND_MEMBERSHIP");
+
+  const assignmentB = createAssignmentReference({
+    assignmentId: "assignment-w6b3-b",
+    membership: membershipB,
+    customerId: resultB.snapshot.project.customerId,
+    projectId: resultB.snapshot.project.projectId,
+  });
+  const bAgainstB = store.resolveSwitch({
+    tenantScope: TENANT,
+    organizationId: "org-w6b3-b",
+    currentMembership: membershipB,
+    currentPrincipalRef: sharedPrincipal,
+    authority: readAuthority(),
+    assignments: [assignmentB],
+  });
+  assert.equal(bAgainstB.state, "READY");
+});
+
+test("W6b-4 (Rev204 F2-R1 - a revoked B founder membership is denied at the access layer, never reaching the binding gate)", () => {
+  const store = new FileDurableControlledOrganizationProvisioningStore(newStoreDir("w6b4"));
+  const resultB = store.provision({
+    tenantScope: TENANT,
+    organizationId: "org-w6b4-b",
+    displayName: "Org W6b4-B",
+    founderMembershipId: "founder-w6b4-b",
+    founderPrincipalRef: "principal-w6b4-b",
+    idempotencyKey: "provision-w6b4-b",
+    occurredAt: "2026-10-08T00:00:00.000Z",
+  });
+  const revokedB = revokeOrganizationMembership({
+    membership: resultB.mintedFounderMembership!,
+    revokedAt: "2026-10-08T01:00:00.000Z",
+    revokedReason: "founder offboarded",
+  });
+  const assignmentB = createAssignmentReference({
+    assignmentId: "assignment-w6b4-b",
+    membership: revokedB,
+    customerId: resultB.snapshot.project.customerId,
+    projectId: resultB.snapshot.project.projectId,
+  });
+  const revokedSwitch = store.resolveSwitch({
+    tenantScope: TENANT,
+    organizationId: "org-w6b4-b",
+    currentMembership: revokedB,
+    currentPrincipalRef: revokedB.principalRef,
+    authority: readAuthority(),
+    assignments: [assignmentB],
+  });
+  assert.equal(revokedSwitch.state, "BLOCKED");
+  assert.equal(revokedSwitch.unresolvedGates[0], "EFFECTIVE_ACCESS_DENIED");
+  assert.equal(
+    revokedSwitch.nextRequiredAction?.reason,
+    "membership is not an active, coherent membership record",
+  );
+});
+
+test("W6b-5 (Rev204 F2-R1 - a valid, correctly-bound, correct-principal B membership with NO current project assignment evidence is denied at the access layer)", () => {
+  const store = new FileDurableControlledOrganizationProvisioningStore(newStoreDir("w6b5"));
+  const resultB = store.provision({
+    tenantScope: TENANT,
+    organizationId: "org-w6b5-b",
+    displayName: "Org W6b5-B",
+    founderMembershipId: "founder-w6b5-b",
+    founderPrincipalRef: "principal-w6b5-b",
+    idempotencyKey: "provision-w6b5-b",
+    occurredAt: "2026-10-08T00:00:00.000Z",
+  });
+  const membershipB = resultB.mintedFounderMembership!;
+
+  // No assignments supplied at all - resolveAssignmentStatus defaults an
+  // omitted/empty evidence list to UNASSIGNED, failing closed exactly like
+  // a missing membership does.
+  const staleSwitch = store.resolveSwitch({
+    tenantScope: TENANT,
+    organizationId: "org-w6b5-b",
+    currentMembership: membershipB,
+    currentPrincipalRef: membershipB.principalRef,
+    authority: readAuthority(),
+  });
+  assert.equal(staleSwitch.state, "BLOCKED");
+  assert.equal(staleSwitch.unresolvedGates[0], "EFFECTIVE_ACCESS_DENIED");
+  assert.equal(
+    staleSwitch.nextRequiredAction?.reason,
+    "no exact assignment evidence exists for the current membership and project scope",
+  );
+});
+
+test("W6b-6 (Rev204 F2-R1 - a valid, correctly-bound, correctly-assigned B founder WITHOUT READ authority is denied as insufficient authority, a distinct gate from the access-layer denial)", () => {
+  const store = new FileDurableControlledOrganizationProvisioningStore(newStoreDir("w6b6"));
+  const resultB = store.provision({
+    tenantScope: TENANT,
+    organizationId: "org-w6b6-b",
+    displayName: "Org W6b6-B",
+    founderMembershipId: "founder-w6b6-b",
+    founderPrincipalRef: "principal-w6b6-b",
+    idempotencyKey: "provision-w6b6-b",
+    occurredAt: "2026-10-08T00:00:00.000Z",
+  });
+  const membershipB = resultB.mintedFounderMembership!;
+  const assignmentB = createAssignmentReference({
+    assignmentId: "assignment-w6b6-b",
+    membership: membershipB,
+    customerId: resultB.snapshot.project.customerId,
+    projectId: resultB.snapshot.project.projectId,
+  });
+
+  const insufficientSwitch = store.resolveSwitch({
+    tenantScope: TENANT,
+    organizationId: "org-w6b6-b",
+    currentMembership: membershipB,
+    currentPrincipalRef: membershipB.principalRef,
+    authority: noPermissionsAuthority(),
+    assignments: [assignmentB],
+  });
+  assert.equal(insufficientSwitch.state, "BLOCKED");
+  assert.equal(insufficientSwitch.unresolvedGates[0], "INSUFFICIENT_AUTHORITY");
+});
+
+test("W6c (switch admission denies a SUSPENDED target organization): resolveControlledOrganizationSwitch reuses resolveOrganizationResourceBindingStatus's own ORGANIZATION_SUSPENDED gate - reached only AFTER the caller passes the Rev204 F2-R1 access-layer pre-gate", () => {
   const store = new FileDurableControlledOrganizationProvisioningStore(newStoreDir("w6c"));
   const provisioned = store.provision({
     tenantScope: TENANT,
@@ -320,13 +550,27 @@ test("W6c (switch admission denies a SUSPENDED target organization): resolveCont
     idempotencyKey: "provision-w6c",
     occurredAt: "2026-10-08T00:00:00.000Z",
   });
+  const membership = provisioned.mintedFounderMembership!;
+  const assignment = createAssignmentReference({
+    assignmentId: "assignment-w6c",
+    membership,
+    customerId: provisioned.snapshot.project.customerId,
+    projectId: provisioned.snapshot.project.projectId,
+  });
   store.suspend({
     tenantScope: TENANT,
     organizationId: "org-w6c",
     suspendedAt: "2026-10-08T01:00:00.000Z",
     idempotencyKey: "suspend-w6c",
   });
-  const result = store.resolveSwitch(TENANT, "org-w6c", [provisioned.mintedFounderMembership!]);
+  const result = store.resolveSwitch({
+    tenantScope: TENANT,
+    organizationId: "org-w6c",
+    currentMembership: membership,
+    currentPrincipalRef: membership.principalRef,
+    authority: readAuthority(),
+    assignments: [assignment],
+  });
   assert.equal(result.state, "BLOCKED");
   assert.equal(result.unresolvedGates[0], "ORGANIZATION_SUSPENDED");
 });
@@ -505,12 +749,20 @@ test("W9 (pure-function conflicting-content and not-found paths, no durable stor
     (error: unknown) => error instanceof InvalidControlledOrganizationProvisioningTransitionError,
   );
 
+  const throwawayMembership = createOrganizationMembership({
+    membershipId: "throwaway-w9",
+    tenantScope: TENANT,
+    principalRef: "throwaway-principal-w9",
+    role: "STAFF",
+  });
   assert.throws(
     () =>
       resolveControlledOrganizationSwitch({
         ledger: EMPTY_CONTROLLED_ORGANIZATION_PROVISIONING_LEDGER,
         organizationId: "org-never-provisioned-w9",
-        currentMemberships: [],
+        currentMembership: throwawayMembership,
+        currentPrincipalRef: "throwaway-principal-w9",
+        authority: readAuthority(),
       }),
     (error: unknown) => error instanceof InvalidControlledOrganizationProvisioningTransitionError,
   );

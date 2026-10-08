@@ -10,6 +10,7 @@ import {
   createOrganizationMembership,
   revokeOrganizationMembership,
   type OrganizationMembership,
+  type AssignmentReference,
 } from "./organization-membership.js";
 import {
   createOrganizationAccessRoleContext,
@@ -18,6 +19,8 @@ import {
 import { createCustomer, type Customer } from "./customer.js";
 import { createProject, type Project } from "./project.js";
 import { createProjectOwnershipRef, type ProjectOwnershipRef } from "./project-ownership.js";
+import { resolveEffectiveOrganizationAccess } from "./effective-organization-access.js";
+import type { AuthorityContext } from "./authority.js";
 import {
   createOrganizationResourceBinding,
   resolveOrganizationResourceBindingStatus,
@@ -67,15 +70,21 @@ export class ConflictingControlledOrganizationProvisioningReplayError extends Er
  * categories - an honest "not currently admitted" posture, not a fabricated
  * placeholder, per that module's own established discipline.
  *
- * **F2** - `resolveControlledOrganizationSwitch` is the new, explicit,
- * server-authoritative switch-admission check: it delegates WHOLESALE to
- * `resolveOrganizationResourceBindingStatus` (OS-V0-09, Rev183), which
- * already proves "is this exact membership currently, coherently, tenant-
- * correctly bound to THIS organization's own binding.membershipRefs" - the
- * precise check that makes a stale/foreign A-bound membership fail closed
- * against organization B (its id is simply never in B's own membershipRefs).
- * Per-organization ledger-file scoping still gives storage isolation; this
- * is the separate, now-present, admission-authority layer on top.
+ * **F2 / Rev204 F2-R1** - `resolveControlledOrganizationSwitch` is the
+ * explicit, server-authoritative switch-admission check. It FIRST runs
+ * `resolveEffectiveOrganizationAccess` (OS-V0-02) to bind the supplied
+ * membership to the CALLER's own asserted `currentPrincipalRef` (closing
+ * Rev204's own "a caller could substitute any valid ACTIVE B-bound
+ * membership object" gap - possessing a valid membership object is not
+ * enough; it must belong to the identity making the request) and to
+ * confirm current project assignment/READ authority; only once THAT
+ * passes does it delegate to `resolveOrganizationResourceBindingStatus`
+ * (OS-V0-09, Rev183), which proves "is this exact membership currently,
+ * coherently, tenant-correctly bound to THIS organization's own
+ * binding.membershipRefs" - the check that makes a stale/foreign A-bound
+ * membership fail closed against organization B. Per-organization
+ * ledger-file scoping still gives storage isolation; these two delegated
+ * checks together are the admission-authority layer on top.
  *
  * **F3** - the persisted snapshot NEVER stores a founder `OrganizationMembership`/
  * `OrganizationAccessRoleContext` object at all - only the opaque
@@ -580,23 +589,36 @@ export function reinitializeControlledOrganization(input: {
 }
 
 /**
- * Rev203 F2: the genuine, explicit, server-authoritative switch-admission
- * check (not merely "two files exist independently"). Delegates WHOLESALE
- * to the already-accepted `resolveOrganizationResourceBindingStatus`
- * (OS-V0-09, Rev183) - no second admission model is invented. A caller
- * requesting to switch INTO `organizationId` supplies their own current,
- * freshly-resolved membership evidence (`currentMemberships`, exactly the
- * same shape `resolveOrganizationResourceBindingStatus` already consumes
- * elsewhere); the result is `READY` only when that resolver's own full
- * gate chain passes, including the exact "is this membership's id
- * currently in THIS organization's own binding.membershipRefs" check that
- * makes a stale/foreign (e.g. Organization-A-bound) membership fail closed
- * against Organization B.
+ * Rev203 F2 / Rev204 F2-R1: the genuine, explicit, server-authoritative
+ * switch-admission check (not merely "two files exist independently," and
+ * not merely "a plausible ACTIVE B-bound membership object was supplied").
+ *
+ * Rev204 F2-R1 found that the Rev203 version proved only "is this
+ * membership ACTIVE and bound to B" - it never bound that membership to
+ * the CALLER's own current identity, so a caller could substitute ANY
+ * valid ACTIVE B-bound membership object (e.g. one stolen/observed from
+ * another session) and be granted. Fixed by running the already-accepted
+ * `resolveEffectiveOrganizationAccess` (OS-V0-02) FIRST: it is the one
+ * existing primitive that proves `currentMembership.principalRef` exactly
+ * equals the caller's own asserted `currentPrincipalRef` (Rev129's own
+ * same-tenant-membership-substitution closure), that the membership is
+ * currently ACTIVE, that tenant/project correlation holds, and - when
+ * `assignments` evidence is supplied - that the membership is currently
+ * assigned to the organization's own baseline project. A `DENIED` result,
+ * or a `GRANTED` one without `READ` in `authority.permissions`, fails
+ * closed here - `resolveOrganizationResourceBindingStatus`'s own
+ * membershipRefs/organization-currentness gate chain (OS-V0-09, Rev183)
+ * is reached, and only reached, once both checks pass. No second IAM
+ * model is invented - every check is delegated to an already-accepted
+ * owner.
  */
 export function resolveControlledOrganizationSwitch(input: {
   readonly ledger: ControlledOrganizationProvisioningLedger;
   readonly organizationId: unknown;
-  readonly currentMemberships: ReadonlyArray<OrganizationMembership>;
+  readonly currentMembership: OrganizationMembership;
+  readonly currentPrincipalRef: unknown;
+  readonly authority: AuthorityContext;
+  readonly assignments?: ReadonlyArray<AssignmentReference>;
 }): OrganizationResourceBindingStatus {
   const organizationId = requireNonEmptyString(input.organizationId, "organizationId");
   const current = projectCurrentControlledOrganizationState(input.ledger, organizationId);
@@ -605,10 +627,48 @@ export function resolveControlledOrganizationSwitch(input: {
       `organizationId "${organizationId}" has no provisioning history to switch into`,
     );
   }
+
+  const currentPrincipalRef = typeof input.currentPrincipalRef === "string" ? input.currentPrincipalRef : "";
+  const accessResolution = resolveEffectiveOrganizationAccess({
+    organization: current.organization,
+    membership: input.currentMembership,
+    currentPrincipalRef,
+    authority: input.authority,
+    project: current.project,
+    assignments: input.assignments ?? [],
+  });
+
+  if (accessResolution.decision === "DENIED") {
+    return {
+      tenantId: current.organization.tenantId,
+      organizationId: current.organization.organizationId,
+      state: "BLOCKED",
+      nextRequiredActor: "HUMAN_REVIEW",
+      nextRequiredAction: {
+        code: "EFFECTIVE_ACCESS_DENIED",
+        reason: accessResolution.reasons[0] ?? "effective access denied",
+      },
+      unresolvedGates: ["EFFECTIVE_ACCESS_DENIED"],
+    };
+  }
+  if (!accessResolution.permissions.has("READ")) {
+    return {
+      tenantId: current.organization.tenantId,
+      organizationId: current.organization.organizationId,
+      state: "BLOCKED",
+      nextRequiredActor: "HUMAN_REVIEW",
+      nextRequiredAction: {
+        code: "INSUFFICIENT_AUTHORITY",
+        reason: "READ authority is required to switch into this organization",
+      },
+      unresolvedGates: ["INSUFFICIENT_AUTHORITY"],
+    };
+  }
+
   return resolveOrganizationResourceBindingStatus({
     binding: current.resourceBinding,
     organization: current.organization,
-    currentMemberships: input.currentMemberships,
+    currentMemberships: [input.currentMembership],
     currentServicePrincipals: [],
     currentConnections: [],
     currentProject: current.project,
