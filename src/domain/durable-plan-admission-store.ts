@@ -22,6 +22,126 @@ export class InvalidPlanAdmissionAnswerError extends Error {
   }
 }
 
+export class CorruptedPlanAdmissionEventError extends Error {
+  constructor(reason: string) {
+    super(`Corrupted persisted PlanAdmissionEvent: ${reason}`);
+    this.name = "CorruptedPlanAdmissionEventError";
+  }
+}
+
+const RECOGNIZED_ADMISSION_STATUSES: ReadonlySet<string> = new Set(["ADMITTED", "BLOCKED", "WAITING"]);
+
+function requireNonEmptyStringField(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0 || value.trim() !== value) {
+    throw new CorruptedPlanAdmissionEventError(
+      `${field} must be a non-empty string with no leading/trailing whitespace, got: ${JSON.stringify(value)}`,
+    );
+  }
+  return value;
+}
+
+function requirePositiveIntegerField(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new CorruptedPlanAdmissionEventError(
+      `${field} must be a positive integer, got: ${JSON.stringify(value)}`,
+    );
+  }
+  return value;
+}
+
+/**
+ * OS-V0-03 Phase A: persisted plan-admission event JSON is untrusted replay
+ * input, exactly like every other durable store in this repository that
+ * already revalidates on read (`validatePersistedConnectorConnection`,
+ * `validatePersistedOutcomeJobRow`). Before this correction,
+ * `FileDurablePlanAdmissionStore.getEvents` blindly `JSON.parse`-cast every
+ * line as `PlanAdmissionEvent` - since `plan-admission-run-state.ts`'s pure
+ * reducer initializes a run's `tenantId`/`customerId`/`projectId`/`planId`
+ * from the FIRST event it is ever folded against (there is no prior state to
+ * compare a first event to), a corrupted or forged foreign-scoped first
+ * event placed in the requested tuple's own file could construct a foreign
+ * `PlanAdmissionRunState` under that tuple's identity. This validator closes
+ * that gap at the store boundary, before any event ever reaches the reducer:
+ * every persisted event's own identity fields must exactly equal the tuple
+ * `getEvents` was actually asked for, and (for `EVALUATION_RECORDED`) the
+ * nested `PlanAdmissionResult`'s identity/version must exactly equal the
+ * event envelope it is nested inside. Every failure throws
+ * `CorruptedPlanAdmissionEventError` (fail-closed) rather than silently
+ * dropping or coercing a bad record.
+ */
+function validatePersistedPlanAdmissionEvent(
+  raw: unknown,
+  expected: {
+    tenantId: TenantScope["tenantId"];
+    customerId: Customer["customerId"];
+    projectId: Project["projectId"];
+    planId: ProjectPlanVersion["planId"];
+  },
+): PlanAdmissionEvent {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new CorruptedPlanAdmissionEventError("persisted event must be a JSON object, not an array or primitive");
+  }
+  const candidate = raw as Record<string, unknown>;
+  if (candidate.type !== "EVALUATION_RECORDED" && candidate.type !== "ANSWER_RECORDED") {
+    throw new CorruptedPlanAdmissionEventError(
+      `unrecognized persisted event type: ${JSON.stringify(candidate.type)}`,
+    );
+  }
+
+  requireNonEmptyStringField(candidate.eventId, "eventId");
+  const tenantId = requireNonEmptyStringField(candidate.tenantId, "tenantId");
+  const customerId = requireNonEmptyStringField(candidate.customerId, "customerId");
+  const projectId = requireNonEmptyStringField(candidate.projectId, "projectId");
+  const planId = requireNonEmptyStringField(candidate.planId, "planId");
+  const planVersion = requirePositiveIntegerField(candidate.planVersion, "planVersion");
+  requireNonEmptyStringField(candidate.recordedAt, "recordedAt");
+
+  const envelopeScopeMismatch =
+    tenantId !== expected.tenantId ||
+    customerId !== expected.customerId ||
+    projectId !== expected.projectId ||
+    planId !== expected.planId;
+  if (envelopeScopeMismatch) {
+    throw new CorruptedPlanAdmissionEventError(
+      `persisted event tenant/customer/project/plan ("${tenantId}"/"${customerId}"/"${projectId}"/"${planId}") does not match the requested scope ("${expected.tenantId}"/"${expected.customerId}"/"${expected.projectId}"/"${expected.planId}")`,
+    );
+  }
+
+  if (candidate.type === "EVALUATION_RECORDED") {
+    const rawResult = candidate.result;
+    if (typeof rawResult !== "object" || rawResult === null || Array.isArray(rawResult)) {
+      throw new CorruptedPlanAdmissionEventError("EVALUATION_RECORDED.result must be a JSON object");
+    }
+    const result = rawResult as Record<string, unknown>;
+    const resultTenantId = requireNonEmptyStringField(result.tenantId, "result.tenantId");
+    const resultCustomerId = requireNonEmptyStringField(result.customerId, "result.customerId");
+    const resultProjectId = requireNonEmptyStringField(result.projectId, "result.projectId");
+    const resultPlanId = requireNonEmptyStringField(result.planId, "result.planId");
+    const resultPlanVersion = requirePositiveIntegerField(result.planVersion, "result.planVersion");
+    const nestedResultMismatch =
+      resultTenantId !== tenantId ||
+      resultCustomerId !== customerId ||
+      resultProjectId !== projectId ||
+      resultPlanId !== planId ||
+      resultPlanVersion !== planVersion;
+    if (nestedResultMismatch) {
+      throw new CorruptedPlanAdmissionEventError(
+        "EVALUATION_RECORDED.result tenant/customer/project/plan/version does not exactly match its own event envelope",
+      );
+    }
+    if (typeof result.status !== "string" || !RECOGNIZED_ADMISSION_STATUSES.has(result.status)) {
+      throw new CorruptedPlanAdmissionEventError(
+        `EVALUATION_RECORDED.result.status is not a recognized AdmissionStatus: ${JSON.stringify(result.status)}`,
+      );
+    }
+    return candidate as unknown as PlanAdmissionEvent;
+  }
+
+  // ANSWER_RECORDED
+  requireNonEmptyStringField(candidate.answeredEntity, "answeredEntity");
+  return candidate as unknown as PlanAdmissionEvent;
+}
+
 /**
  * Brain Rev44 F2 correction: raw `::`-delimited concatenation of
  * tenantId/customerId/projectId/planId is not actually collision-safe -
@@ -120,7 +240,9 @@ export class FileDurablePlanAdmissionStore implements DurablePlanAdmissionStore 
     return content
       .split("\n")
       .filter((line) => line.trim().length > 0)
-      .map((line) => JSON.parse(line) as PlanAdmissionEvent);
+      .map((line) =>
+        validatePersistedPlanAdmissionEvent(JSON.parse(line), { tenantId, customerId, projectId, planId }),
+      );
   }
 
   getState(
