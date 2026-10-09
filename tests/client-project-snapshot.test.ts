@@ -18,6 +18,7 @@ import { createProjectOwnershipRef } from "../src/domain/project-ownership.js";
 import { createTenantScope } from "../src/domain/tenant-scope.js";
 import { createCustomer } from "../src/domain/customer.js";
 import { createProject } from "../src/domain/project.js";
+import { createSoldScope } from "../src/domain/sold-scope.js";
 import {
   createConnectionRequirement,
   createConnectionBinding,
@@ -182,6 +183,80 @@ test("P5: an approval for the exact unchanged current plan version validates", (
   });
   assert.equal(snapshot.workingArtifact?.currentVersion, snapshot.workingArtifact?.lastApprovedVersion);
   assert.equal(snapshot.workingArtifact?.isCurrentVersionApproved, true);
+});
+
+test("CXP-001B (adversarial): an approval belonging to a different tenant/project is contamination and rejects snapshot construction, even though it is a genuinely valid approval elsewhere", () => {
+  const foreignTenantScope = createTenantScope("tenant-foreign-approval-lineage");
+  const foreignCustomer = createCustomer({
+    tenantScope: foreignTenantScope,
+    customerId: "cust-foreign-approval-lineage",
+    displayName: "Foreign Approval-Lineage Customer",
+  });
+  const foreignProject = createProject({
+    tenantScope: foreignTenantScope,
+    customer: foreignCustomer,
+    projectId: "proj-foreign-approval-lineage",
+    ownerRef: "owner-foreign-approval-lineage",
+    state: "active",
+  });
+  const foreignSoldScope = createSoldScope({
+    tenantScope: foreignTenantScope,
+    project: foreignProject,
+    soldScopeId: "sold-scope-foreign-approval-lineage",
+    outcomeContractRef: "outcome-contract-foreign-approval-lineage",
+  });
+  const foreignPlan = compilePlan({
+    tenantScope: foreignTenantScope,
+    project: foreignProject,
+    planId: WEBSITE_BUILD_V1_SNAPSHOT_PLAN.planId,
+    blueprint: fixture.blueprint,
+    soldScope: foreignSoldScope,
+    now: "2026-08-25T00:00:00Z",
+  });
+  const foreignApproval = createApprovalReference({
+    plan: foreignPlan,
+    approvalId: "approval-foreign-tenant-project",
+    approvedAt: "2026-08-25T01:00:00Z",
+    approverRef: "foreign-approver",
+  });
+
+  assert.throws(
+    () =>
+      buildClientProjectSnapshot({
+        ...minimalInput(),
+        plan: WEBSITE_BUILD_V1_SNAPSHOT_PLAN,
+        latestApproval: foreignApproval,
+      }),
+    InvalidClientProjectSnapshotError,
+  );
+});
+
+test("CXP-001B (adversarial): an approval belonging to a different planId within the SAME tenant/project is contamination and rejects snapshot construction", () => {
+  const otherPlan = compilePlan({
+    tenantScope: fixture.tenantScope,
+    project: fixture.project,
+    planId: "plan-website-build-v1-snapshot-OTHER",
+    blueprint: fixture.blueprint,
+    soldScope: fixture.soldScope,
+    evidence: fixture.evidence,
+    now: "2026-08-25T00:00:00Z",
+  });
+  const otherPlanApproval = createApprovalReference({
+    plan: otherPlan,
+    approvalId: "approval-foreign-planid",
+    approvedAt: "2026-08-25T01:00:00Z",
+    approverRef: "customer-approver-1",
+  });
+
+  assert.throws(
+    () =>
+      buildClientProjectSnapshot({
+        ...minimalInput(),
+        plan: WEBSITE_BUILD_V1_SNAPSHOT_PLAN,
+        latestApproval: otherPlanApproval,
+      }),
+    InvalidClientProjectSnapshotError,
+  );
 });
 
 test("P6: CLIENT_ACTION_REQUIRED requires a real customer input/approval dependency - a routine informational communication cannot manufacture it", () => {
