@@ -16,7 +16,7 @@ export class InvalidOutcomeJobWiringError extends Error {
  * DEL-003 second bounded slice #4: projects ADMITTED OutcomeJobSpecs into
  * the existing AKI-BE-001 `OutcomeJob` runtime representation, preserving
  * exact tenant/project/plan/job lineage. `jobId` is deterministically
- * derived from `spec.specId` (itself `${projectId}:${planId}:v${version}:${requirementId}`,
+ * derived from `spec.specId` (itself `${customerId}:${projectId}:${planId}:v${version}:${requirementId}`,
  * see `outcome-job-spec.ts`) rather than freshly generated - this is what
  * makes wiring idempotent (T7/T8): calling this function again for the
  * exact same admitted specs always produces deep-equal `OutcomeJob`
@@ -44,10 +44,11 @@ export function wireAdmittedOutcomeJobs(input: {
 }): ReadonlyArray<OutcomeJob> {
   if (
     input.planAdmission.tenantId !== input.tenantScope.tenantId ||
+    input.planAdmission.customerId !== input.customer.customerId ||
     input.planAdmission.projectId !== input.project.projectId
   ) {
     throw new InvalidOutcomeJobWiringError(
-      "planAdmission does not belong to the given tenantScope/project",
+      "planAdmission does not belong to the given tenantScope/customer/project",
     );
   }
 
@@ -68,12 +69,13 @@ export function wireAdmittedOutcomeJobs(input: {
       // never reach `createOutcomeJob` (T5).
       if (
         jobAdmission.tenantId !== input.planAdmission.tenantId ||
+        jobAdmission.customerId !== input.planAdmission.customerId ||
         jobAdmission.projectId !== input.planAdmission.projectId ||
         jobAdmission.planId !== input.planAdmission.planId ||
         jobAdmission.planVersion !== input.planAdmission.planVersion
       ) {
         throw new InvalidOutcomeJobWiringError(
-          `jobAdmission for spec "${jobAdmission.specId}" does not belong to the given planAdmission's tenant/project/plan/version`,
+          `jobAdmission for spec "${jobAdmission.specId}" does not belong to the given planAdmission's tenant/customer/project/plan/version`,
         );
       }
       const spec = specsBySpecId.get(jobAdmission.specId);
@@ -84,13 +86,14 @@ export function wireAdmittedOutcomeJobs(input: {
       }
       if (
         spec.tenantId !== jobAdmission.tenantId ||
+        spec.customerId !== jobAdmission.customerId ||
         spec.projectId !== jobAdmission.projectId ||
         spec.planId !== jobAdmission.planId ||
         spec.planVersion !== jobAdmission.planVersion ||
         spec.requirementId !== jobAdmission.requirementId
       ) {
         throw new InvalidOutcomeJobWiringError(
-          `matched OutcomeJobSpec "${spec.specId}" does not agree with jobAdmission's tenant/project/plan/version/requirement lineage`,
+          `matched OutcomeJobSpec "${spec.specId}" does not agree with jobAdmission's tenant/customer/project/plan/version/requirement lineage`,
         );
       }
       return createOutcomeJob({
