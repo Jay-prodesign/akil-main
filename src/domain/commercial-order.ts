@@ -70,11 +70,28 @@ export interface CommercialOrder {
  * correction; the canonical-resolution provenance gap remains explicitly
  * OPEN, as before.
  */
+/**
+ * Brain Rev123/124 correction: `service-catalog-admission.ts`'s
+ * `ServiceCatalogAdmission` proved trusted/admitted blueprint provenance
+ * but carried no fact stating whether the exact admitted service actually
+ * requires routed worker assignment or permits direct manual execution -
+ * `outcome-job-routing-execution.ts` inferred `MANUAL_EXECUTION_ALLOWED`
+ * from catalog trust alone, so any admitted catalog entry (including one
+ * for a service that genuinely requires routing) could first-admit the
+ * weaker classification. This discriminator is a property of the service
+ * definition itself (what the service actually is), not of the admission
+ * act - so it belongs on the catalog entry, carried through verbatim onto
+ * the admission record at admission time, exactly like `blueprintId`/
+ * `blueprintVersion`/`recipeId` already are.
+ */
+export type ServiceExecutionRoutingPolicy = "ROUTING_REQUIRED" | "MANUAL_EXECUTION_ALLOWED";
+
 export interface ServiceCatalogEntry {
   readonly serviceRef: string;
   readonly blueprintId: OfferBlueprintVersion["blueprintId"];
   readonly blueprintVersion: OfferBlueprintVersion["version"];
   readonly recipeId: DeliveryRecipe["recipeId"];
+  readonly executionRoutingPolicy: ServiceExecutionRoutingPolicy;
 }
 
 /**

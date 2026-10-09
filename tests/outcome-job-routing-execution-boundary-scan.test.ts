@@ -48,12 +48,94 @@ test("outcome-job-routing-execution: createRoutedExecutionAssignment rejects any
   assert.match(fnBody, /decision\.status\s*!==\s*["']ROUTED["']/);
 });
 
+test("Brain Rev121: createExecutionRoutingRequirementRegistry's admitRoutingRequiredFromAssignment requires a real, job-bound RoutedExecutionAssignment (via isRoutedExecutionAssignmentValidForJob) before ever admitting a ROUTING_REQUIRED requirement - an unrelated/unbound decision can no longer satisfy this", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  const fnStart = content.indexOf("export function createExecutionRoutingRequirementRegistry");
+  assert.ok(fnStart >= 0, "createExecutionRoutingRequirementRegistry not found");
+  const nextFnStart = content.indexOf("export function", fnStart + 1);
+  const fnBody = content.slice(fnStart, nextFnStart >= 0 ? nextFnStart : undefined);
+  const methodStart = fnBody.indexOf("admitRoutingRequiredFromAssignment(input) {");
+  assert.ok(methodStart >= 0, "admitRoutingRequiredFromAssignment not found");
+  const validityCheckIndex = fnBody.indexOf("isRoutedExecutionAssignmentValidForJob(input.assignment, input.job)", methodStart);
+  const admitCallIndex = fnBody.indexOf("admit(input.job,", methodStart);
+  assert.ok(validityCheckIndex >= 0, "expected an explicit isRoutedExecutionAssignmentValidForJob check");
+  assert.ok(admitCallIndex >= 0, "expected the requirement to be admitted");
+  assert.ok(validityCheckIndex < admitCallIndex, "the assignment-validity check must run before the requirement is ever admitted");
+});
+
+test("Brain Rev122: createExecutionRoutingRequirementRegistry's admitManualExecutionAllowedFromServiceCatalogAdmission requires spec.specId === job.jobId, admission.status === ADMITTED, and admission.blueprintId/blueprintVersion to match spec.sourceBlueprintId/sourceBlueprintVersion - not a bare worker/evidenceRef pair - before ever delegating to the shared admit helper (which performs the map write)", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  const fnStart = content.indexOf("export function createExecutionRoutingRequirementRegistry");
+  const nextFnStart = content.indexOf("export function", fnStart + 1);
+  const fnBody = content.slice(fnStart, nextFnStart >= 0 ? nextFnStart : undefined);
+  const methodStart = fnBody.indexOf("admitManualExecutionAllowedFromServiceCatalogAdmission(input) {");
+  assert.ok(methodStart >= 0, "admitManualExecutionAllowedFromServiceCatalogAdmission not found");
+  const methodEnd = fnBody.indexOf("\n    },", methodStart);
+  const methodBody = fnBody.slice(methodStart, methodEnd >= 0 ? methodEnd : undefined);
+  const specIdCheckIndex = methodBody.indexOf("input.spec.specId");
+  const statusCheckIndex = methodBody.indexOf('input.admission.status !== "ADMITTED"');
+  const blueprintCheckIndex = methodBody.indexOf("input.admission.blueprintId !== input.spec.sourceBlueprintId");
+  const admitCallIndex = methodBody.indexOf("return admit(");
+  assert.ok(specIdCheckIndex >= 0, "expected an explicit spec.specId === job.jobId check");
+  assert.ok(statusCheckIndex >= 0, "expected an explicit admission.status === ADMITTED check");
+  assert.ok(blueprintCheckIndex >= 0, "expected an explicit blueprint match check");
+  assert.ok(admitCallIndex >= 0, "expected this method to delegate to the shared admit helper");
+  assert.ok(
+    specIdCheckIndex < admitCallIndex && statusCheckIndex < admitCallIndex && blueprintCheckIndex < admitCallIndex,
+    "every authoritative-fact check must run before delegating to admit (which writes the map)",
+  );
+  assert.doesNotMatch(methodBody.slice(0, admitCallIndex), /admittingWorker/, "the new method must not accept a bare worker parameter at all");
+});
+
+test("Brain Rev123/124: admitManualExecutionAllowedFromServiceCatalogAdmission requires admission.executionRoutingPolicy === MANUAL_EXECUTION_ALLOWED before ever delegating to the shared admit helper - catalog trust (status/blueprint match) alone is not sufficient", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  const fnStart = content.indexOf("export function createExecutionRoutingRequirementRegistry");
+  const nextFnStart = content.indexOf("export function", fnStart + 1);
+  const fnBody = content.slice(fnStart, nextFnStart >= 0 ? nextFnStart : undefined);
+  const methodStart = fnBody.indexOf("admitManualExecutionAllowedFromServiceCatalogAdmission(input) {");
+  assert.ok(methodStart >= 0, "admitManualExecutionAllowedFromServiceCatalogAdmission not found");
+  const methodEnd = fnBody.indexOf("\n    },", methodStart);
+  const methodBody = fnBody.slice(methodStart, methodEnd >= 0 ? methodEnd : undefined);
+  const routingPolicyCheckIndex = methodBody.indexOf('input.admission.executionRoutingPolicy !== "MANUAL_EXECUTION_ALLOWED"');
+  const admitCallIndex = methodBody.indexOf("return admit(");
+  assert.ok(routingPolicyCheckIndex >= 0, "expected an explicit admission.executionRoutingPolicy === MANUAL_EXECUTION_ALLOWED check");
+  assert.ok(admitCallIndex >= 0, "expected this method to delegate to the shared admit helper");
+  assert.ok(
+    routingPolicyCheckIndex < admitCallIndex,
+    "the executionRoutingPolicy discriminator check must run before the requirement is ever admitted",
+  );
+});
+
+test("Brain Rev120: this module no longer imports AuthorityContext/requireProtectedActionAuthorization from authority.js - the initial policy is bound to WorkerRoutingDecision/AdmittedWorker, not a generic tenant-level authority check", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  assert.doesNotMatch(content, /from\s*["']\.\/authority\.js["']/);
+});
+
+test("Brain Rev118/119: createExecutionRoutingRequirementRegistry has no exported free-standing constructor for ExecutionRoutingRequirement - admit (behind the registry closure) is the only way to produce one, so an execution-time caller cannot construct-and-pass a fresh classification", () => {
+  const exportedKeys = Object.keys(OutcomeJobRoutingExecution);
+  assert.ok(!exportedKeys.includes("createExecutionRoutingRequirement"), "a free-standing constructor must not be exported");
+});
+
+test("Brain Rev118/119: admit is immutable once set - attempting to admit a different policy for an already-admitted job throws before ever overwriting the map entry", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  const fnStart = content.indexOf("export function createExecutionRoutingRequirementRegistry");
+  const nextFnStart = content.indexOf("export function", fnStart + 1);
+  const fnBody = content.slice(fnStart, nextFnStart >= 0 ? nextFnStart : undefined);
+  const alreadyAdmittedThrowIndex = fnBody.indexOf("ExecutionRoutingRequirementAlreadyAdmittedError");
+  const setIndex = fnBody.indexOf("admitted.set(");
+  assert.ok(alreadyAdmittedThrowIndex >= 0, "expected an ExecutionRoutingRequirementAlreadyAdmittedError guard");
+  assert.ok(alreadyAdmittedThrowIndex < setIndex, "the already-admitted guard must run before the map is ever written");
+});
+
 test("outcome-job-routing-execution: module exports exactly the expected surface", () => {
   const exportedKeys = Object.keys(OutcomeJobRoutingExecution).sort();
   assert.deepEqual(exportedKeys, [
+    "ExecutionRoutingRequirementAlreadyAdmittedError",
+    "InvalidExecutionRoutingRequirementError",
     "InvalidRoutedExecutionAssignmentError",
     "OutcomeJobExecutionNotRoutedError",
     "authorizeOutcomeJobExecutionFromRouting",
+    "createExecutionRoutingRequirementRegistry",
     "createRoutedExecutionAssignment",
     "isRoutedExecutionAssignmentValidForJob",
   ]);

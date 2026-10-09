@@ -1,4 +1,4 @@
-import type { CommercialOrder, ServiceCatalogEntry, DeclaredServiceLookupResult } from "./commercial-order.js";
+import type { CommercialOrder, ServiceCatalogEntry, DeclaredServiceLookupResult, ServiceExecutionRoutingPolicy } from "./commercial-order.js";
 import type { OfferBlueprintVersion } from "./offer-blueprint.js";
 import type { DeliveryRecipe } from "./delivery-recipe.js";
 import type { AdmittedWorker } from "./worker-routing-policy.js";
@@ -38,6 +38,7 @@ export interface ServiceCatalogAdmission {
   readonly blueprintId: OfferBlueprintVersion["blueprintId"];
   readonly blueprintVersion: OfferBlueprintVersion["version"];
   readonly recipeId: DeliveryRecipe["recipeId"];
+  readonly executionRoutingPolicy: ServiceExecutionRoutingPolicy;
   readonly status: ServiceCatalogAdmissionStatus;
   readonly admittedByAuthorityId: string;
   readonly evidenceRef: string;
@@ -105,6 +106,14 @@ export function admitServiceCatalogEntry(input: {
       `catalogEntry.recipeId "${input.catalogEntry.recipeId}" does not match recipe.recipeId "${input.recipe.recipeId}"`,
     );
   }
+  if (
+    input.catalogEntry.executionRoutingPolicy !== "ROUTING_REQUIRED" &&
+    input.catalogEntry.executionRoutingPolicy !== "MANUAL_EXECUTION_ALLOWED"
+  ) {
+    throw new InvalidServiceCatalogAdmissionError(
+      `catalogEntry.executionRoutingPolicy must be "ROUTING_REQUIRED" or "MANUAL_EXECUTION_ALLOWED" (got ${JSON.stringify(input.catalogEntry.executionRoutingPolicy)}) - an unrecognized value can never be admitted as a trusted routing discriminator`,
+    );
+  }
   if (input.authorizingWorker.trustStatus !== "ADMITTED") {
     throw new InvalidServiceCatalogAdmissionError(
       `authorizingWorker must have trustStatus "ADMITTED" (got "${input.authorizingWorker.trustStatus}") - an unproven/untrusted caller cannot admit a service catalog entry`,
@@ -122,6 +131,7 @@ export function admitServiceCatalogEntry(input: {
     blueprintId: input.catalogEntry.blueprintId,
     blueprintVersion: input.catalogEntry.blueprintVersion,
     recipeId: input.catalogEntry.recipeId,
+    executionRoutingPolicy: input.catalogEntry.executionRoutingPolicy,
     status: "ADMITTED",
     admittedByAuthorityId: input.authorizingWorker.workerId,
     evidenceRef,
