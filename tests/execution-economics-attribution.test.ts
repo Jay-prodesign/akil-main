@@ -23,6 +23,7 @@ const tenantB = createTenantScope("tenant-b");
 function lineage(overrides: Partial<Parameters<typeof createExecutionEconomicsLineage>[0]> = {}) {
   return createExecutionEconomicsLineage({
     tenantScope: tenantA,
+    customerId: "customer-1",
     projectId: "project-1",
     planId: "plan-1",
     planVersion: 1,
@@ -204,7 +205,7 @@ test("M15: selectExecutionEconomicsEvents returns only events matching tenant+pr
     ledger,
     event({ idempotencyKey: "e2", lineage: lineage({ planId: "plan-2" }) }),
   );
-  const selected = selectExecutionEconomicsEvents(ledger, { tenantId: tenantA.tenantId, projectId: "project-1", planId: "plan-1" });
+  const selected = selectExecutionEconomicsEvents(ledger, { tenantId: tenantA.tenantId, customerId: "customer-1", projectId: "project-1", planId: "plan-1" });
   assert.equal(selected.length, 1);
   assert.equal(selected.at(0)?.idempotencyKey, "e1");
 });
@@ -232,10 +233,67 @@ test("M16 (adversarial): a same-named project/plan/job under a different tenant 
       ],
     }),
   );
-  const selected = selectExecutionEconomicsEvents(ledger, { tenantId: tenantA.tenantId, projectId: "project-1", planId: "plan-1" });
+  const selected = selectExecutionEconomicsEvents(ledger, { tenantId: tenantA.tenantId, customerId: "customer-1", projectId: "project-1", planId: "plan-1" });
   assert.equal(selected.length, 1);
   const total = resolveTotalDeliveryCost(selected);
   assert.deepEqual(total, { status: "COMPUTED", amountMinorUnits: 650, currency: "USD" });
+});
+
+test("CXP-001P (adversarial): a same-named project/plan/job belonging to a different customer within the SAME tenant never leaks into the scoped total, even though projectId/planId strings collide", () => {
+  // Deliberately reuses the SAME tenantScope, projectId, and planId
+  // strings from a different customer, so this case is caught ONLY by a
+  // customerId check - a tenantId/projectId/planId check alone would not
+  // distinguish it (project.ts does not enforce projectId global
+  // uniqueness across customers, and this module's own lineage/scope are
+  // raw opaque strings with no Project entity to derive uniqueness from).
+  let ledger = EMPTY_EXECUTION_ECONOMICS_LEDGER;
+  ledger = appendExecutionEconomicsEvent(
+    ledger,
+    event({
+      idempotencyKey: "customer-1-evt",
+      costBuckets: [
+        { kind: "MARGINAL_CASH", amount: createCostAmount({ presence: "REPORTED", amountMinorUnits: 500, currency: "USD" }) },
+      ],
+    }),
+  );
+  ledger = appendExecutionEconomicsEvent(
+    ledger,
+    event({
+      idempotencyKey: "customer-2-evt",
+      lineage: lineage({ customerId: "customer-2" }),
+      costBuckets: [
+        { kind: "MARGINAL_CASH", amount: createCostAmount({ presence: "REPORTED", amountMinorUnits: 999999, currency: "USD" }) },
+      ],
+    }),
+  );
+  const selected = selectExecutionEconomicsEvents(ledger, {
+    tenantId: tenantA.tenantId,
+    customerId: "customer-1",
+    projectId: "project-1",
+    planId: "plan-1",
+  });
+  assert.equal(selected.length, 1);
+  assert.equal(selected.at(0)?.idempotencyKey, "customer-1-evt");
+  assert.deepEqual(resolveCostBucketTotal(selected, "MARGINAL_CASH"), {
+    status: "COMPUTED",
+    amountMinorUnits: 500,
+    currency: "USD",
+  });
+});
+
+test("CXP-001P (adversarial): two different customers reusing the exact same idempotencyKey, projectId, and planId strings within the SAME tenant append as two independent events, not a conflicting/merged replay", () => {
+  const first = appendExecutionEconomicsEvent(EMPTY_EXECUTION_ECONOMICS_LEDGER, event({ idempotencyKey: "evt-shared-key" }));
+  const withSecondCustomer = appendExecutionEconomicsEvent(
+    first,
+    event({
+      idempotencyKey: "evt-shared-key",
+      lineage: lineage({ customerId: "customer-2" }),
+      costBuckets: [
+        { kind: "MARGINAL_CASH", amount: createCostAmount({ presence: "REPORTED", amountMinorUnits: 777, currency: "USD" }) },
+      ],
+    }),
+  );
+  assert.equal(withSecondCustomer.events.length, 2);
 });
 
 test("M16b (F1 fix, adversarial): an entirely absent required cost bucket makes the grand total INCOMPLETE, never zero-by-omission", () => {
@@ -266,6 +324,7 @@ test("M17b (F2 fix): selectExecutionEconomicsEvents isolates by taskRef/runRef/a
   );
   const byRun = selectExecutionEconomicsEvents(ledger, {
     tenantId: tenantA.tenantId,
+    customerId: "customer-1",
     projectId: "project-1",
     planId: "plan-1",
     runRef: "run-1",
@@ -273,6 +332,7 @@ test("M17b (F2 fix): selectExecutionEconomicsEvents isolates by taskRef/runRef/a
   assert.equal(byRun.length, 3, "run-1 scope must include every task/attempt recorded under run-1, and no other run");
   const byTask = selectExecutionEconomicsEvents(ledger, {
     tenantId: tenantA.tenantId,
+    customerId: "customer-1",
     projectId: "project-1",
     planId: "plan-1",
     taskRef: "task-1",
@@ -281,6 +341,7 @@ test("M17b (F2 fix): selectExecutionEconomicsEvents isolates by taskRef/runRef/a
   assert.ok(byTask.every((e) => e.idempotencyKey !== "task-2-evt"));
   const byAttempt = selectExecutionEconomicsEvents(ledger, {
     tenantId: tenantA.tenantId,
+    customerId: "customer-1",
     projectId: "project-1",
     planId: "plan-1",
     runRef: "run-1",
@@ -296,6 +357,7 @@ test("M17: selectExecutionEconomicsEvents narrows further by jobId when supplied
   ledger = appendExecutionEconomicsEvent(ledger, event({ idempotencyKey: "job-2-evt", lineage: lineage({ jobId: "job-2" }) }));
   const selected = selectExecutionEconomicsEvents(ledger, {
     tenantId: tenantA.tenantId,
+    customerId: "customer-1",
     projectId: "project-1",
     planId: "plan-1",
     jobId: "job-2",
@@ -314,6 +376,7 @@ test("M17c (Brain PR #66 F4, adversarial): selectExecutionEconomicsEvents isolat
 
   const byVersion1 = selectExecutionEconomicsEvents(ledger, {
     tenantId: tenantA.tenantId,
+    customerId: "customer-1",
     projectId: "project-1",
     planId: "plan-1",
     planVersion: 1,
@@ -323,6 +386,7 @@ test("M17c (Brain PR #66 F4, adversarial): selectExecutionEconomicsEvents isolat
 
   const byVersion2 = selectExecutionEconomicsEvents(ledger, {
     tenantId: tenantA.tenantId,
+    customerId: "customer-1",
     projectId: "project-1",
     planId: "plan-1",
     planVersion: 2,
@@ -333,6 +397,7 @@ test("M17c (Brain PR #66 F4, adversarial): selectExecutionEconomicsEvents isolat
   // omitting planVersion entirely is intentional broader aggregation, not a leak.
   const bothVersions = selectExecutionEconomicsEvents(ledger, {
     tenantId: tenantA.tenantId,
+    customerId: "customer-1",
     projectId: "project-1",
     planId: "plan-1",
   });
@@ -421,6 +486,7 @@ test("M27 (WEBSITE_BUILD_v1 proof): deterministic end-to-end attribution example
   const websiteBuildTenant = createTenantScope("proof-tenant");
   const jobLineage = createExecutionEconomicsLineage({
     tenantScope: websiteBuildTenant,
+    customerId: "proof-customer",
     projectId: "proof-project",
     planId: "website-build-v1-plan",
     planVersion: 1,
@@ -445,6 +511,7 @@ test("M27 (WEBSITE_BUILD_v1 proof): deterministic end-to-end attribution example
   const ledger = appendExecutionEconomicsEvent(EMPTY_EXECUTION_ECONOMICS_LEDGER, e);
   const selected = selectExecutionEconomicsEvents(ledger, {
     tenantId: websiteBuildTenant.tenantId,
+    customerId: "proof-customer",
     projectId: "proof-project",
     planId: "website-build-v1-plan",
   });
@@ -463,6 +530,7 @@ test("M28 (multi-plan isolation, prepares FAS-001 but does not claim FAS S1/S2 o
   for (let i = 0; i < planCount; i += 1) {
     const planLineage = createExecutionEconomicsLineage({
       tenantScope: tenant,
+      customerId: "isolation-customer",
       projectId: "isolation-project",
       planId: `plan-${i}`,
       planVersion: 1,
@@ -488,6 +556,7 @@ test("M28 (multi-plan isolation, prepares FAS-001 but does not claim FAS S1/S2 o
   for (let i = 0; i < planCount; i += 1) {
     const selected = selectExecutionEconomicsEvents(ledger, {
       tenantId: tenant.tenantId,
+      customerId: "isolation-customer",
       projectId: "isolation-project",
       planId: `plan-${i}`,
     });
