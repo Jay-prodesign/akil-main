@@ -559,9 +559,13 @@ export function createExecutionRoutingRequirementRegistry(): ExecutionRoutingReq
           "spec.specId must equal job.jobId - the supplied OutcomeJobSpec must be the exact spec this runtime job was wired from, not a spec for a different job",
         );
       }
-      if (input.spec.tenantId !== input.job.tenantId || input.spec.projectId !== input.job.projectId) {
+      if (
+        input.spec.tenantId !== input.job.tenantId ||
+        input.spec.customerId !== input.job.customerId ||
+        input.spec.projectId !== input.job.projectId
+      ) {
         throw new InvalidExecutionRoutingRequirementError(
-          "spec.tenantId/projectId must match job.tenantId/projectId",
+          "spec.tenantId/customerId/projectId must match job.tenantId/customerId/projectId",
         );
       }
       if (input.admission.status !== "ADMITTED") {
