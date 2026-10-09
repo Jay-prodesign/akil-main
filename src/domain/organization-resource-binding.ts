@@ -343,6 +343,9 @@ export function resolveOrganizationResourceBindingStatus(input: {
       "the supplied current organization does not match this binding's own organizationId/tenantId",
     );
   }
+  if (organization.state === "OFFBOARDED") {
+    return blocked(binding, "ORGANIZATION_OFFBOARDED", "the organization has been offboarded - a deleted organization's resource binding can never become READY again");
+  }
   if (organization.state === "SUSPENDED") {
     return blocked(binding, "ORGANIZATION_SUSPENDED", "the organization is currently SUSPENDED");
   }
