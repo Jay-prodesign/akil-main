@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildAttentionState, InvalidAttentionStateError } from "../src/domain/attention-state.js";
 import { createOutcomeJob, enterExceptionState } from "../src/domain/outcome-job.js";
+import { createCustomer } from "../src/domain/customer.js";
+import { createProject } from "../src/domain/project.js";
 import { buildWebsiteBuildV1Fixture } from "../src/fixtures/website-build-v1.js";
 import { createOwnershipAssignment } from "../src/domain/ownership-assignment.js";
 import { createOrganizationMembership } from "../src/domain/organization-membership.js";
@@ -96,6 +98,68 @@ test("a foreign job's exception event is rejected rather than silently attribute
   });
   assert.throws(
     () => buildAttentionState({ job: blockedB, latestExceptionEvent: eventFromA }),
+    InvalidAttentionStateError,
+  );
+});
+
+test("CXP-001E (adversarial): a foreign customer's exception event is rejected rather than silently attributed, even when it reuses the exact same jobId string within the same tenant", () => {
+  const otherCustomer = createCustomer({
+    tenantScope: fixture.tenantScope,
+    customerId: "cust-other-attention-state",
+    displayName: "Other Customer, Same Tenant",
+  });
+  const otherCustomerProject = createProject({
+    tenantScope: fixture.tenantScope,
+    customer: otherCustomer,
+    projectId: "proj-other-attention-state",
+    ownerRef: "owner-other-attention-state",
+    state: "active",
+  });
+  const otherCustomerJob = createOutcomeJob({
+    tenantScope: fixture.tenantScope,
+    customer: otherCustomer,
+    project: otherCustomerProject,
+    jobId: "job-shared-jobid",
+    jobFamily: "website-build-v1",
+    businessObjective: "foreign customer job, same jobId string",
+  });
+  const { auditEvent: foreignCustomerEvent } = enterExceptionState({
+    job: otherCustomerJob,
+    to: "BLOCKED",
+    eventId: "evt-foreign-customer",
+    actorRef: "system",
+    timestamp: "2026-08-27T00:00:00Z",
+    reason: "reason from a foreign customer's job",
+  });
+  const targetJob = freshJob("job-shared-jobid");
+  const { job: blockedTargetJob } = enterExceptionState({
+    job: targetJob,
+    to: "BLOCKED",
+    eventId: "evt-target",
+    actorRef: "system",
+    timestamp: "2026-08-27T00:00:00Z",
+    reason: "reason from the target job",
+  });
+  assert.throws(
+    () => buildAttentionState({ job: blockedTargetJob, latestExceptionEvent: foreignCustomerEvent }),
+    InvalidAttentionStateError,
+  );
+});
+
+test("CXP-001E (adversarial): a foreign customer's ownership tuple is rejected, even when it reuses the exact same tenant/projectId as the target job", () => {
+  const otherCustomer = createCustomer({
+    tenantScope: fixture.tenantScope,
+    customerId: "cust-other-ownership",
+    displayName: "Other Customer, Same Tenant",
+  });
+  const foreignOwnership = createProjectOwnershipRef({
+    tenantId: fixture.tenantScope.tenantId,
+    customerId: otherCustomer.customerId,
+    projectId: fixture.project.projectId,
+  });
+  const job = freshJob("job-with-foreign-ownership-check");
+  assert.throws(
+    () => buildAttentionState({ job, ownershipHistory: [], ownership: foreignOwnership }),
     InvalidAttentionStateError,
   );
 });
