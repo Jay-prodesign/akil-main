@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTenantScope } from "../src/domain/tenant-scope.js";
 import { createCustomer } from "../src/domain/customer.js";
+import { createDeliveryRecipe } from "../src/domain/delivery-recipe.js";
 import {
   createCommercialOrder,
   resolveDeclaredServiceFromOrder,
@@ -352,6 +353,42 @@ test("SA15 (adversarial ambiguity): resolveTrustedServiceForOrder throws, never 
         order,
         declaredLookup,
         admittedCatalog: [admissionA, admissionB],
+      }),
+    InvalidServiceCatalogAdmissionError,
+  );
+});
+
+test("SA17 (V5-CONV-001 Rev117 mandatory witness, adversarial ambiguity): resolveTrustedServiceForOrder throws, never guesses, when two simultaneous ADMITTED admissions match the same serviceRef/blueprintId/blueprintVersion/recipeId but differ ONLY by recipeVersion", () => {
+  const order = orderFor("service:known");
+  const declaredLookup = resolveDeclaredServiceFromOrder(order, [catalogEntry]);
+  const recipeV1 = createDeliveryRecipe({ ...WEBSITE_BUILD_V1_RECIPE, version: 1 });
+  const recipeV2 = createDeliveryRecipe({ ...WEBSITE_BUILD_V1_RECIPE, version: 2 });
+  const admissionV1 = admitServiceCatalogEntry({
+    catalogEntry,
+    recipe: recipeV1,
+    authorizingWorker: elevatedWorker(),
+    evidenceRef: "evidence:catalog-review-v1",
+    admittedAt: "2026-01-01T00:00:00.000Z",
+  });
+  const admissionV2 = admitServiceCatalogEntry({
+    catalogEntry,
+    recipe: recipeV2,
+    authorizingWorker: elevatedWorker({ workerId: "authority-2" }),
+    evidenceRef: "evidence:catalog-review-v2",
+    admittedAt: "2026-01-02T00:00:00.000Z",
+  });
+  // resolveTrustedServiceForOrder's matching criteria (serviceRef/
+  // blueprintId/blueprintVersion/recipeId) do not include recipeVersion -
+  // two currently-ADMITTED admissions for the same recipeId at different
+  // versions are therefore two ambiguous candidates, not two valid
+  // resolutions. Trusted-service resolution must fail closed rather than
+  // silently pick either version.
+  assert.throws(
+    () =>
+      resolveTrustedServiceForOrder({
+        order,
+        declaredLookup,
+        admittedCatalog: [admissionV1, admissionV2],
       }),
     InvalidServiceCatalogAdmissionError,
   );
