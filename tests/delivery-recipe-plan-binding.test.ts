@@ -295,6 +295,24 @@ test("AI10 (Brain F1, adversarial): a forged same-lineage spec with an altered r
   );
 });
 
+test("CXP-001O (adversarial): a forged same-lineage spec with an altered customerId cannot be bound as canonical job provenance", () => {
+  const { plan, specs } = buildWebsiteBuildV1Plan();
+  const admission = admitWebsiteBuildV1Recipe(plan);
+  const forged: OutcomeJobSpec[] = specs.map((spec, i) =>
+    i === 0 ? { ...spec, customerId: "cust-cxp-001o-forged" as never } : spec,
+  );
+  assert.throws(
+    () =>
+      bindAdmittedRecipeToPlan({
+        admission,
+        recipe: WEBSITE_BUILD_V1_RECIPE,
+        plan,
+        specs: forged,
+      }),
+    InvalidDeliveryRecipePlanBindingError,
+  );
+});
+
 test("AI11 (Brain F1, adversarial): omitting one canonically-derived required spec cannot be bound - completeness is required, not just per-spec lineage", () => {
   const { plan, specs } = buildWebsiteBuildV1Plan();
   const admission = admitWebsiteBuildV1Recipe(plan);

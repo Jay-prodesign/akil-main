@@ -243,6 +243,7 @@ export function buildAdvisorResult(input: {
     recipe.recipeId === binding.boundRecipeId &&
     recipe.version === binding.consumedRecipeVersion &&
     binding.tenantId === input.ownership.tenantId &&
+    binding.customerId === input.ownership.customerId &&
     binding.projectId === input.ownership.projectId &&
     (input.ownership.serviceRef === undefined || input.ownership.serviceRef === binding.serviceRef) &&
     (workingArtifact === undefined ||
