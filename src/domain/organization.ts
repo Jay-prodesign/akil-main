@@ -18,11 +18,17 @@ type OrganizationId = string & { readonly __brand: "OrganizationId" };
 
 /**
  * OS-V0-01: minimal V0 lifecycle. `BOOTSTRAPPING` is construction/bootstrap;
- * `ACTIVE` is normal usable state; `SUSPENDED` is a controlled stop. No
- * reactivation is representable here - richer suspend/reactivate/offboarding
- * semantics are a V1 concern, not invented in this bounded slice.
+ * `ACTIVE` is normal usable state; `SUSPENDED` is a controlled stop.
+ * Reactivation (`SUSPENDED` -> `ACTIVE`) was the first V1 concern, closed by
+ * OS-V1-01's `reactivateOrganization`. `OFFBOARDED` (OS-V1-04) is the second:
+ * a one-way terminal "deleted" stop, reachable only from `SUSPENDED`, with
+ * no reactivation function implemented or exposed for it - once offboarded,
+ * an Organization can never return to any other state. This is the minimal
+ * floor the Master Roadmap's "offboarding invalidates dependent
+ * projections"/"deleted-data reappearance" requirement needs, not a richer
+ * data-residency/legal-hold concept.
  */
-export type OrganizationLifecycleState = "BOOTSTRAPPING" | "ACTIVE" | "SUSPENDED";
+export type OrganizationLifecycleState = "BOOTSTRAPPING" | "ACTIVE" | "SUSPENDED" | "OFFBOARDED";
 
 /**
  * OS-V0-01 "Organization Kernel": the minimum explicit Organization product/
@@ -49,6 +55,7 @@ export interface Organization {
   readonly createdAt: string;
   readonly activatedAt?: string;
   readonly suspendedAt?: string;
+  readonly offboardedAt?: string;
 }
 
 function requireNonEmptyString(value: unknown, field: string): string {
@@ -270,5 +277,59 @@ export function suspendOrganization(input: {
     ...input.organization,
     state: "SUSPENDED",
     suspendedAt: suspendedAt.raw,
+  };
+}
+
+/**
+ * OS-V1-04 ("offboarding" - the second half of this file's own original
+ * OS-V0-01 doc comment, "richer suspend/reactivate/offboarding semantics are
+ * a V1 concern"). Only `SUSPENDED -> OFFBOARDED`. Revalidates the FULL
+ * pre-existing `SUSPENDED` record first (mirrors `reactivateOrganization`'s
+ * own revalidation of its `SUSPENDED` predecessor) - `createdAt <=
+ * activatedAt <= suspendedAt` must all still hold before this transition is
+ * even considered. `offboardedAt` must not be chronologically before
+ * `suspendedAt` (equal accepted, immediate offboarding). This is a one-way
+ * terminal stop: no reactivation function is implemented or exposed for
+ * `OFFBOARDED` - `reactivateOrganization`'s own existing `state !==
+ * "SUSPENDED"` guard already refuses an `OFFBOARDED` record unconditionally,
+ * with no change needed there. This function touches nothing beyond the
+ * `Organization` value itself: it revokes no membership/connection/config of
+ * its own (those remain entirely their own separate primitives' concern) -
+ * offboarding's actual effect on dependent resource-binding readiness comes
+ * from `resolveOrganizationResourceBindingStatus`'s own new `OFFBOARDED`
+ * gate (`organization-resource-binding.ts`), re-resolved fresh exactly like
+ * every other currentness check already is, never cached.
+ */
+export function offboardOrganization(input: {
+  organization: Organization;
+  offboardedAt: unknown;
+}): Organization {
+  if (input.organization.state !== "SUSPENDED") {
+    throw new InvalidOrganizationTransitionError(
+      `organization must be SUSPENDED to offboard (got "${input.organization.state}")`,
+    );
+  }
+  if (input.organization.offboardedAt !== undefined) {
+    throw new InvalidOrganizationTransitionError(
+      "a SUSPENDED organization must not already carry offboardedAt",
+    );
+  }
+  const createdAt = requireValidTimestamp(input.organization.createdAt, "organization.createdAt");
+  const activatedAt = requireValidTimestamp(input.organization.activatedAt, "organization.activatedAt");
+  if (activatedAt.ms < createdAt.ms) {
+    throw new InvalidOrganizationTransitionError("organization.activatedAt must not be before organization.createdAt");
+  }
+  const suspendedAt = requireValidTimestamp(input.organization.suspendedAt, "organization.suspendedAt");
+  if (suspendedAt.ms < activatedAt.ms) {
+    throw new InvalidOrganizationTransitionError("organization.suspendedAt must not be before organization.activatedAt");
+  }
+  const offboardedAt = requireValidTimestamp(input.offboardedAt, "offboardedAt");
+  if (offboardedAt.ms < suspendedAt.ms) {
+    throw new InvalidOrganizationTransitionError("offboardedAt must not be before organization.suspendedAt");
+  }
+  return {
+    ...input.organization,
+    state: "OFFBOARDED",
+    offboardedAt: offboardedAt.raw,
   };
 }
