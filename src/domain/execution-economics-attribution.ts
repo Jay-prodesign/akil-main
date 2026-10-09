@@ -66,6 +66,13 @@ function requireFiniteNonNegativeNumber(value: unknown, field: string): number {
   return value;
 }
 
+function requirePositiveInteger(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new InvalidExecutionEconomicsError(`${field} must be a positive integer`);
+  }
+  return value;
+}
+
 /**
  * Exact hierarchy binding required by MET-001A's own acceptance contract:
  * "Every execution-economics event must bind unambiguously to tenant +
@@ -74,11 +81,20 @@ function requireFiniteNonNegativeNumber(value: unknown, field: string): number {
  * (this repository has no first-class Task/Run/Attempt type to reuse) -
  * this module never interprets them, only carries and compares them for
  * identity, matching this codebase's established opaque-ref discipline.
+ *
+ * CXP-001A composition review (Brain PR #66 F4) correction: `ProjectPlanVersion`
+ * identity is `{planId, version}` (see `project-plan.ts`), but this lineage
+ * previously carried only `planId` - two different versions of the exact
+ * same plan were structurally indistinguishable, contradicting this
+ * module's own documented "binds unambiguously to ... ProjectPlanVersion"
+ * contract. `planVersion` is now a required, validated positive integer
+ * alongside `planId`.
  */
 export interface ExecutionEconomicsLineage {
   readonly tenantId: TenantScope["tenantId"];
   readonly projectId: string;
   readonly planId: string;
+  readonly planVersion: number;
   readonly jobId: string;
   readonly taskRef: string;
   readonly runRef: string;
@@ -89,6 +105,7 @@ export function createExecutionEconomicsLineage(input: {
   tenantScope: TenantScope;
   projectId: unknown;
   planId: unknown;
+  planVersion: unknown;
   jobId: unknown;
   taskRef: unknown;
   runRef: unknown;
@@ -98,6 +115,7 @@ export function createExecutionEconomicsLineage(input: {
     tenantId: input.tenantScope.tenantId,
     projectId: requireNonEmptyString(input.projectId, "projectId"),
     planId: requireNonEmptyString(input.planId, "planId"),
+    planVersion: requirePositiveInteger(input.planVersion, "planVersion"),
     jobId: requireNonEmptyString(input.jobId, "jobId"),
     taskRef: requireNonEmptyString(input.taskRef, "taskRef"),
     runRef: requireNonEmptyString(input.runRef, "runRef"),
@@ -371,11 +389,18 @@ export function appendExecutionEconomicsEvent(
  * scoping must be able to isolate at every one of those levels - not only
  * down to job - or a caller cannot prove no cross-task/cross-run/cross-
  * attempt leakage exists.
+ *
+ * F4 fix (Brain PR #66 exact-head review): `planVersion` is optional here
+ * (unlike on the lineage itself, where it is required) - omitting it keeps
+ * broader cross-version aggregation possible for a caller who genuinely
+ * wants it, while supplying it proves no cross-version leakage between two
+ * different versions of the exact same plan.
  */
 export interface ExecutionEconomicsScope {
   readonly tenantId: TenantScope["tenantId"];
   readonly projectId: string;
   readonly planId: string;
+  readonly planVersion?: number;
   readonly jobId?: string;
   readonly taskRef?: string;
   readonly runRef?: string;
@@ -391,6 +416,7 @@ export function selectExecutionEconomicsEvents(
       e.lineage.tenantId === scope.tenantId &&
       e.lineage.projectId === scope.projectId &&
       e.lineage.planId === scope.planId &&
+      (scope.planVersion === undefined || e.lineage.planVersion === scope.planVersion) &&
       (scope.jobId === undefined || e.lineage.jobId === scope.jobId) &&
       (scope.taskRef === undefined || e.lineage.taskRef === scope.taskRef) &&
       (scope.runRef === undefined || e.lineage.runRef === scope.runRef) &&

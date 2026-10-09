@@ -25,6 +25,7 @@ function lineage(overrides: Partial<Parameters<typeof createExecutionEconomicsLi
     tenantScope: tenantA,
     projectId: "project-1",
     planId: "plan-1",
+    planVersion: 1,
     jobId: "job-1",
     taskRef: "task-1",
     runRef: "run-1",
@@ -62,6 +63,16 @@ test("M1: createExecutionEconomicsLineage binds tenant + project + plan + job + 
 test("M2: createExecutionEconomicsLineage rejects an empty hierarchy field", () => {
   assert.throws(() => lineage({ runRef: "" }), InvalidExecutionEconomicsError);
   assert.throws(() => lineage({ attemptRef: "   " }), InvalidExecutionEconomicsError);
+});
+
+test("M2b (Brain PR #66 F4): createExecutionEconomicsLineage requires planVersion as a positive integer - ProjectPlanVersion identity is {planId, version}, never planId alone", () => {
+  const l = lineage({ planVersion: 3 });
+  assert.equal(l.planVersion, 3);
+  assert.throws(() => lineage({ planVersion: 0 }), InvalidExecutionEconomicsError);
+  assert.throws(() => lineage({ planVersion: -1 }), InvalidExecutionEconomicsError);
+  assert.throws(() => lineage({ planVersion: 1.5 }), InvalidExecutionEconomicsError);
+  assert.throws(() => lineage({ planVersion: "1" as never }), InvalidExecutionEconomicsError);
+  assert.throws(() => lineage({ planVersion: undefined as never }), InvalidExecutionEconomicsError);
 });
 
 // --- M3-M6: event construction ---
@@ -293,6 +304,41 @@ test("M17: selectExecutionEconomicsEvents narrows further by jobId when supplied
   assert.equal(selected.at(0)?.idempotencyKey, "job-2-evt");
 });
 
+test("M17c (Brain PR #66 F4, adversarial): selectExecutionEconomicsEvents isolates by planVersion - two versions of the exact same plan never leak into each other's scoped total, but omitting planVersion still aggregates across both", () => {
+  let ledger = EMPTY_EXECUTION_ECONOMICS_LEDGER;
+  ledger = appendExecutionEconomicsEvent(ledger, event({ idempotencyKey: "plan-v1-evt" }));
+  ledger = appendExecutionEconomicsEvent(
+    ledger,
+    event({ idempotencyKey: "plan-v2-evt", lineage: lineage({ planVersion: 2 }) }),
+  );
+
+  const byVersion1 = selectExecutionEconomicsEvents(ledger, {
+    tenantId: tenantA.tenantId,
+    projectId: "project-1",
+    planId: "plan-1",
+    planVersion: 1,
+  });
+  assert.equal(byVersion1.length, 1);
+  assert.equal(byVersion1.at(0)?.idempotencyKey, "plan-v1-evt");
+
+  const byVersion2 = selectExecutionEconomicsEvents(ledger, {
+    tenantId: tenantA.tenantId,
+    projectId: "project-1",
+    planId: "plan-1",
+    planVersion: 2,
+  });
+  assert.equal(byVersion2.length, 1);
+  assert.equal(byVersion2.at(0)?.idempotencyKey, "plan-v2-evt");
+
+  // omitting planVersion entirely is intentional broader aggregation, not a leak.
+  const bothVersions = selectExecutionEconomicsEvents(ledger, {
+    tenantId: tenantA.tenantId,
+    projectId: "project-1",
+    planId: "plan-1",
+  });
+  assert.equal(bothVersions.length, 2);
+});
+
 // --- M18-M23: cost rollups ---
 
 test("M18: resolveCostBucketTotal computes when every entry for that kind is REPORTED in the same currency", () => {
@@ -377,6 +423,7 @@ test("M27 (WEBSITE_BUILD_v1 proof): deterministic end-to-end attribution example
     tenantScope: websiteBuildTenant,
     projectId: "proof-project",
     planId: "website-build-v1-plan",
+    planVersion: 1,
     jobId: "website-build-v1-job",
     taskRef: "site-build",
     runRef: "run-1",
@@ -418,6 +465,7 @@ test("M28 (multi-plan isolation, prepares FAS-001 but does not claim FAS S1/S2 o
       tenantScope: tenant,
       projectId: "isolation-project",
       planId: `plan-${i}`,
+      planVersion: 1,
       jobId: `job-${i}`,
       taskRef: "site-build",
       runRef: "run-1",

@@ -10,6 +10,7 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const V2_CDO_008_FILES = [
   "src/domain/delivery-advisor.ts",
   "src/fixtures/website-build-v1-advisor.ts",
+  "src/fixtures/website-build-v1-recipe-binding.ts",
 ];
 
 const SECRET_PATTERNS: ReadonlyArray<{ label: string; pattern: RegExp }> = [
