@@ -57,9 +57,17 @@ test("Family 2: staff-membership-guard.ts composes OrganizationMembership/Tenant
 });
 
 test("Family 2: each module exports exactly the expected surface", () => {
+  // OS-V1-02 ("session expiry/revoke/recovery") widened StaffSessionContext's
+  // own surface with the ACTIVE/REVOKED lifecycle predicate/transition - the
+  // same ACTIVE/REVOKED shape already locked down for OrganizationMembership/
+  // OrganizationServicePrincipal elsewhere, additive and backward-compatible
+  // (see that module's own doc comment).
   assert.deepEqual(Object.keys(StaffSessionContext).sort(), [
     "InvalidStaffSessionContextError",
+    "InvalidStaffSessionContextTransitionError",
     "createAuthenticatedStaffPrincipal",
+    "isStaffSessionContextActive",
+    "revokeStaffSessionContext",
   ]);
   assert.deepEqual(Object.keys(StaffSessionProvider).sort(), []);
   assert.deepEqual(Object.keys(DevFixtureStaffSessionProvider).sort(), [

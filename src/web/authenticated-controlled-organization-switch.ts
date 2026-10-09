@@ -50,6 +50,8 @@ export function resolveControlledOrganizationSwitchAsAuthenticatedStaff(input: {
   readonly provider: StaffSessionProvider;
   readonly sessionToken: string | undefined;
   readonly grants: ReadonlyArray<StaffAccessGrant>;
+  /** OS-V1-02: optional, purely additive - see `requireStaffSession`'s own doc comment. */
+  readonly now?: string;
 }): OrganizationResourceBindingStatus {
   const current = input.store.getCurrentState(input.tenantScope, input.organizationId);
   if (current === undefined) {
@@ -62,6 +64,7 @@ export function resolveControlledOrganizationSwitchAsAuthenticatedStaff(input: {
     sessionToken: input.sessionToken,
     organization: current.organization,
     grants: input.grants,
+    ...(input.now !== undefined ? { now: input.now } : {}),
   });
   return input.store.resolveSwitch({
     tenantScope: input.tenantScope,

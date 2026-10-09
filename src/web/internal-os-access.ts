@@ -80,8 +80,10 @@ export function requireInternalOsAccess(input: {
   sessionToken: string | undefined;
   organization: Organization;
   grants: ReadonlyArray<StaffAccessGrant>;
+  /** OS-V1-02: optional, purely additive - see `requireStaffSession`'s own doc comment. */
+  now?: string;
 }): InternalOsAccessContext {
-  const session = requireStaffSession(input.provider, input.sessionToken);
+  const session = requireStaffSession(input.provider, input.sessionToken, input.now);
   const membership = requireMatchingStaffMembership({
     session,
     tenantId: input.organization.tenantId,
