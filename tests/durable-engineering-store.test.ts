@@ -205,3 +205,57 @@ test("two different runs are stored independently under the same store", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("CXP-001U: distinct (projectRef, taskId, runId) tuples whose components straddle the raw `::` delimiter are stored independently, not collided into one on-disk run", () => {
+  const dir = freshStoreDir();
+  try {
+    const projectRefA = "a::b";
+    const taskIdA = "c" as TaskId;
+    const projectRefB = "a";
+    const taskIdB = "b::c" as TaskId;
+    const sharedRunId = "run-1" as RunId;
+
+    // Prove the defect this test guards against was real: the old
+    // `${projectRef}::${taskId}::${runId}` formula genuinely collides for
+    // this exact pair of distinct tuples (they differ only in where the
+    // `::` boundary falls between projectRef and taskId).
+    const oldKey = (projectRef: string, taskId: string, runId: string): string =>
+      `${projectRef}::${taskId}::${runId}`;
+    assert.equal(oldKey(projectRefA, taskIdA, sharedRunId), oldKey(projectRefB, taskIdB, sharedRunId));
+
+    const store = new FileDurableEngineeringStore(dir);
+    store.appendEvent(
+      makeEvent({
+        eventType: "CHECKPOINT",
+        branch,
+        baseSha,
+        checkpointSha: "checkpoint-sha-tuple-a",
+        fencingToken: 1,
+        projectRef: projectRefA,
+        taskId: taskIdA,
+        runId: sharedRunId,
+      }),
+    );
+    store.appendEvent(
+      makeEvent({
+        eventType: "CHECKPOINT",
+        branch,
+        baseSha,
+        checkpointSha: "checkpoint-sha-tuple-b",
+        fencingToken: 1,
+        projectRef: projectRefB,
+        taskId: taskIdB,
+        runId: sharedRunId,
+      }),
+    );
+
+    const stateA = store.getState(projectRefA, taskIdA, sharedRunId);
+    const stateB = store.getState(projectRefB, taskIdB, sharedRunId);
+    assert.equal(stateA?.checkpointSha, "checkpoint-sha-tuple-a");
+    assert.equal(stateB?.checkpointSha, "checkpoint-sha-tuple-b");
+    assert.equal(store.getEvents(projectRefA, taskIdA, sharedRunId).length, 1);
+    assert.equal(store.getEvents(projectRefB, taskIdB, sharedRunId).length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
