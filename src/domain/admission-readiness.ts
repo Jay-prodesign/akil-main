@@ -59,10 +59,11 @@ function requireOwnedAssertion(
 ): void {
   if (
     assertion.evidence.tenantId !== plan.tenantId ||
+    assertion.evidence.customerId !== plan.customerId ||
     assertion.evidence.projectId !== plan.projectId
   ) {
     throw new InvalidAdmissionReadinessError(
-      `readinessAssertions[${index}] does not belong to the given plan's tenant/project`,
+      `readinessAssertions[${index}] does not belong to the given plan's tenant/customer/project`,
     );
   }
 }
