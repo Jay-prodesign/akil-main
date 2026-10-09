@@ -33,14 +33,18 @@ export type AttentionSourceDomain = "DELIVERY_OUTCOME_JOB";
  * Bounded correction (Brain handoff Rev28, CHANGES_REQUIRED_SOURCE_SEMANTICS
  * on PR #7): "Current attention items omit customer/client isolation...
  * Tenant+project filtering alone is insufficient for cross-client
- * isolation." `AttentionState` (V3-SLA-001) itself carries no customerId,
- * so this type cannot be filled from it alone without fabricating a
- * join. `OutcomeJob` (AKI-BE-001) already carries an authoritative
- * `customerId` for the exact same job, so `toOperationsAttentionItem`
- * below now requires the originating `OutcomeJob` as well, verifies it
- * actually identifies the same tenant/project/job as the given
- * `AttentionState` (fail closed on any mismatch), and only then reuses
- * its `customerId` directly - never independently supplied or guessed.
+ * isolation." `toOperationsAttentionItem` below requires the originating
+ * `OutcomeJob` alongside `AttentionState`, and verifies it actually
+ * identifies the same tenant/customer/project/job as the given
+ * `AttentionState` (fail closed on any mismatch) before reusing its
+ * `customerId` - never independently supplied or guessed.
+ *
+ * CXP-001F correction: `AttentionState` now carries its own `customerId`
+ * (see `attention-state.ts`) - the cross-check below now includes it
+ * explicitly rather than relying on `tenantId`+`projectId`+`jobId` alone,
+ * which CXP-001C/D established are not sufficient to distinguish two
+ * different customers sharing a `projectId`/`jobId` string within the
+ * same tenant.
  *
  * `evidenceFreshness` is the second Rev28 requirement: "represent
  * freshness so absent/stale evidence cannot look current." Because
@@ -77,10 +81,10 @@ export interface OperationsAttentionItem {
  * derivation - it cannot promote/demote urgency, invent an owner, or
  * fabricate a reason/timestamp the source state does not already carry.
  *
- * Rev28 bounded correction: `job` must identify the exact same
- * tenant/project/job as `state` - a mismatched `OutcomeJob` is rejected
- * rather than silently attributing its `customerId` to a foreign
- * `AttentionState` (no fabricated join).
+ * Rev28 bounded correction, extended by CXP-001F: `job` must identify the
+ * exact same tenant/customer/project/job as `state` - a mismatched
+ * `OutcomeJob` is rejected rather than silently attributing its
+ * `customerId` to a foreign `AttentionState` (no fabricated join).
  */
 export function toOperationsAttentionItem(input: {
   state: AttentionState;
@@ -95,6 +99,11 @@ export function toOperationsAttentionItem(input: {
   if (job.tenantId !== state.tenantId) {
     throw new InvalidOperationsAttentionItemError(
       "job belongs to a different tenant than the given AttentionState",
+    );
+  }
+  if (job.customerId !== state.customerId) {
+    throw new InvalidOperationsAttentionItemError(
+      "job belongs to a different customer than the given AttentionState",
     );
   }
   if (job.projectId !== state.projectId) {

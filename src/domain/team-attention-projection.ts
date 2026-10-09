@@ -148,10 +148,10 @@ function isViewerMembershipCurrent(input: {
  * from a viewer's own membership.
  *
  * §7 acceptance direction (V3-SLA-001, reused verbatim here): a supplied
- * `attentionState` is only surfaced when its own `tenantId`/`projectId`
- * match the given `ownership` - a foreign project's attention state is
- * never coerced into this scope's projection (the same two-field check
- * `buildAttentionState` itself already performs against its `job`).
+ * `attentionState` is only surfaced when its own `tenantId`/`customerId`/
+ * `projectId` match the given `ownership` - a foreign project's (or, per
+ * CXP-001F, a same-tenant/projectId foreign customer's) attention state
+ * is never coerced into this scope's projection.
  */
 export function buildTeamAttentionProjection(input: {
   ownership: ProjectOwnershipRef;
@@ -191,6 +191,7 @@ export function buildTeamAttentionProjection(input: {
   if (
     input.attentionState !== undefined &&
     input.attentionState.tenantId === input.ownership.tenantId &&
+    input.attentionState.customerId === input.ownership.customerId &&
     input.attentionState.projectId === input.ownership.projectId
   ) {
     attention = {

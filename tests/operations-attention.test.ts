@@ -119,6 +119,16 @@ test("Rev28 bounded correction: a job belonging to a different project than the 
   );
 });
 
+test("CXP-001F (adversarial): a job belonging to a different customer than the given AttentionState fails closed (no fabricated join), even when tenant/project/job all match", () => {
+  const job = freshJob("job-customer-check");
+  const state = buildAttentionState({ job });
+  const foreignJob = { ...job, customerId: "cust-unrelated-other" } as typeof job;
+  assert.throws(
+    () => toOperationsAttentionItem({ state, job: foreignJob }),
+    InvalidOperationsAttentionItemError,
+  );
+});
+
 test("this module carries no contractualSlaStatus field - internal attention and customer-contractual SLA remain separate truths", () => {
   const item = WEBSITE_BUILD_V1_OPERATIONS_ATTENTION_ITEM as unknown as Record<string, unknown>;
   assert.equal("contractualSlaStatus" in item, false);

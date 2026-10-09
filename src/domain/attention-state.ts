@@ -66,9 +66,21 @@ export type ContractualSlaStatus = "UNKNOWN";
  * nothing from `authority.ts` - constructing or reading an
  * `AttentionState` cannot itself transition an `OutcomeJob` or grant any
  * permission.
+ *
+ * CXP-001F correction: `AttentionState` previously carried no
+ * `customerId`, so downstream consumers (`operations-attention.ts`,
+ * `team-attention-projection.ts`) could only cross-check it against a
+ * separately-supplied job/ownership reference on `tenantId`+`projectId`
+ * (or `tenantId`+`jobId`) - dimensions CXP-001C/D already established are
+ * not sufficient to distinguish two different customers sharing a
+ * `projectId`/`jobId` string within the same tenant. `customerId` is now
+ * carried on `AttentionState` itself so those consumers can close that
+ * join gap directly rather than trusting an uncross-checked caller-
+ * supplied value.
  */
 export interface AttentionState {
   readonly tenantId: TenantScope["tenantId"];
+  readonly customerId: OutcomeJob["customerId"];
   readonly jobId: OutcomeJob["jobId"];
   readonly projectId: OutcomeJob["projectId"];
   readonly internalAttentionLevel: InternalAttentionLevel;
@@ -153,6 +165,7 @@ export function buildAttentionState(input: {
 
   return {
     tenantId: input.job.tenantId,
+    customerId: input.job.customerId,
     jobId: input.job.jobId,
     projectId: input.job.projectId,
     internalAttentionLevel,

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildTeamAttentionProjection } from "../src/domain/team-attention-projection.js";
 import { createOrganizationMembership } from "../src/domain/organization-membership.js";
+import { createCustomer } from "../src/domain/customer.js";
 import { createOwnershipAssignment } from "../src/domain/ownership-assignment.js";
 import { createProjectOwnershipRef } from "../src/domain/project-ownership.js";
 import { createOutcomeJob, enterExceptionState } from "../src/domain/outcome-job.js";
@@ -108,6 +109,42 @@ test("an attentionState for a different project is never coerced into this scope
   const projection = buildTeamAttentionProjection({
     ownership: WEBSITE_BUILD_V1_OWNERSHIP,
     attentionState: foreignAttentionState,
+  });
+  assert.equal(projection.attention, undefined);
+});
+
+test("CXP-001F (adversarial): an attentionState for a different customer is never coerced into this scope's projection, even when tenant and projectId both match", () => {
+  const otherCustomer = createCustomer({
+    tenantScope: fixture.tenantScope,
+    customerId: "cust-other-team-attention",
+    displayName: "Other Customer, Same Tenant",
+  });
+  const otherCustomerProject = {
+    ...fixture.project,
+    customerId: otherCustomer.customerId,
+    projectId: WEBSITE_BUILD_V1_OWNERSHIP.projectId,
+  };
+  const otherCustomerJob = createOutcomeJob({
+    tenantScope: fixture.tenantScope,
+    customer: otherCustomer,
+    project: otherCustomerProject,
+    jobId: "job-foreign-customer",
+    jobFamily: "website-build-v1",
+    businessObjective: "test",
+  });
+  const { job: blockedOtherCustomerJob } = enterExceptionState({
+    job: otherCustomerJob,
+    to: "BLOCKED",
+    eventId: "evt-foreign-customer-1",
+    actorRef: "system",
+    timestamp: "2026-08-29T00:00:00.000Z",
+    reason: "other customer's blocker",
+  });
+  const otherCustomerAttentionState = buildAttentionState({ job: blockedOtherCustomerJob });
+
+  const projection = buildTeamAttentionProjection({
+    ownership: WEBSITE_BUILD_V1_OWNERSHIP,
+    attentionState: otherCustomerAttentionState,
   });
   assert.equal(projection.attention, undefined);
 });
