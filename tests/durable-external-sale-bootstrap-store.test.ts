@@ -301,6 +301,30 @@ test("S8 (adversarial replay): a forged line where soldScope.projectId does not 
   }
 });
 
+test("CXP-001H (adversarial replay): a forged line where soldScope.customerId does not match project.customerId fails closed (referential integrity)", () => {
+  const dir = freshStoreDir();
+  try {
+    const { tenantScope, saleId, result } = bootstrapFor("cxp001h-1", "order-cxp001h-1");
+    const forged: ExternalSaleBootstrapResult = {
+      ...result,
+      soldScope: { ...result.soldScope, customerId: "different-customer-id" as never },
+    };
+    writeFileSync(
+      tenantFilePath(dir, tenantScope.tenantId),
+      `${JSON.stringify({ saleId, result: forged })}\n`,
+      "utf8",
+    );
+    const store = new FileDurableExternalSaleBootstrapStore(dir);
+
+    assert.throws(
+      () => store.get(tenantScope.tenantId, saleId),
+      CorruptedExternalSaleBootstrapLineError,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("S9 (adversarial replay): a forged line where job.projectId does not match project.projectId fails closed (referential integrity)", () => {
   const dir = freshStoreDir();
   try {

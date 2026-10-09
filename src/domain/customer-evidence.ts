@@ -1,4 +1,5 @@
 import type { TenantScope } from "./tenant-scope.js";
+import type { Customer } from "./customer.js";
 import type { Project } from "./project.js";
 import type { RequirementId } from "./offer-blueprint.js";
 
@@ -25,6 +26,7 @@ export type CustomerEvidenceKind = "FACT" | "HYPOTHESIS" | "UNKNOWN";
  */
 export interface CustomerEvidenceItem {
   readonly tenantId: TenantScope["tenantId"];
+  readonly customerId: Customer["customerId"];
   readonly projectId: Project["projectId"];
   readonly evidenceRef: EvidenceItemId;
   readonly kind: CustomerEvidenceKind;
@@ -84,6 +86,7 @@ export function createCustomerEvidenceItem(input: {
 
   return {
     tenantId: input.tenantScope.tenantId,
+    customerId: input.project.customerId,
     projectId: input.project.projectId,
     evidenceRef: evidenceRef as EvidenceItemId,
     kind: input.kind,
