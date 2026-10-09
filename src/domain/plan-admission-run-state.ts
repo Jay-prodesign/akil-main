@@ -1,4 +1,5 @@
 import type { TenantScope } from "./tenant-scope.js";
+import type { Customer } from "./customer.js";
 import type { Project } from "./project.js";
 import type { ProjectPlanVersion } from "./project-plan.js";
 import type { PlanAdmissionResult } from "./plan-admission.js";
@@ -25,6 +26,7 @@ export interface AnsweredEntityRecord {
  */
 export interface PlanAdmissionRunState {
   readonly tenantId: TenantScope["tenantId"];
+  readonly customerId: Customer["customerId"];
   readonly projectId: Project["projectId"];
   readonly planId: ProjectPlanVersion["planId"];
   readonly latestResult?: PlanAdmissionResult;
@@ -52,11 +54,12 @@ export function applyPlanAdmissionEvent(
   if (
     state !== undefined &&
     (event.tenantId !== state.tenantId ||
+      event.customerId !== state.customerId ||
       event.projectId !== state.projectId ||
       event.planId !== state.planId)
   ) {
     throw new InvalidPlanAdmissionRunStateError(
-      "event does not belong to this run's tenant/project/planId",
+      "event does not belong to this run's tenant/customer/project/planId",
     );
   }
 
@@ -68,6 +71,7 @@ export function applyPlanAdmissionEvent(
 
   const base: PlanAdmissionRunState = state ?? {
     tenantId: event.tenantId,
+    customerId: event.customerId,
     projectId: event.projectId,
     planId: event.planId,
     appliedEventIds: [],

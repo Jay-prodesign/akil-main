@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { TenantScope } from "./tenant-scope.js";
+import type { Customer } from "./customer.js";
 import type { Project } from "./project.js";
 import type { ProjectPlanVersion } from "./project-plan.js";
 import type { PlanAdmissionResult } from "./plan-admission.js";
@@ -23,10 +24,11 @@ export class InvalidPlanAdmissionAnswerError extends Error {
 
 function planKey(
   tenantId: TenantScope["tenantId"],
+  customerId: Customer["customerId"],
   projectId: Project["projectId"],
   planId: ProjectPlanVersion["planId"],
 ): string {
-  return `${tenantId}::${projectId}::${planId}`;
+  return `${tenantId}::${customerId}::${projectId}::${planId}`;
 }
 
 /**
@@ -38,11 +40,13 @@ export interface DurablePlanAdmissionStore {
   appendEvent(event: PlanAdmissionEvent): void;
   getEvents(
     tenantId: TenantScope["tenantId"],
+    customerId: Customer["customerId"],
     projectId: Project["projectId"],
     planId: ProjectPlanVersion["planId"],
   ): ReadonlyArray<PlanAdmissionEvent>;
   getState(
     tenantId: TenantScope["tenantId"],
+    customerId: Customer["customerId"],
     projectId: Project["projectId"],
     planId: ProjectPlanVersion["planId"],
   ): PlanAdmissionRunState | undefined;
@@ -51,8 +55,9 @@ export interface DurablePlanAdmissionStore {
 /**
  * Reference/local durable implementation using only Node's built-in
  * `node:fs` - no new runtime dependency (matches T10/T12). One append-only
- * JSON-lines file per tenant/project/plan under `baseDir`; `getState` always
- * reads the full file and replays it through the pure reducer, proving
+ * JSON-lines file per tenant/customer/project/plan under `baseDir`;
+ * `getState` always reads the full file and replays it through the pure
+ * reducer, proving
  * restart-safety by construction (T7) exactly as `FileDurableEngineeringStore`
  * does for ENG-ORCH-001.
  */
@@ -66,17 +71,18 @@ export class FileDurablePlanAdmissionStore implements DurablePlanAdmissionStore 
 
   private filePathFor(
     tenantId: TenantScope["tenantId"],
+    customerId: Customer["customerId"],
     projectId: Project["projectId"],
     planId: ProjectPlanVersion["planId"],
   ): string {
-    const safeKey = Buffer.from(planKey(tenantId, projectId, planId), "utf8").toString(
+    const safeKey = Buffer.from(planKey(tenantId, customerId, projectId, planId), "utf8").toString(
       "base64url",
     );
     return join(this.baseDir, `${safeKey}.jsonl`);
   }
 
   appendEvent(event: PlanAdmissionEvent): void {
-    const filePath = this.filePathFor(event.tenantId, event.projectId, event.planId);
+    const filePath = this.filePathFor(event.tenantId, event.customerId, event.projectId, event.planId);
     const line = `${JSON.stringify(event)}\n`;
     if (existsSync(filePath)) {
       const existing = readFileSync(filePath, "utf8");
@@ -88,10 +94,11 @@ export class FileDurablePlanAdmissionStore implements DurablePlanAdmissionStore 
 
   getEvents(
     tenantId: TenantScope["tenantId"],
+    customerId: Customer["customerId"],
     projectId: Project["projectId"],
     planId: ProjectPlanVersion["planId"],
   ): ReadonlyArray<PlanAdmissionEvent> {
-    const filePath = this.filePathFor(tenantId, projectId, planId);
+    const filePath = this.filePathFor(tenantId, customerId, projectId, planId);
     if (!existsSync(filePath)) {
       return [];
     }
@@ -104,10 +111,11 @@ export class FileDurablePlanAdmissionStore implements DurablePlanAdmissionStore 
 
   getState(
     tenantId: TenantScope["tenantId"],
+    customerId: Customer["customerId"],
     projectId: Project["projectId"],
     planId: ProjectPlanVersion["planId"],
   ): PlanAdmissionRunState | undefined {
-    return reconstructPlanAdmissionState(this.getEvents(tenantId, projectId, planId));
+    return reconstructPlanAdmissionState(this.getEvents(tenantId, customerId, projectId, planId));
   }
 }
 
@@ -130,6 +138,7 @@ export function recordEvaluation(input: {
   input.store.appendEvent(event);
   const state = input.store.getState(
     input.result.tenantId,
+    input.result.customerId,
     input.result.projectId,
     input.result.planId,
   );
@@ -153,13 +162,14 @@ export function recordEvaluation(input: {
 export function recordAnswer(input: {
   store: DurablePlanAdmissionStore;
   tenantId: TenantScope["tenantId"];
+  customerId: Customer["customerId"];
   projectId: Project["projectId"];
   planId: ProjectPlanVersion["planId"];
   answeredEntity: string;
   eventId: string;
   recordedAt: string;
 }): PlanAdmissionRunState {
-  const state = input.store.getState(input.tenantId, input.projectId, input.planId);
+  const state = input.store.getState(input.tenantId, input.customerId, input.projectId, input.planId);
   if (state?.latestResult === undefined || state.latestResult.status !== "WAITING") {
     throw new InvalidPlanAdmissionAnswerError(
       "no WAITING plan admission evaluation is durably recorded for this plan",
@@ -172,6 +182,7 @@ export function recordAnswer(input: {
   }
   const event = createAnswerRecordedEvent({
     tenantId: input.tenantId,
+    customerId: input.customerId,
     projectId: input.projectId,
     planId: input.planId,
     planVersion: state.latestResult.planVersion,
@@ -180,7 +191,7 @@ export function recordAnswer(input: {
     recordedAt: input.recordedAt,
   });
   input.store.appendEvent(event);
-  const nextState = input.store.getState(input.tenantId, input.projectId, input.planId);
+  const nextState = input.store.getState(input.tenantId, input.customerId, input.projectId, input.planId);
   if (nextState === undefined) {
     throw new InvalidPlanAdmissionAnswerError("internal error: state missing immediately after recordAnswer");
   }

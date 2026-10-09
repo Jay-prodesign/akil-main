@@ -14,6 +14,12 @@ import {
   InvalidPlanAdmissionAnswerError,
 } from "../src/domain/durable-plan-admission-store.js";
 import { createEvaluationRecordedEvent, createAnswerRecordedEvent } from "../src/domain/plan-admission-event.js";
+import {
+  applyPlanAdmissionEvent,
+  InvalidPlanAdmissionRunStateError,
+} from "../src/domain/plan-admission-run-state.js";
+import { createCustomer } from "../src/domain/customer.js";
+import { createProject } from "../src/domain/project.js";
 import { buildWebsiteBuildV1Fixture } from "../src/fixtures/website-build-v1.js";
 import { buildFullReadinessAssertions } from "./helpers/readiness-fixture.js";
 
@@ -60,6 +66,7 @@ test("T7: a durably recorded WAITING evaluation survives a simulated process res
     const storeB = new FileDurablePlanAdmissionStore(dir);
     const stateAfterRestart = storeB.getState(
       fixture.tenantScope.tenantId,
+      fixture.customer.customerId,
       fixture.project.projectId,
       waitingPlan.planId,
     );
@@ -105,6 +112,7 @@ test("T4: an answer binds to the exact awaited entity, one recorded resume evalu
         recordAnswer({
           store,
           tenantId: fixture.tenantScope.tenantId,
+          customerId: fixture.customer.customerId,
           projectId: fixture.project.projectId,
           planId: waitingPlan.planId,
           answeredEntity: "not-the-awaited-entity",
@@ -117,6 +125,7 @@ test("T4: an answer binds to the exact awaited entity, one recorded resume evalu
     const answeredState = recordAnswer({
       store,
       tenantId: fixture.tenantScope.tenantId,
+      customerId: fixture.customer.customerId,
       projectId: fixture.project.projectId,
       planId: waitingPlan.planId,
       answeredEntity: "optional-ecommerce-integration",
@@ -134,6 +143,7 @@ test("T4: an answer binds to the exact awaited entity, one recorded resume evalu
     const replayedAnswerState = recordAnswer({
       store,
       tenantId: fixture.tenantScope.tenantId,
+      customerId: fixture.customer.customerId,
       projectId: fixture.project.projectId,
       planId: waitingPlan.planId,
       answeredEntity: "optional-ecommerce-integration",
@@ -201,6 +211,7 @@ test("T4: an answer binds to the exact awaited entity, one recorded resume evalu
         recordAnswer({
           store,
           tenantId: fixture.tenantScope.tenantId,
+          customerId: fixture.customer.customerId,
           projectId: fixture.project.projectId,
           planId: waitingPlan.planId,
           answeredEntity: "optional-ecommerce-integration",
@@ -241,6 +252,7 @@ test("T8: duplicate ANSWER_RECORDED delivery at the raw event-log level is idemp
 
     const duplicateAnswerEvent = createAnswerRecordedEvent({
       tenantId: fixture.tenantScope.tenantId,
+      customerId: fixture.customer.customerId,
       projectId: fixture.project.projectId,
       planId: waitingPlan.planId,
       planVersion: waitingResult.planVersion,
@@ -254,6 +266,7 @@ test("T8: duplicate ANSWER_RECORDED delivery at the raw event-log level is idemp
     store.appendEvent(duplicateAnswerEvent);
     const state = store.getState(
       fixture.tenantScope.tenantId,
+      fixture.customer.customerId,
       fixture.project.projectId,
       waitingPlan.planId,
     );
@@ -316,11 +329,146 @@ test("T8: an out-of-order/stale EVALUATION_RECORDED event (lower plan version, a
     store.appendEvent(createEvaluationRecordedEvent({ result: v2Result, recordedAt: "2026-08-19T00:05:00.000Z" }));
     store.appendEvent(createEvaluationRecordedEvent({ result: v1Result, recordedAt: "2026-08-19T00:00:00.000Z" }));
 
-    const state = store.getState(fixture.tenantScope.tenantId, fixture.project.projectId, v1Plan.planId);
+    const state = store.getState(
+      fixture.tenantScope.tenantId,
+      fixture.customer.customerId,
+      fixture.project.projectId,
+      v1Plan.planId,
+    );
     assert.equal(state?.latestResult?.status, "ADMITTED");
     assert.equal(state?.latestResult?.planVersion, 2);
     // Both events are still durably present, even the one that did not win.
     assert.equal(state?.appliedEventIds.length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CXP-001L (adversarial): applyPlanAdmissionEvent rejects an event belonging to a different customer within the SAME tenant/project/planId", () => {
+  const fixture = buildWebsiteBuildV1Fixture();
+  const plan = compilePlan({
+    tenantScope: fixture.tenantScope,
+    project: fixture.project,
+    planId: "plan-durable-cxp-001l",
+    version: 1,
+    blueprint: fixture.blueprint,
+    soldScope: fixture.soldScope,
+    evidence: fixture.evidence,
+    now: "2026-08-19T00:00:00.000Z",
+  });
+  const result = admitPlan({
+    plan,
+    blueprint: fixture.blueprint,
+    readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, plan),
+  });
+  const legitEvent = createEvaluationRecordedEvent({ result, recordedAt: "2026-08-19T00:00:00.000Z" });
+  const state = applyPlanAdmissionEvent(undefined, legitEvent);
+
+  // A hand-built event carrying the SAME tenantId/projectId/planId as the
+  // existing state, but a forged customerId, must fail closed at the
+  // reducer's own lineage check - this is defense in depth independent of
+  // any store-level file partitioning by customerId (a different
+  // DurablePlanAdmissionStore implementation might not partition this way).
+  const foreignCustomerEvent = {
+    ...legitEvent,
+    eventId: "answer-cxp-001l-foreign-customer" as never,
+    customerId: "cust-cxp-001l-foreign" as never,
+  };
+  assert.throws(
+    () => applyPlanAdmissionEvent(state, foreignCustomerEvent),
+    InvalidPlanAdmissionRunStateError,
+  );
+});
+
+test("CXP-001L (adversarial): two different customers within the SAME tenant, reusing the exact same projectId/planId strings, persist as two independent, non-contaminating durable records", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const planA = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: fixture.project,
+      planId: "plan-shared-planid-cxp-001l",
+      version: 1,
+      blueprint: fixture.blueprint,
+      soldScope: fixture.soldScope,
+      evidence: fixture.evidence,
+      now: "2026-08-19T00:00:00.000Z",
+    });
+    const resultA = admitPlan({
+      plan: planA,
+      blueprint: fixture.blueprint,
+      readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, planA),
+    });
+    assert.equal(resultA.status, "WAITING");
+
+    // Deliberately reuses the SAME tenantScope and the SAME projectId/
+    // planId strings from a different customer, so this case is caught
+    // ONLY by customerId-scoped durable partitioning - a tenantId or
+    // projectId/planId check alone would not distinguish it (project.ts
+    // does not enforce projectId global uniqueness across customers).
+    const otherCustomer = createCustomer({
+      tenantScope: fixture.tenantScope,
+      customerId: "cust-cxp-001l-other",
+      displayName: "Other Customer, Same Tenant",
+    });
+    const otherCustomerProject = createProject({
+      tenantScope: fixture.tenantScope,
+      customer: otherCustomer,
+      projectId: fixture.project.projectId,
+      ownerRef: "owner-cxp-001l-other",
+      state: "active",
+    });
+    const otherCustomerSoldScope = createSoldScope({
+      tenantScope: fixture.tenantScope,
+      project: otherCustomerProject,
+      soldScopeId: "sold-scope-cxp-001l-other",
+      outcomeContractRef: "outcome-contract-cxp-001l-other",
+      includedRequirementIds: ["optional-multilingual-content"],
+      excludedRequirementIds: ["optional-ecommerce-integration"],
+    });
+    const planB = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: otherCustomerProject,
+      planId: "plan-shared-planid-cxp-001l",
+      version: 1,
+      blueprint: fixture.blueprint,
+      soldScope: otherCustomerSoldScope,
+      now: "2026-08-19T00:00:00.000Z",
+    });
+    const approvalB = createApprovalReference({
+      plan: planB,
+      approvalId: "approval-cxp-001l-other",
+      approvedAt: "2026-08-19T00:00:00.000Z",
+      approverRef: "owner:founder",
+    });
+    const resultB = admitPlan({
+      plan: planB,
+      blueprint: fixture.blueprint,
+      readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, otherCustomerProject, planB),
+      approval: approvalB,
+    });
+    assert.equal(resultB.status, "ADMITTED");
+
+    const store = new FileDurablePlanAdmissionStore(dir);
+    recordEvaluation({ store, result: resultA, recordedAt: "2026-08-19T00:00:00.000Z" });
+    recordEvaluation({ store, result: resultB, recordedAt: "2026-08-19T00:00:00.000Z" });
+
+    const stateA = store.getState(
+      fixture.tenantScope.tenantId,
+      fixture.customer.customerId,
+      fixture.project.projectId,
+      planA.planId,
+    );
+    const stateB = store.getState(
+      fixture.tenantScope.tenantId,
+      otherCustomer.customerId,
+      otherCustomerProject.projectId,
+      planB.planId,
+    );
+    assert.equal(stateA?.latestResult?.status, "WAITING");
+    assert.equal(stateB?.latestResult?.status, "ADMITTED");
+    assert.equal(stateA?.appliedEventIds.length, 1);
+    assert.equal(stateB?.appliedEventIds.length, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
