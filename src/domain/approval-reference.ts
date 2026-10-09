@@ -33,6 +33,7 @@ type ApprovalId = string & { readonly __brand: "ApprovalId" };
 export interface ApprovalReference {
   readonly approvalId: ApprovalId;
   readonly tenantId: ProjectPlanVersion["tenantId"];
+  readonly customerId: ProjectPlanVersion["customerId"];
   readonly projectId: ProjectPlanVersion["projectId"];
   readonly planId: ProjectPlanVersion["planId"];
   readonly planVersion: ProjectPlanVersion["version"];
@@ -98,6 +99,7 @@ export function createApprovalReference(input: {
   return {
     approvalId: approvalId as ApprovalId,
     tenantId: input.plan.tenantId,
+    customerId: input.plan.customerId,
     projectId: input.plan.projectId,
     planId: input.plan.planId,
     planVersion: input.plan.version,
@@ -122,6 +124,7 @@ export function isApprovalValidForPlan(
 ): boolean {
   return (
     approval.tenantId === plan.tenantId &&
+    approval.customerId === plan.customerId &&
     approval.projectId === plan.projectId &&
     approval.planId === plan.planId &&
     approval.planVersion === plan.version &&

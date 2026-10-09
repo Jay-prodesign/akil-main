@@ -235,3 +235,62 @@ test("Rev62 AUD-V2-01: an approval is invalid against a payload-identical plan b
 
   assert.equal(isApprovalValidForPlan(approval, otherTenantPlan), false);
 });
+
+test("CXP-001J (adversarial): an approval is invalid against a payload-identical plan belonging to a different customer within the SAME tenant, even when projectId values collide", () => {
+  const scope = createSoldScope({
+    tenantScope,
+    project,
+    soldScopeId: "scope-1",
+    outcomeContractRef: "contract-1",
+    excludedRequirementIds: ["b"],
+  });
+  const plan = compilePlan({
+    tenantScope,
+    project,
+    planId: "plan-1",
+    blueprint,
+    soldScope: scope,
+    now: "2026-08-18T00:00:00.000Z",
+  });
+  const approval = createApprovalReference({
+    plan,
+    approvalId: "approval-1",
+    approvedAt: "2026-08-18T00:05:00.000Z",
+    approverRef: "owner:founder",
+  });
+
+  // Deliberately reuses the SAME projectId string ("proj-1") from a
+  // different customer, so this case is caught ONLY by a customerId
+  // check - a tenantId or projectId check alone would not distinguish it
+  // (project.ts does not enforce projectId global uniqueness across
+  // customers).
+  const otherCustomer = createCustomer({
+    tenantScope,
+    customerId: "cust-other-approval-ref",
+    displayName: "Other Customer, Same Tenant",
+  });
+  const otherCustomerProject = createProject({
+    tenantScope,
+    customer: otherCustomer,
+    projectId: project.projectId,
+    ownerRef: "owner-1",
+    state: "active",
+  });
+  const otherCustomerScope = createSoldScope({
+    tenantScope,
+    project: otherCustomerProject,
+    soldScopeId: "scope-1",
+    outcomeContractRef: "contract-1",
+    excludedRequirementIds: ["b"],
+  });
+  const otherCustomerPlan = compilePlan({
+    tenantScope,
+    project: otherCustomerProject,
+    planId: "plan-1",
+    blueprint,
+    soldScope: otherCustomerScope,
+    now: "2026-08-18T00:00:00.000Z",
+  });
+
+  assert.equal(isApprovalValidForPlan(approval, otherCustomerPlan), false);
+});

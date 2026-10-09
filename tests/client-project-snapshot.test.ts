@@ -286,6 +286,94 @@ test("CXP-001B (adversarial): an approval belonging to a different planId within
   );
 });
 
+test("CXP-001J (adversarial): a plan belonging to a different customer within the SAME tenant, reusing the exact same projectId string, is contamination and rejects snapshot construction", () => {
+  // Deliberately reuses fixture.tenantScope and the SAME projectId string
+  // as fixture.project, from a different customer, so this case is
+  // caught ONLY by a customerId check - a tenantId or projectId check
+  // alone would not distinguish it (project.ts does not enforce
+  // projectId global uniqueness across customers).
+  const otherCustomer = createCustomer({
+    tenantScope: fixture.tenantScope,
+    customerId: "cust-other-client-snapshot-plan",
+    displayName: "Other Customer, Same Tenant",
+  });
+  const otherCustomerProject = createProject({
+    tenantScope: fixture.tenantScope,
+    customer: otherCustomer,
+    projectId: fixture.project.projectId,
+    ownerRef: "owner-other-client-snapshot-plan",
+    state: "active",
+  });
+  const otherCustomerSoldScope = createSoldScope({
+    tenantScope: fixture.tenantScope,
+    project: otherCustomerProject,
+    soldScopeId: "sold-scope-other-client-snapshot-plan",
+    outcomeContractRef: "outcome-contract-other-client-snapshot-plan",
+  });
+  const otherCustomerPlan = compilePlan({
+    tenantScope: fixture.tenantScope,
+    project: otherCustomerProject,
+    planId: WEBSITE_BUILD_V1_SNAPSHOT_PLAN.planId,
+    blueprint: fixture.blueprint,
+    soldScope: otherCustomerSoldScope,
+    now: "2026-08-25T00:00:00Z",
+  });
+
+  assert.throws(
+    () =>
+      buildClientProjectSnapshot({
+        ...minimalInput(),
+        plan: otherCustomerPlan,
+      }),
+    InvalidClientProjectSnapshotError,
+  );
+});
+
+test("CXP-001J (adversarial): an approval belonging to a different customer within the SAME tenant, reusing the exact same projectId string, is contamination and rejects snapshot construction", () => {
+  const otherCustomer = createCustomer({
+    tenantScope: fixture.tenantScope,
+    customerId: "cust-other-client-snapshot-approval",
+    displayName: "Other Customer, Same Tenant",
+  });
+  const otherCustomerProject = createProject({
+    tenantScope: fixture.tenantScope,
+    customer: otherCustomer,
+    projectId: fixture.project.projectId,
+    ownerRef: "owner-other-client-snapshot-approval",
+    state: "active",
+  });
+  const otherCustomerSoldScope = createSoldScope({
+    tenantScope: fixture.tenantScope,
+    project: otherCustomerProject,
+    soldScopeId: "sold-scope-other-client-snapshot-approval",
+    outcomeContractRef: "outcome-contract-other-client-snapshot-approval",
+  });
+  const otherCustomerPlan = compilePlan({
+    tenantScope: fixture.tenantScope,
+    project: otherCustomerProject,
+    planId: WEBSITE_BUILD_V1_SNAPSHOT_PLAN.planId,
+    blueprint: fixture.blueprint,
+    soldScope: otherCustomerSoldScope,
+    now: "2026-08-25T00:00:00Z",
+  });
+  const otherCustomerApproval = createApprovalReference({
+    plan: otherCustomerPlan,
+    approvalId: "approval-other-client-snapshot",
+    approvedAt: "2026-08-25T01:00:00Z",
+    approverRef: "other-customer-approver",
+  });
+
+  assert.throws(
+    () =>
+      buildClientProjectSnapshot({
+        ...minimalInput(),
+        plan: WEBSITE_BUILD_V1_SNAPSHOT_PLAN,
+        latestApproval: otherCustomerApproval,
+      }),
+    InvalidClientProjectSnapshotError,
+  );
+});
+
 test("P6: CLIENT_ACTION_REQUIRED requires a real customer input/approval dependency - a routine informational communication cannot manufacture it", () => {
   const informationalOnly = buildProjectCommunicationHistory({
     ownership: WEBSITE_BUILD_V1_OWNERSHIP,
