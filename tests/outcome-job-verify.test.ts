@@ -175,6 +175,101 @@ test("P0: refuses to verify when the VerificationResult belongs to a different t
   );
 });
 
+test("CXP-001D (adversarial): refuses to verify when the VerificationResult belongs to a different customer within the SAME tenant, even with matching jobId", () => {
+  const job = jobAtVerifying();
+  const otherCustomer = createCustomer({
+    tenantScope,
+    customerId: "cust-2",
+    displayName: "Other Customer, Same Tenant",
+  });
+  // Deliberately reuses the SAME projectId ("proj-1") and jobId ("job-1")
+  // from a different customer, so this case is caught ONLY by a
+  // customerId check - a projectId or jobId check alone would not
+  // distinguish it, matching CXP-001C's "same projectId, different
+  // customer" contamination shape.
+  const otherCustomerProject = createProject({
+    tenantScope,
+    customer: otherCustomer,
+    projectId: "proj-1",
+    ownerRef: "owner-other-customer",
+    state: "active",
+  });
+  let otherCustomerJob = createOutcomeJob({
+    tenantScope,
+    customer: otherCustomer,
+    project: otherCustomerProject,
+    jobId: "job-1",
+    jobFamily: "onboarding",
+    businessObjective: "A same-jobId job belonging to a different customer",
+  });
+  otherCustomerJob = transitionOutcomeJob(otherCustomerJob, "QUALIFIED");
+  otherCustomerJob = transitionOutcomeJob(otherCustomerJob, "READY");
+  otherCustomerJob = transitionOutcomeJob(otherCustomerJob, "EXECUTING");
+  otherCustomerJob = transitionOutcomeJob(otherCustomerJob, "VERIFYING");
+  const otherCustomerEvidence = createEvidenceReference({
+    job: otherCustomerJob,
+    evidenceId: "ev-other-customer",
+    evidenceType: "test-run-log",
+    sourceLocator: "internal://tests",
+    capturedAt: "2026-08-16T00:00:00.000Z",
+  });
+  const otherCustomerResult = createVerificationResult({
+    verificationId: "verif-cross-customer",
+    job: otherCustomerJob,
+    evidence: otherCustomerEvidence,
+    verificationRequirementRef: "T1-T12-suite",
+    status: "PASSED",
+  });
+  assert.throws(
+    () => verifyOutcomeJob(job, otherCustomerResult),
+    InvalidOutcomeJobError,
+  );
+});
+
+test("CXP-001D (adversarial): refuses to verify when the VerificationResult belongs to a different project within the SAME tenant/customer, even with matching jobId", () => {
+  const job = jobAtVerifying();
+  const otherProject = createProject({
+    tenantScope,
+    customer,
+    projectId: "proj-other",
+    ownerRef: "owner-1",
+    state: "active",
+  });
+  // Deliberately reuses jobId "job-1" from a different project so this
+  // case is only caught by a projectId check, not by tenantId/customerId/
+  // jobId equality.
+  let otherProjectJob = createOutcomeJob({
+    tenantScope,
+    customer,
+    project: otherProject,
+    jobId: "job-1",
+    jobFamily: "onboarding",
+    businessObjective: "A same-jobId job belonging to a different project",
+  });
+  otherProjectJob = transitionOutcomeJob(otherProjectJob, "QUALIFIED");
+  otherProjectJob = transitionOutcomeJob(otherProjectJob, "READY");
+  otherProjectJob = transitionOutcomeJob(otherProjectJob, "EXECUTING");
+  otherProjectJob = transitionOutcomeJob(otherProjectJob, "VERIFYING");
+  const otherProjectEvidence = createEvidenceReference({
+    job: otherProjectJob,
+    evidenceId: "ev-other-project",
+    evidenceType: "test-run-log",
+    sourceLocator: "internal://tests",
+    capturedAt: "2026-08-16T00:00:00.000Z",
+  });
+  const otherProjectResult = createVerificationResult({
+    verificationId: "verif-cross-project",
+    job: otherProjectJob,
+    evidence: otherProjectEvidence,
+    verificationRequirementRef: "T1-T12-suite",
+    status: "PASSED",
+  });
+  assert.throws(
+    () => verifyOutcomeJob(job, otherProjectResult),
+    InvalidOutcomeJobError,
+  );
+});
+
 test("refuses to verify a job that is not in VERIFYING", () => {
   const draft = createOutcomeJob({
     tenantScope,

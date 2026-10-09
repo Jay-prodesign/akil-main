@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createTenantScope } from "../src/domain/tenant-scope.js";
 import { createCustomer } from "../src/domain/customer.js";
 import { createProject } from "../src/domain/project.js";
-import { createOutcomeJob, type OutcomeJob } from "../src/domain/outcome-job.js";
+import { createOutcomeJob, InvalidOutcomeJobError, type OutcomeJob } from "../src/domain/outcome-job.js";
 import { createEvidenceReference } from "../src/domain/evidence.js";
 import { createVerificationResult } from "../src/domain/verification-result.js";
 import {
@@ -292,6 +292,55 @@ test("T2 / EI-4: full-permission authority for a different tenant cannot verify 
         passingVerificationResultFor(job),
       ),
     CrossTenantAuthorityError,
+  );
+});
+
+test("CXP-001D (adversarial, authorized application boundary): full protected authority cannot launder a same-tenant/same-jobId PASSED VerificationResult genuinely produced for a different customer/project's job", () => {
+  const targetJob = jobAtVerifying();
+
+  const foreignCustomer = createCustomer({
+    tenantScope,
+    customerId: "cust-foreign-authorized-verify",
+    displayName: "Foreign Customer, Same Tenant",
+  });
+  const foreignProject = createProject({
+    tenantScope,
+    customer: foreignCustomer,
+    projectId: "proj-foreign-authorized-verify",
+    ownerRef: "owner-foreign-authorized-verify",
+    state: "active",
+  });
+  // Deliberately reuses the exact same jobId ("job-1") as targetJob, from a
+  // genuinely different customer/project within the same tenant - proving
+  // the authorized application boundary rejects it the same way the
+  // underlying domain gate does, not merely that the domain gate itself
+  // works in isolation.
+  const foreignJob = createOutcomeJob({
+    tenantScope,
+    customer: foreignCustomer,
+    project: foreignProject,
+    jobId: "job-1",
+    jobFamily: "onboarding",
+    businessObjective: "Foreign customer/project job, same jobId string",
+  });
+  const foreignEvidence = createEvidenceReference({
+    job: foreignJob,
+    evidenceId: "ev-foreign-authorized-verify",
+    evidenceType: "test-run-log",
+    sourceLocator: "internal://tests",
+    capturedAt: "2026-08-16T00:00:00.000Z",
+  });
+  const foreignVerificationResult = createVerificationResult({
+    verificationId: "verif-foreign-authorized-verify",
+    job: foreignJob,
+    evidence: foreignEvidence,
+    verificationRequirementRef: "T1-T12-suite",
+    status: "PASSED",
+  });
+
+  assert.throws(
+    () => authorizedVerifyOutcomeJob(fullProtectedAuthority(), targetJob, foreignVerificationResult),
+    InvalidOutcomeJobError,
   );
 });
 

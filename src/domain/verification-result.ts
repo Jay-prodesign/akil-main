@@ -18,10 +18,22 @@ export type VerificationStatus = "PASSED" | "FAILED";
  * verification requirement - kept structurally distinct from
  * EvidenceReference (supports the claim) and AuditEvent (records
  * lineage).
+ *
+ * CXP-001D correction: `OutcomeJob` identity is canonically
+ * tenantId+customerId+projectId+jobId, but this type previously carried
+ * only tenantId+jobId, and `createVerificationResult` cross-checked only
+ * those two dimensions against the given evidence/job. `jobId` is a
+ * derived, human-readable string, not a globally unique identifier
+ * (see `evidence.ts`), so a same-tenant, same-jobId `VerificationResult`
+ * genuinely produced for a different customer/project's job could
+ * otherwise satisfy this one. `customerId`/`projectId` are now preserved
+ * and cross-checked the same way `tenantId`/`jobId` already are.
  */
 export interface VerificationResult {
   readonly verificationId: VerificationId;
   readonly tenantId: OutcomeJob["tenantId"];
+  readonly customerId: OutcomeJob["customerId"];
+  readonly projectId: OutcomeJob["projectId"];
   readonly jobId: OutcomeJob["jobId"];
   readonly evidenceId: EvidenceReference["evidenceId"];
   readonly verificationRequirementRef: string;
@@ -65,6 +77,16 @@ export function createVerificationResult(input: {
       "evidence does not belong to the given OutcomeJob's tenant",
     );
   }
+  if (input.evidence.customerId !== input.job.customerId) {
+    throw new InvalidVerificationResultError(
+      "evidence does not belong to the given OutcomeJob's customer",
+    );
+  }
+  if (input.evidence.projectId !== input.job.projectId) {
+    throw new InvalidVerificationResultError(
+      "evidence does not belong to the given OutcomeJob's project",
+    );
+  }
   const verificationId = requireNonEmptyString(input.verificationId, "verificationId");
   const verificationRequirementRef = requireNonEmptyString(
     input.verificationRequirementRef,
@@ -85,6 +107,8 @@ export function createVerificationResult(input: {
   return {
     verificationId: verificationId as VerificationId,
     tenantId: input.job.tenantId,
+    customerId: input.job.customerId,
+    projectId: input.job.projectId,
     jobId: input.job.jobId,
     evidenceId: input.evidence.evidenceId,
     verificationRequirementRef,

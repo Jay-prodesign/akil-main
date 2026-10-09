@@ -190,6 +190,14 @@ export class VerificationNotPassedError extends Error {
  * not proof of verification).
  * T6: succeeds only when a VerificationResult for this exact job has
  * status PASSED.
+ *
+ * CXP-001D correction: `jobId` is a derived, human-readable string, not a
+ * globally unique identifier (see `evidence.ts`), so a same-tenant,
+ * same-jobId `VerificationResult` genuinely produced for a different
+ * customer/project's job could previously satisfy this gate. `customerId`/
+ * `projectId` are now cross-checked the same way `tenantId`/`jobId`
+ * already are - `authorizedVerifyOutcomeJob` inherits this fix for free
+ * since it delegates entirely to this function.
  */
 export function verifyOutcomeJob(
   job: OutcomeJob,
@@ -209,6 +217,16 @@ export function verifyOutcomeJob(
   if (verificationResult.tenantId !== job.tenantId) {
     throw new InvalidOutcomeJobError(
       "verificationResult does not belong to this OutcomeJob's tenant",
+    );
+  }
+  if (verificationResult.customerId !== job.customerId) {
+    throw new InvalidOutcomeJobError(
+      "verificationResult does not belong to this OutcomeJob's customer",
+    );
+  }
+  if (verificationResult.projectId !== job.projectId) {
+    throw new InvalidOutcomeJobError(
+      "verificationResult does not belong to this OutcomeJob's project",
     );
   }
   if (verificationResult.status !== "PASSED") {

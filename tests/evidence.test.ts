@@ -39,6 +39,9 @@ test("creates an EvidenceReference for a job", () => {
     sourceLocator: "internal://tests/outcome-job-verify.test.ts",
     capturedAt: "2026-08-16T00:00:00.000Z",
   });
+  assert.equal(evidence.tenantId, job.tenantId);
+  assert.equal(evidence.customerId, job.customerId);
+  assert.equal(evidence.projectId, job.projectId);
   assert.equal(evidence.jobId, job.jobId);
   assert.equal(evidence.evidenceId, "ev-1");
   assert.equal(evidence.evidenceType, "test-run-log");

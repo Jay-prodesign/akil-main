@@ -124,6 +124,88 @@ test("P0: rejects evidence belonging to a different tenant, even when jobId valu
   );
 });
 
+test("CXP-001D (adversarial): rejects evidence belonging to a different customer within the SAME tenant, even when jobId values collide across customers", () => {
+  const otherCustomer = createCustomer({
+    tenantScope,
+    customerId: "cust-2",
+    displayName: "Other Customer, Same Tenant",
+  });
+  // Deliberately reuses the SAME projectId ("proj-1") and jobId ("job-1")
+  // from a different customer, so this case is caught ONLY by a
+  // customerId check - a projectId or jobId check alone would not
+  // distinguish it, matching CXP-001C's "same projectId, different
+  // customer" contamination shape.
+  const otherCustomerProject = createProject({
+    tenantScope,
+    customer: otherCustomer,
+    projectId: "proj-1",
+    ownerRef: "owner-other-customer",
+    state: "active",
+  });
+  const otherCustomerJob = createOutcomeJob({
+    tenantScope,
+    customer: otherCustomer,
+    project: otherCustomerProject,
+    jobId: "job-1",
+    jobFamily: "onboarding",
+    businessObjective: "A same-jobId job belonging to a different customer",
+  });
+  const otherCustomerEvidence = createEvidenceReference({
+    job: otherCustomerJob,
+    evidenceId: "ev-other-customer",
+    evidenceType: "test-run-log",
+    sourceLocator: "internal://tests",
+    capturedAt: "2026-08-16T00:00:00.000Z",
+  });
+  assert.throws(
+    () =>
+      createVerificationResult({
+        verificationId: "verif-other-customer",
+        job, // cust-1's job-1
+        evidence: otherCustomerEvidence, // cust-2's evidence for its own job-1
+        verificationRequirementRef: "T1-T12-suite",
+        status: "PASSED",
+      }),
+    InvalidVerificationResultError,
+  );
+});
+
+test("CXP-001D (adversarial): rejects evidence belonging to a different project within the SAME tenant/customer, even when jobId values collide across projects", () => {
+  const otherProject = createProject({
+    tenantScope,
+    customer,
+    projectId: "proj-other",
+    ownerRef: "owner-1",
+    state: "active",
+  });
+  const otherProjectJob = createOutcomeJob({
+    tenantScope,
+    customer,
+    project: otherProject,
+    jobId: "job-1",
+    jobFamily: "onboarding",
+    businessObjective: "A same-jobId job belonging to a different project",
+  });
+  const otherProjectEvidence = createEvidenceReference({
+    job: otherProjectJob,
+    evidenceId: "ev-other-project",
+    evidenceType: "test-run-log",
+    sourceLocator: "internal://tests",
+    capturedAt: "2026-08-16T00:00:00.000Z",
+  });
+  assert.throws(
+    () =>
+      createVerificationResult({
+        verificationId: "verif-other-project",
+        job, // proj-1's job-1
+        evidence: otherProjectEvidence, // proj-other's evidence for its own job-1
+        verificationRequirementRef: "T1-T12-suite",
+        status: "PASSED",
+      }),
+    InvalidVerificationResultError,
+  );
+});
+
 test("rejects evidence that does not correspond to the given job", () => {
   const otherJob = createOutcomeJob({
     tenantScope,
