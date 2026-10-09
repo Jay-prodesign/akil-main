@@ -68,6 +68,7 @@ test("MET-001A: module exports exactly the expected surface", () => {
     "EMPTY_EXECUTION_ECONOMICS_LEDGER",
     "InvalidExecutionEconomicsError",
     "appendExecutionEconomicsEvent",
+    "appendExecutionEconomicsEventAllowingCapturedAtDrift",
     "createCostAmount",
     "createExecutionEconomicsLineage",
     "isRecognizedUsageSource",
