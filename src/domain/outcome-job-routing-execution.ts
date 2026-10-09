@@ -350,13 +350,28 @@ function requireNonEmptyExecutionRoutingField(value: unknown, field: string): st
   return value;
 }
 
+/**
+ * Bounded scan correction (same class as Brain Rev44 F1/F2, CXP-001K/L/R/U):
+ * `tenantId`/`customerId`/`projectId`/`jobId` are validated only as
+ * non-empty trimmed strings, never as delimiter-free, so raw
+ * `::`-delimited concatenation is not actually collision-safe - two
+ * distinct scopes with a component containing `::` could resolve to the
+ * same registry key. This is a write-path defect, not merely a read-side
+ * one: `admit()` below treats a key collision as "already admitted" and
+ * silently returns the OTHER scope's stored `ExecutionRoutingRequirement`
+ * (carrying that scope's own tenantId/customerId/projectId/jobId) as if
+ * it were this job's requirement - a genuine cross-tenant/customer/job
+ * identity leak, not just a lookup miss. `JSON.stringify` of the identity
+ * tuple as an array is injective for this purpose: JSON string escaping
+ * means two distinct tuples can never serialize to the same string.
+ */
 function executionRoutingRequirementKey(scope: {
   tenantId: TenantScope["tenantId"];
   customerId: Customer["customerId"];
   projectId: Project["projectId"];
   jobId: OutcomeJob["jobId"];
 }): string {
-  return `${scope.tenantId}::${scope.customerId}::${scope.projectId}::${scope.jobId}`;
+  return JSON.stringify([scope.tenantId, scope.customerId, scope.projectId, scope.jobId]);
 }
 
 /**
