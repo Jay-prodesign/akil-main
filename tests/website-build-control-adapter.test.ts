@@ -22,6 +22,7 @@ import {
   type ConnectorTransport,
   type ConnectorTransportRequest,
   type SecretResolver,
+  type CurrentConnectorConnectionReader,
 } from "../src/domain/connector-execution.js";
 import {
   readWebsiteBuildSignal,
@@ -115,11 +116,25 @@ class FixedSecretResolver implements SecretResolver {
   }
 }
 
-function connectorRequest(ownershipRef: ProjectOwnershipRef, transport: ConnectorTransport) {
+/** OS-V0-06: a tenant-scoped current-connection fake mirroring `connector-execution.test.ts`'s own `currentStoreFor`. */
+function currentStoreFor(instance: ConnectorConnectionInstance): CurrentConnectorConnectionReader {
   return {
-    bound: bound(ownershipRef),
+    get(tenantId, connectionBindingId) {
+      if (tenantId !== instance.binding.ownership.tenantId || connectionBindingId !== instance.binding.connectionBindingId) {
+        return undefined;
+      }
+      return { instance, version: 1 };
+    },
+  };
+}
+
+function connectorRequest(ownershipRef: ProjectOwnershipRef, transport: ConnectorTransport) {
+  const boundDefinition = bound(ownershipRef);
+  return {
+    bound: boundDefinition,
     capabilityRef: "cap:site-content",
     requestingOwnership: ownershipRef,
+    connectionStore: currentStoreFor(boundDefinition.instance),
     secretResolver: new FixedSecretResolver(),
     transport,
   };

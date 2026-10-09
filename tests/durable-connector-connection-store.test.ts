@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createProjectOwnershipRef, type ProjectOwnershipRef } from "../src/domain/project-ownership.js";
-import { createConnectionRequirement, createSecretRef, type ConnectionRequirement } from "../src/domain/connection-authority.js";
+import { createConnectionRequirement, createSecretRef, type ConnectionRequirement, type ConnectionBinding } from "../src/domain/connection-authority.js";
 import {
   createConnectorDescriptor,
   requestConnectorConnection,
@@ -500,6 +500,204 @@ test("M14 (adversarial replay): a forged record whose secretRef is an object (no
     writeFileSync(tenantFilePath(dir, requirement.ownership.tenantId), JSON.stringify(forgedFile), "utf8");
 
     assert.throws(() => store.list(requirement.ownership.tenantId), CorruptedConnectorConnectionFileError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// OS-V0-06 Rev172 F1: connectionBindingId is a bare caller-supplied string
+// with no disallowed-value restriction, so a legal id such as "__proto__" or
+// "constructor" must behave as an ordinary own-record key - never as an
+// inherited Object.prototype member (a broken "unknown record" contract) or
+// a [[Prototype]]-changing assignment (a silently-vanishing record).
+// ---------------------------------------------------------------------------
+
+const PROTOTYPE_SHAPED_BINDING_IDS = ["__proto__", "constructor", "toString", "hasOwnProperty"] as const;
+
+test("P1 (OS-V0-06 Rev172 F1, adversarial): get() for a NEVER-created prototype-shaped connectionBindingId returns undefined, not an inherited Object.prototype member", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableConnectorConnectionStore(dir);
+    const requirement = requirementFor(githubDescriptor(), ownership("p1"));
+    for (const connectionBindingId of PROTOTYPE_SHAPED_BINDING_IDS) {
+      const result = store.get(requirement.ownership.tenantId, connectionBindingId as ConnectionBinding["connectionBindingId"]);
+      assert.equal(result, undefined, `get() for never-created binding id "${connectionBindingId}" must be undefined, not an inherited member`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P2 (OS-V0-06 Rev172 F1): save()/get() round-trips correctly for connectionBindingId = \"__proto__\", \"constructor\", and an ordinary key, with no cross-contamination between them", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableConnectorConnectionStore(dir);
+    const descriptor = githubDescriptor();
+    const requirement = requirementFor(descriptor, ownership("p2"));
+    const bindingIds = [...PROTOTYPE_SHAPED_BINDING_IDS, "ordinary-key"];
+
+    const instances = bindingIds.map((connectionBindingId) =>
+      requestConnectorConnection({
+        requirement,
+        connectorDescriptor: descriptor,
+        connectionBindingId,
+        workspaceRef: `workspace-${connectionBindingId}`,
+        integrationInstanceRef: `instance-${connectionBindingId}`,
+        delegatedScope: [],
+        authMode: "OAUTH2",
+      }),
+    );
+    for (const instance of instances) {
+      const stored = store.save(instance);
+      assert.equal(stored.version, 1, `save() for binding id "${instance.binding.connectionBindingId}" must create at version 1`);
+    }
+
+    for (const instance of instances) {
+      const reloaded = store.get(requirement.ownership.tenantId, instance.binding.connectionBindingId);
+      assert.ok(reloaded !== undefined, `get() must find the record just saved under "${instance.binding.connectionBindingId}"`);
+      assert.deepEqual(reloaded?.instance, instance, `the reloaded record for "${instance.binding.connectionBindingId}" must exactly match what was saved, never another binding's record`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P3 (OS-V0-06 Rev172 F1): list() includes every prototype-shaped and ordinary binding id saved, each with its own distinct content - none missing, merged, or silently dropped", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableConnectorConnectionStore(dir);
+    const descriptor = githubDescriptor();
+    const requirement = requirementFor(descriptor, ownership("p3"));
+    const bindingIds = [...PROTOTYPE_SHAPED_BINDING_IDS, "ordinary-key"];
+
+    for (const connectionBindingId of bindingIds) {
+      store.save(
+        requestConnectorConnection({
+          requirement,
+          connectorDescriptor: descriptor,
+          connectionBindingId,
+          workspaceRef: `workspace-${connectionBindingId}`,
+          integrationInstanceRef: `instance-${connectionBindingId}`,
+          delegatedScope: [],
+          authMode: "OAUTH2",
+        }),
+      );
+    }
+
+    const listed = store.list(requirement.ownership.tenantId);
+    assert.equal(listed.length, bindingIds.length, "list() must include exactly one record per distinct binding id saved - a __proto__ assignment that silently vanished would under-count here");
+    const listedIds = listed.map((entry) => entry.instance.binding.connectionBindingId).sort();
+    assert.deepEqual(listedIds, [...bindingIds].sort());
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P4 (OS-V0-06 Rev172 F1, restart-safety): a fresh store instance over the same baseDir reconstructs prototype-shaped binding ids identically, including their version", () => {
+  const dir = freshStoreDir();
+  try {
+    const storeA = new FileDurableConnectorConnectionStore(dir);
+    const descriptor = githubDescriptor();
+    const requirement = requirementFor(descriptor, ownership("p4"));
+
+    const created: Array<{ id: ConnectionBinding["connectionBindingId"]; version: number }> = [];
+    for (const connectionBindingId of PROTOTYPE_SHAPED_BINDING_IDS) {
+      const instance = requestConnectorConnection({
+        requirement,
+        connectorDescriptor: descriptor,
+        connectionBindingId,
+        workspaceRef: `workspace-${connectionBindingId}`,
+        integrationInstanceRef: `instance-${connectionBindingId}`,
+        delegatedScope: [],
+        authMode: "OAUTH2",
+      });
+      const stored = storeA.save(instance);
+      const unverified = transitionConnectorConnection(instance, "CONNECTED_UNVERIFIED");
+      const updated = storeA.save(unverified, stored.version);
+      created.push({ id: instance.binding.connectionBindingId, version: updated.version });
+    }
+
+    const storeB = new FileDurableConnectorConnectionStore(dir);
+    for (const { id, version } of created) {
+      const reloaded = storeB.get(requirement.ownership.tenantId, id);
+      assert.ok(reloaded !== undefined, `binding id "${id}" must survive a simulated restart`);
+      assert.equal(reloaded?.version, version);
+      assert.equal(reloaded?.instance.binding.connectionState, "CONNECTED_UNVERIFIED");
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P5 (OS-V0-06 Rev173 F2, isolation): a versioned update to ONE prototype-shaped binding id increments only that record - co-resident \"constructor\" and an ordinary record are untouched, both before and after a simulated restart", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableConnectorConnectionStore(dir);
+    const descriptor = githubDescriptor();
+    const requirement = requirementFor(descriptor, ownership("p5"));
+
+    const protoInstance = requestConnectorConnection({
+      requirement,
+      connectorDescriptor: descriptor,
+      connectionBindingId: "__proto__",
+      workspaceRef: "workspace-__proto__",
+      integrationInstanceRef: "instance-__proto__",
+      delegatedScope: [],
+      authMode: "OAUTH2",
+    });
+    const constructorInstance = requestConnectorConnection({
+      requirement,
+      connectorDescriptor: descriptor,
+      connectionBindingId: "constructor",
+      workspaceRef: "workspace-constructor",
+      integrationInstanceRef: "instance-constructor",
+      delegatedScope: [],
+      authMode: "OAUTH2",
+    });
+    const ordinaryInstance = requestConnectorConnection({
+      requirement,
+      connectorDescriptor: descriptor,
+      connectionBindingId: "ordinary-key",
+      workspaceRef: "workspace-ordinary-key",
+      integrationInstanceRef: "instance-ordinary-key",
+      delegatedScope: [],
+      authMode: "OAUTH2",
+    });
+
+    // Create all three at version 1 in the same tenant.
+    const protoCreated = store.save(protoInstance);
+    const constructorCreated = store.save(constructorInstance);
+    const ordinaryCreated = store.save(ordinaryInstance);
+    assert.equal(protoCreated.version, 1);
+    assert.equal(constructorCreated.version, 1);
+    assert.equal(ordinaryCreated.version, 1);
+
+    // Update ONLY "__proto__" once with its correct expectedVersion.
+    const protoUnverified = transitionConnectorConnection(protoInstance, "CONNECTED_UNVERIFIED");
+    const protoUpdated = store.save(protoUnverified, protoCreated.version);
+    assert.equal(protoUpdated.version, 2);
+    assert.equal(protoUpdated.instance.binding.connectionState, "CONNECTED_UNVERIFIED");
+
+    // The two co-resident records must be completely untouched.
+    const constructorAfter = store.get(requirement.ownership.tenantId, constructorInstance.binding.connectionBindingId);
+    const ordinaryAfter = store.get(requirement.ownership.tenantId, ordinaryInstance.binding.connectionBindingId);
+    assert.equal(constructorAfter?.version, 1);
+    assert.deepEqual(constructorAfter, constructorCreated);
+    assert.equal(ordinaryAfter?.version, 1);
+    assert.deepEqual(ordinaryAfter, ordinaryCreated);
+
+    // The same isolated result must persist after a simulated restart.
+    const storeAfterRestart = new FileDurableConnectorConnectionStore(dir);
+    const protoReloaded = storeAfterRestart.get(requirement.ownership.tenantId, protoInstance.binding.connectionBindingId);
+    const constructorReloaded = storeAfterRestart.get(requirement.ownership.tenantId, constructorInstance.binding.connectionBindingId);
+    const ordinaryReloaded = storeAfterRestart.get(requirement.ownership.tenantId, ordinaryInstance.binding.connectionBindingId);
+    assert.equal(protoReloaded?.version, 2);
+    assert.equal(protoReloaded?.instance.binding.connectionState, "CONNECTED_UNVERIFIED");
+    assert.equal(constructorReloaded?.version, 1);
+    assert.deepEqual(constructorReloaded, constructorCreated);
+    assert.equal(ordinaryReloaded?.version, 1);
+    assert.deepEqual(ordinaryReloaded, ordinaryCreated);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

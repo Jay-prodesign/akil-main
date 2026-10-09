@@ -7,6 +7,7 @@ import type {
 } from "./generic-connector-definition.js";
 import { resolveEndpointForCapability } from "./generic-connector-definition.js";
 import type { PrebuiltConnectorDefinition } from "./prebuilt-connector-definitions.js";
+import type { DurableConnectorConnectionStore } from "./durable-connector-connection-store.js";
 
 export class ConnectorExecutionNotAuthorizedError extends Error {
   constructor(reason: string) {
@@ -131,34 +132,80 @@ function effectiveBaseUrl(
 }
 
 /**
- * Rev94 F3's mandatory fail-closed list, checked in this exact order
- * before any transport call is made: wrong tenant/project binding
- * (`ownershipMatches`); revoked/degraded/unverified connection state
- * (only `VERIFIED` may execute); undeclared endpoint / capability never
- * admitted (`resolveEndpointForCapability`, which never returns
- * `undefined`); unresolved `SecretRef`. Only after all four pass does this
- * function ever call the injected `transport`, and a transport-reported
- * authorization failure is itself surfaced as a thrown, fail-closed error
- * rather than a silently-returned ambiguous result.
+ * OS-V0-06: the narrow read-only slice of `DurableConnectorConnectionStore`
+ * this module actually needs - a caller can inject the real durable store
+ * directly (it structurally satisfies this interface) or a minimal fake in
+ * tests, without this module ever gaining `save`/`list` authority it has no
+ * use for.
+ */
+export interface CurrentConnectorConnectionReader extends Pick<DurableConnectorConnectionStore, "get"> {}
+
+/**
+ * Rev94 F3 + OS-V0-06 MUST 1-8 (currentness): `input.bound.instance` is
+ * caller-supplied CONTEXT only, never authority - it names which
+ * `connectionBindingId` and which connector definition the caller wants to
+ * invoke, but the actual connection state/secretRef this function acts on
+ * is always the CURRENT durable record, re-read from `connectionStore`
+ * fresh on every call. Before this correction, a caller could retain a
+ * `VERIFIED` snapshot across a later revoke/degrade/rotation and still have
+ * it accepted here, because the only check was against that stale object -
+ * exactly the class of defect `outcome-job-execution-runtime.ts`'s own
+ * "always re-check freshly loaded durable state before any effect"
+ * discipline (OS-V0-05 Rev167 F20) already established elsewhere in this
+ * repository; the same principle now applies to connector execution. A
+ * previously produced `VERIFIED_AVAILABLE` `CapabilityAdmission`
+ * (`capability-admission.ts`) is likewise never consulted here and cannot
+ * substitute for this fresh check (MUST 6) - it remains observational
+ * readiness truth, not execution authority, simply by this function never
+ * accepting one as an input.
+ *
+ * Checked in this exact order before any transport call is made: no
+ * current durable record for the named `connectionBindingId` (MUST 1/8);
+ * wrong tenant/project binding on the CURRENT record (`ownershipMatches`,
+ * MUST 1); a stale definition/binding pairing whose current connector
+ * identity no longer matches what the bound definition was constructed
+ * against (MUST 5); revoked/degraded/unverified CURRENT connection state
+ * (only currently `VERIFIED` may execute, MUST 2/3); undeclared endpoint /
+ * capability never admitted (`resolveEndpointForCapability`, which never
+ * returns `undefined`); unresolved CURRENT `SecretRef` (MUST 4/7). Only
+ * after all of these pass does this function ever call the injected
+ * `transport`, and a transport-reported authorization failure is itself
+ * surfaced as a thrown, fail-closed error rather than a silently-returned
+ * ambiguous result.
  */
 export function executeConnectorCapability(input: {
   bound: BoundConnectorDefinition;
   capabilityRef: unknown;
   requestingOwnership: ProjectOwnershipRef;
+  connectionStore: CurrentConnectorConnectionReader;
   secretResolver: SecretResolver;
   transport: ConnectorTransport;
   requestPayload?: unknown;
 }): ConnectorExecutionResult {
-  const { instance, definition } = input.bound;
+  const { instance: callerSuppliedInstance, definition } = input.bound;
+  const connectionBindingId = callerSuppliedInstance.binding.connectionBindingId;
+
+  const stored = input.connectionStore.get(input.requestingOwnership.tenantId, connectionBindingId);
+  if (stored === undefined) {
+    throw new ConnectorExecutionNotAuthorizedError(
+      `no current durable connection exists for connectionBindingId "${connectionBindingId}" - a caller-supplied snapshot alone can never authorize execution`,
+    );
+  }
+  const instance = stored.instance;
 
   if (!ownershipMatches(input.requestingOwnership, instance.binding.ownership)) {
     throw new ConnectorExecutionNotAuthorizedError(
       "requestingOwnership does not match this connection's own tenant/customer/project/service scope",
     );
   }
+  if (instance.connectorKind !== callerSuppliedInstance.connectorKind) {
+    throw new ConnectorExecutionNotAuthorizedError(
+      `the current durable connection's connectorKind ("${instance.connectorKind}") no longer matches the bound definition's expected connectorKind ("${callerSuppliedInstance.connectorKind}") - a stale definition/binding pairing can never authorize execution`,
+    );
+  }
   if (instance.binding.connectionState !== "VERIFIED") {
     throw new ConnectorExecutionNotAuthorizedError(
-      `connection must be VERIFIED to execute; current state: ${instance.binding.connectionState}`,
+      `connection must be currently VERIFIED to execute; current durable state: ${instance.binding.connectionState}`,
     );
   }
 

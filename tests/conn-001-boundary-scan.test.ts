@@ -97,6 +97,15 @@ test("CONN-001: integration-connector-catalog.ts's only non-type-only runtime im
   );
 });
 
+test("OS-V0-06: connector-execution.ts's only import from durable-connector-connection-store.ts is type-only - re-resolving current connection truth must never pull the file-backed store's node:fs/lock machinery into this pure, in-memory execution module at runtime", () => {
+  const content = readFileSync(join(REPO_ROOT, "src/domain/connector-execution.ts"), "utf8");
+  const importLines = content.split("\n").filter((line) => /durable-connector-connection-store/.test(line));
+  assert.ok(importLines.length > 0, "expected connector-execution.ts to import from durable-connector-connection-store.ts");
+  for (const line of importLines) {
+    assert.match(line, /^import type /, `expected a type-only import, got: ${line}`);
+  }
+});
+
 test("CONN-001: package.json still declares no new runtime dependency", () => {
   const packageJson = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
     dependencies?: Record<string, string>;
