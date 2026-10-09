@@ -43,12 +43,15 @@ export function mutateConnectorConnectionStateAsAuthenticatedAdmin(input: {
   readonly store: DurableConnectorConnectionStore;
   readonly connectionBindingId: ConnectorConnectionInstance["binding"]["connectionBindingId"];
   readonly to: ConnectionState;
+  /** OS-V1-02: optional, purely additive - see `requireStaffSession`'s own doc comment. */
+  readonly now?: string;
 }): StoredConnectorConnection {
   const context = requireInternalOsAccess({
     provider: input.provider,
     sessionToken: input.sessionToken,
     organization: input.organization,
     grants: input.grants,
+    ...(input.now !== undefined ? { now: input.now } : {}),
   });
   return mutateConnectorConnectionStateAsAdmin({
     tenantScope: input.tenantScope,

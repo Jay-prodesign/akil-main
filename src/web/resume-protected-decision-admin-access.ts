@@ -42,6 +42,16 @@ export async function resumeProtectedDecisionAndExecuteConnectorEffectAsAuthenti
     readonly provider: StaffSessionProvider;
     readonly sessionToken: string | undefined;
     readonly grants: ReadonlyArray<StaffAccessGrant>;
+    /**
+     * OS-V1-02: optional, purely additive - the clock used ONLY to admit
+     * the staff SESSION (expiry/revoke) via `requireInternalOsAccess`/
+     * `requireStaffSession`. Deliberately named distinctly from this
+     * wrapper's own (unrelated, pre-existing, required) `now` field, which
+     * is the domain function's own `resolvedAt`/`occurredAt` timestamp for
+     * the resume decision itself - conflating the two would silently
+     * misuse one caller-supplied clock value for two unrelated purposes.
+     */
+    readonly sessionNow?: string;
   },
 ): Promise<ResumeAndExecuteConnectorEffectResult> {
   // Deliberately `async` (not a plain function returning the domain
@@ -55,8 +65,9 @@ export async function resumeProtectedDecisionAndExecuteConnectorEffectAsAuthenti
     sessionToken: input.sessionToken,
     organization: input.organization,
     grants: input.grants,
+    ...(input.sessionNow !== undefined ? { now: input.sessionNow } : {}),
   });
-  const { provider, sessionToken, grants, organization, ...rest } = input;
+  const { provider, sessionToken, grants, organization, sessionNow: _sessionNow, ...rest } = input;
   return resumeProtectedDecisionAndExecuteConnectorEffect({
     ...rest,
     organization,
