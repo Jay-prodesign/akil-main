@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTenantScope } from "../src/domain/tenant-scope.js";
+import { createOfferBlueprintVersion } from "../src/domain/offer-blueprint.js";
 import { createSoldScope } from "../src/domain/sold-scope.js";
 import { compilePlan } from "../src/domain/project-plan.js";
 import { createApprovalReference } from "../src/domain/approval-reference.js";
@@ -469,6 +471,96 @@ test("CXP-001L (adversarial): two different customers within the SAME tenant, re
     assert.equal(stateB?.latestResult?.status, "ADMITTED");
     assert.equal(stateA?.appliedEventIds.length, 1);
     assert.equal(stateB?.appliedEventIds.length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Brain Rev44 F2 (adversarial): two distinct tenant/customer/project/plan tuples whose components contain the delimiter character never collide on the durable file key, even though raw '::' concatenation of the same tuples would produce an identical string", () => {
+  const dir = freshStoreDir();
+  try {
+    // customerId="x::y" + projectId="z" and customerId="x" + projectId="y::z"
+    // both concatenate to the literal string "x::y::z" under naive
+    // `${customerId}::${projectId}` joining - the exact Brain Rev44 F2
+    // collision shape, at the durable-store key level rather than the
+    // specId level. Holding tenantId/planId constant isolates the key
+    // encoding as the only thing that can distinguish these two records.
+    const tenantScope = createTenantScope("tenant-cxp-001r-delimiter");
+    const customerA = createCustomer({ tenantScope, customerId: "x::y", displayName: "Customer A" });
+    const projectA = createProject({
+      tenantScope,
+      customer: customerA,
+      projectId: "z",
+      ownerRef: "owner-a",
+      state: "active",
+    });
+    const customerB = createCustomer({ tenantScope, customerId: "x", displayName: "Customer B" });
+    const projectB = createProject({
+      tenantScope,
+      customer: customerB,
+      projectId: "y::z",
+      ownerRef: "owner-b",
+      state: "active",
+    });
+
+    const blueprint = createOfferBlueprintVersion({
+      blueprintId: "bp-cxp-001r",
+      version: "1.0.0",
+      requirements: [{ requirementId: "req-1", description: "Req 1", necessity: "REQUIRED", dependsOn: [] }],
+    });
+    const soldScopeA = createSoldScope({
+      tenantScope,
+      project: projectA,
+      soldScopeId: "scope-a",
+      outcomeContractRef: "contract-a",
+    });
+    const soldScopeB = createSoldScope({
+      tenantScope,
+      project: projectB,
+      soldScopeId: "scope-b",
+      outcomeContractRef: "contract-b",
+    });
+    const planA = compilePlan({
+      tenantScope,
+      project: projectA,
+      planId: "plan-1",
+      blueprint,
+      soldScope: soldScopeA,
+      now: "2026-08-19T00:00:00.000Z",
+    });
+    const planB = compilePlan({
+      tenantScope,
+      project: projectB,
+      planId: "plan-1",
+      blueprint,
+      soldScope: soldScopeB,
+      now: "2026-08-19T00:00:00.000Z",
+    });
+    const resultA = admitPlan({ plan: planA, blueprint, readinessAssertions: [] });
+    const resultB = admitPlan({ plan: planB, blueprint, readinessAssertions: [] });
+
+    // Sanity: prove the OLD raw '::' concatenation formula genuinely
+    // collided for this adversarial pair, so this test would have failed
+    // to catch anything before the Rev44 correction.
+    const oldFormulaA = `${tenantScope.tenantId}::${customerA.customerId}::${projectA.projectId}::plan-1`;
+    const oldFormulaB = `${tenantScope.tenantId}::${customerB.customerId}::${projectB.projectId}::plan-1`;
+    assert.equal(oldFormulaA, oldFormulaB, "sanity: the old raw concatenation formula must collide for this adversarial pair");
+
+    const store = new FileDurablePlanAdmissionStore(dir);
+    recordEvaluation({ store, result: resultA, recordedAt: "2026-08-19T00:00:00.000Z" });
+    recordEvaluation({ store, result: resultB, recordedAt: "2026-08-19T00:00:00.000Z" });
+
+    const stateA = store.getState(tenantScope.tenantId, customerA.customerId, projectA.projectId, planA.planId);
+    const stateB = store.getState(tenantScope.tenantId, customerB.customerId, projectB.projectId, planB.planId);
+    assert.equal(stateA?.appliedEventIds.length, 1);
+    assert.equal(stateB?.appliedEventIds.length, 1);
+    assert.notEqual(stateA?.latestResult, undefined);
+    assert.notEqual(stateB?.latestResult, undefined);
+    // Each store instance sees only its own tuple's record, never the
+    // other's, even though both were persisted under the same tenant and
+    // the exact same colliding raw-concatenation string.
+    assert.equal(stateA?.customerId, customerA.customerId);
+    assert.equal(stateB?.customerId, customerB.customerId);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

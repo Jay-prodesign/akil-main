@@ -56,9 +56,28 @@ export interface OutcomeJobSpec {
  * same reason `projectId` was added: two customers sharing a
  * projectId/planId/version/requirement can never collide on runtime job
  * identity either.
+ *
+ * Brain Rev44 F1 correction: raw `:`-delimited concatenation of
+ * `customerId`/`projectId`/`planId`/`requirementId` is not actually
+ * collision-safe - these components are validated only as non-empty
+ * trimmed strings, never as delimiter-free, so a component itself
+ * containing `:` can shift the apparent tuple boundaries (e.g.
+ * `customerId="a:b", projectId="c"` and `customerId="a", projectId="b:c"`
+ * would concatenate to the same string). `specId` is derived here via
+ * `JSON.stringify` of the identity tuple as an array, which is injective
+ * for this purpose: JSON string encoding escapes any `"`/`\` a component
+ * contains, so the structural array/string delimiters (unescaped `"`,
+ * `,`, `[`, `]`) can never be produced by component content and two
+ * distinct tuples can never serialize to the same string.
  */
 function specIdFor(plan: ProjectPlanVersion, node: PlanNode): OutcomeJobSpecId {
-  return `${plan.customerId}:${plan.projectId}:${plan.planId}:v${plan.version}:${node.requirementId}` as OutcomeJobSpecId;
+  return JSON.stringify([
+    plan.customerId,
+    plan.projectId,
+    plan.planId,
+    plan.version,
+    node.requirementId,
+  ]) as OutcomeJobSpecId;
 }
 
 /**
