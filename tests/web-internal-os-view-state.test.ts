@@ -28,7 +28,10 @@ import {
   type WorkProjectSource,
   type WorkJobSource,
   type OrganizationResourceBindingSource,
+  type OperationalObservabilitySource,
 } from "../src/web/internal-os-view-state.js";
+import { composeOperationalObservabilityView } from "../src/domain/operational-observability-view.js";
+import { createConnectionRequirement, createConnectionBinding, transitionConnectionBinding } from "../src/domain/connection-authority.js";
 
 const tenantScope = createTenantScope("tenant-os-v0-08-view");
 const organization: Organization = activateOrganization({
@@ -293,5 +296,52 @@ test("Rev183 F3: resolveAdminView surfaces the real current binding status - blo
     assert.equal(view.resourceBinding.summary.state, "BLOCKED");
     assert.equal(view.resourceBinding.summary.nextRequiredActionCode, "NO_ACTIVE_BOUND_MEMBERSHIP");
     assert.deepEqual(view.resourceBinding.summary.unresolvedGates, ["NO_ACTIVE_BOUND_MEMBERSHIP"]);
+  }
+});
+
+test("OS-V0-12: resolveAdminView's operationalObservability defaults to NOT_ACTIVE when no source is supplied - honest Phase A default, never fabricated", () => {
+  const context = contextFor([]);
+  const view = resolveAdminView({ organization, context });
+  assert.deepEqual(view.operationalObservability, { kind: "NOT_ACTIVE" });
+});
+
+test("OS-V0-12: resolveAdminView surfaces a wired OperationalObservabilitySource's REAL composed view - a REVOKED connection's kill-switch state passes through byte-for-byte", () => {
+  const context = contextFor([]);
+  const ownership = createProjectOwnershipRef({
+    tenantId: tenantScope.tenantId,
+    customerId: customer.customerId,
+    projectId: projectAlpha.projectId,
+  });
+  const requirement = createConnectionRequirement({
+    connectionRequirementId: "conn-req-admin-1",
+    ownership,
+    requiredCapabilityRef: "required-access-connections",
+    purpose: "test",
+    accountOwner: "AKILTA_MANAGED",
+    minimumProviderScope: [],
+    connectionMethod: "oauth",
+    validationRequirement: "none",
+  });
+  const connectedBinding = transitionConnectionBinding(
+    createConnectionBinding({
+      connectionBindingId: "conn-bind-admin-1",
+      requirement,
+      ownership,
+      providerRef: "provider-1",
+      workspaceRef: "workspace-1",
+      integrationInstanceRef: "instance-1",
+      delegatedScope: [],
+    }),
+    "CONNECTED_UNVERIFIED",
+  );
+  const revokedBinding = transitionConnectionBinding(connectedBinding, "REVOKED");
+  const source: OperationalObservabilitySource = {
+    resolveView: () => composeOperationalObservabilityView({ connections: [revokedBinding] }),
+  };
+  const view = resolveAdminView({ organization, context, operationalObservabilitySource: source });
+  assert.equal(view.operationalObservability.kind, "READY");
+  if (view.operationalObservability.kind === "READY") {
+    assert.equal(view.operationalObservability.view.connections[0]?.connectionState, "REVOKED");
+    assert.equal(view.operationalObservability.view.connections[0]?.killSwitchEngaged, true);
   }
 });

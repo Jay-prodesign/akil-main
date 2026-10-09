@@ -20,6 +20,7 @@ import {
   type WorkProjectSource,
   type WorkJobSource,
   type OrganizationResourceBindingSource,
+  type OperationalObservabilitySource,
 } from "./internal-os-view-state.js";
 import {
   renderInternalOsPage,
@@ -58,6 +59,15 @@ export interface InternalOsRequestHandlerDeps {
    * fabricated content.
    */
   readonly resourceBindingSource?: OrganizationResourceBindingSource;
+  /**
+   * Rev195 F1: caller-injected read source for the Organization's current
+   * operational observability view, threaded into the real `/os/admin`
+   * route - mirrors `resourceBindingSource`'s own established optional-
+   * source pattern exactly. Absent (the honest production default until a
+   * real source is separately wired) renders `NOT_ACTIVE`, never
+   * fabricated content.
+   */
+  readonly operationalObservabilitySource?: OperationalObservabilitySource;
 }
 
 function toResponse(rendered: RenderedInternalOsPage): OutgoingResponseLike {
@@ -256,6 +266,9 @@ export function createInternalOsRequestHandler(deps: InternalOsRequestHandlerDep
             organization: deps.organization,
             context,
             ...(deps.resourceBindingSource !== undefined ? { resourceBindingSource: deps.resourceBindingSource } : {}),
+            ...(deps.operationalObservabilitySource !== undefined
+              ? { operationalObservabilitySource: deps.operationalObservabilitySource }
+              : {}),
           }),
         );
         break;
