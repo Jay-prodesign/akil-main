@@ -10,6 +10,11 @@ import { createAuthorityContext } from "../src/domain/authority.js";
 import { createAuthenticatedStaffPrincipal } from "../src/web/staff-session-context.js";
 import { requireInternalOsAccess } from "../src/web/internal-os-access.js";
 import { createDevFixtureStaffSessionProvider } from "../src/web/dev-fixture-staff-session-provider.js";
+import { createProjectOwnershipRef } from "../src/domain/project-ownership.js";
+import {
+  createOrganizationResourceBinding,
+  resolveOrganizationResourceBindingStatus,
+} from "../src/domain/organization-resource-binding.js";
 import {
   resolveNavVisibility,
   isDestinationVisible,
@@ -22,6 +27,7 @@ import {
   NAV_DESTINATIONS,
   type WorkProjectSource,
   type WorkJobSource,
+  type OrganizationResourceBindingSource,
 } from "../src/web/internal-os-view-state.js";
 
 const tenantScope = createTenantScope("tenant-os-v0-08-view");
@@ -236,4 +242,56 @@ test("resolveAdminView exposes the caller's own real organization/access truth p
   assert.equal(view.organization.displayName, organization.displayName);
   assert.equal(view.access.role, "MEMBER");
   assert.ok(view.notActiveConcepts.length > 0);
+  assert.deepEqual(view.resourceBinding, { kind: "NOT_ACTIVE" }, "no resourceBindingSource supplied - Phase A honest default, never fabricated");
+});
+
+test("Rev183 F3: resolveAdminView reports NOT_BOUND when a source is wired but the Organization has never been bootstrapped", () => {
+  const context = contextFor([]);
+  const source: OrganizationResourceBindingSource = { resolveStatus: () => undefined };
+  const view = resolveAdminView({ organization, context, resourceBindingSource: source });
+  assert.deepEqual(view.resourceBinding, { kind: "NOT_BOUND" });
+});
+
+test("Rev183 F3: resolveAdminView surfaces the real current binding status - blocker, next actor/action, unresolved gates - when a source resolves one", () => {
+  const context = contextFor([]);
+  const ownership = createProjectOwnershipRef({
+    tenantId: tenantScope.tenantId,
+    customerId: customer.customerId,
+    projectId: projectAlpha.projectId,
+  });
+  const membership = createOrganizationMembership({
+    membershipId: "m-admin-binding",
+    tenantScope,
+    principalRef: "principal-admin-binding",
+    role: "STAFF",
+  });
+  const binding = createOrganizationResourceBinding({
+    organization,
+    memberships: [membership],
+    project: projectAlpha,
+    ownership,
+    boundAt: "2026-01-02T00:00:00.000Z",
+  });
+  const source: OrganizationResourceBindingSource = {
+    resolveStatus: () =>
+      resolveOrganizationResourceBindingStatus({
+        binding,
+        organization,
+        currentMemberships: [],
+        currentServicePrincipals: [],
+        currentConnections: [],
+        currentProject: projectAlpha,
+        currentEffectiveConfigRefs: [],
+        currentEffectivePolicyRefs: [],
+        currentWorkerRouteDecisions: [],
+        currentKnowledgeEvidenceRefs: [],
+      }),
+  };
+  const view = resolveAdminView({ organization, context, resourceBindingSource: source });
+  assert.equal(view.resourceBinding.kind, "READY");
+  if (view.resourceBinding.kind === "READY") {
+    assert.equal(view.resourceBinding.summary.state, "BLOCKED");
+    assert.equal(view.resourceBinding.summary.nextRequiredActionCode, "NO_ACTIVE_BOUND_MEMBERSHIP");
+    assert.deepEqual(view.resourceBinding.summary.unresolvedGates, ["NO_ACTIVE_BOUND_MEMBERSHIP"]);
+  }
 });

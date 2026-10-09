@@ -138,6 +138,7 @@ test("Admin renders the organization/access it was given plus every NOT_ACTIVE c
     kind: "READY",
     organization: { displayName: "Org", state: "ACTIVE" },
     access: { role: "ADMIN", permissions: ["READ"], canPerformProtectedActions: false },
+    resourceBinding: { kind: "NOT_ACTIVE" },
     notActiveConcepts: ["Workers", "Connections", "Policies"],
   };
   const rendered = renderInternalOsPage(adminPageContent(NAV_DESTINATIONS, "Org", view));
@@ -145,6 +146,43 @@ test("Admin renders the organization/access it was given plus every NOT_ACTIVE c
   assert.match(rendered.html, /Connections/);
   assert.match(rendered.html, /Policies/);
   assert.match(rendered.html, /NOT ACTIVE/);
+});
+
+test("Rev183 F3: Admin renders the Organization's current resource-binding state/blocker/next-actor when a live status is supplied, never a mutation control", () => {
+  const view: AdminViewState = {
+    kind: "READY",
+    organization: { displayName: "Org", state: "ACTIVE" },
+    access: { role: "ADMIN", permissions: ["READ", "WRITE"], canPerformProtectedActions: false },
+    resourceBinding: {
+      kind: "READY",
+      summary: {
+        state: "ACTION_REQUIRED",
+        nextRequiredActor: "AKILTA",
+        nextRequiredActionCode: "CONNECTION_NOT_CURRENT",
+        nextRequiredActionReason: 'bound connection "bind-1" is currently REVOKED',
+        unresolvedGates: ["CONNECTION_NOT_CURRENT"],
+      },
+    },
+    notActiveConcepts: [],
+  };
+  const rendered = renderInternalOsPage(adminPageContent(NAV_DESTINATIONS, "Org", view));
+  assert.match(rendered.html, /ACTION_REQUIRED/);
+  assert.match(rendered.html, /AKILTA/);
+  assert.match(rendered.html, /bound connection &quot;bind-1&quot; is currently REVOKED/);
+  assert.doesNotMatch(rendered.html, /<button/i);
+  assert.doesNotMatch(rendered.html, /<form/i);
+});
+
+test("Rev183 F3: Admin renders NOT_BOUND distinctly from NOT_ACTIVE when the Organization has genuinely never been bootstrapped", () => {
+  const view: AdminViewState = {
+    kind: "READY",
+    organization: { displayName: "Org", state: "ACTIVE" },
+    access: { role: "ADMIN", permissions: ["READ"], canPerformProtectedActions: false },
+    resourceBinding: { kind: "NOT_BOUND" },
+    notActiveConcepts: [],
+  };
+  const rendered = renderInternalOsPage(adminPageContent(NAV_DESTINATIONS, "Org", view));
+  assert.match(rendered.html, /NOT BOUND/);
 });
 
 test("Rev170 F2: the app-shell grid reserves leftover vertical space for the content row, not the header - found via real rendered screenshot inspection (a short-content page like Work previously stretched the header row to fill min-height: 100vh, pushing the header text down inside a visibly oversized band)", () => {
@@ -213,7 +251,7 @@ test("no rendered page across any content kind ever contains a mutating form or 
     renderInternalOsPage(workPageContent(NAV_DESTINATIONS, "Org", homeView.work)),
     renderInternalOsPage(peoplePageContent(NAV_DESTINATIONS, "Org", { kind: "READY", self: { principalDisplayName: "X", organizationRole: "STAFF", membershipState: "ACTIVE" } })),
     renderInternalOsPage(productsPageContent(NAV_DESTINATIONS, "Org", { kind: "READY", products: [{ name: "X", status: "ACTIVE" }] })),
-    renderInternalOsPage(adminPageContent(NAV_DESTINATIONS, "Org", { kind: "READY", organization: { displayName: "Org", state: "ACTIVE" }, access: { role: "OWNER", permissions: ["READ", "WRITE", "EXECUTE"], canPerformProtectedActions: true }, notActiveConcepts: ["Workers"] })),
+    renderInternalOsPage(adminPageContent(NAV_DESTINATIONS, "Org", { kind: "READY", organization: { displayName: "Org", state: "ACTIVE" }, access: { role: "OWNER", permissions: ["READ", "WRITE", "EXECUTE"], canPerformProtectedActions: true }, resourceBinding: { kind: "NOT_ACTIVE" }, notActiveConcepts: ["Workers"] })),
   ];
   for (const page of pages) {
     assert.doesNotMatch(page.html, /<button/i);

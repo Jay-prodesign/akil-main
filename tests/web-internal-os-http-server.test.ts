@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { createInternalOsHttpServer } from "../src/web/internal-os-http-server.js";
 import { STAFF_SESSION_TOKEN_HEADER } from "../src/web/internal-os-request-handler.js";
+import type { OrganizationResourceBindingSource } from "../src/web/internal-os-view-state.js";
 import {
   REVIEW_ORGANIZATION,
   buildReviewStaffSessionFixtureMap,
@@ -151,5 +152,67 @@ test("a non-GET request to the internal OS is rejected end-to-end with 501 (unsu
       headers: { [STAFF_SESSION_TOKEN_HEADER]: FOUNDER_REVIEW_FIXTURE.sessionToken },
     });
     assert.equal(response.status, 501);
+  });
+});
+
+// --- Rev184 F3-residual: the real /os/admin route must actually thread resourceBindingSource, not just define it ---
+
+test("Rev184 F3-residual: /os/admin with no resourceBindingSource wired renders the honest NOT_ACTIVE posture through the real production-shaped route", async () => {
+  await withServer(devDeps, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/os/admin`, { headers: { [STAFF_SESSION_TOKEN_HEADER]: FOUNDER_REVIEW_FIXTURE.sessionToken } });
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    assert.match(body, /Resource binding/);
+    assert.match(body, /NOT ACTIVE/);
+  });
+});
+
+test("Rev184 F3-residual: /os/admin with a resourceBindingSource resolving no binding renders NOT_BOUND through the real route, distinct from NOT_ACTIVE", async () => {
+  const source: OrganizationResourceBindingSource = { resolveStatus: () => undefined };
+  await withServer({ ...devDeps, resourceBindingSource: source }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/os/admin`, { headers: { [STAFF_SESSION_TOKEN_HEADER]: FOUNDER_REVIEW_FIXTURE.sessionToken } });
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    assert.match(body, /NOT BOUND/);
+  });
+});
+
+test("Rev184 F3-residual: /os/admin with a BLOCKED current status renders the exact blocker/next-actor through the real route, not fabricated NOT_ACTIVE", async () => {
+  const source: OrganizationResourceBindingSource = {
+    resolveStatus: () => ({
+      tenantId: REVIEW_ORGANIZATION.tenantId,
+      organizationId: REVIEW_ORGANIZATION.organizationId,
+      state: "BLOCKED",
+      nextRequiredActor: "HUMAN_REVIEW",
+      nextRequiredAction: {
+        code: "NO_ACTIVE_BOUND_MEMBERSHIP",
+        reason: "none of this binding's own membershipRefs currently resolve to an active, coherent, tenant-correct membership",
+      },
+      unresolvedGates: ["NO_ACTIVE_BOUND_MEMBERSHIP"],
+    }),
+  };
+  await withServer({ ...devDeps, resourceBindingSource: source }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/os/admin`, { headers: { [STAFF_SESSION_TOKEN_HEADER]: FOUNDER_REVIEW_FIXTURE.sessionToken } });
+    const body = await response.text();
+    assert.match(body, /BLOCKED/);
+    assert.match(body, /HUMAN_REVIEW/);
+    assert.match(body, /NO_ACTIVE_BOUND_MEMBERSHIP/);
+  });
+});
+
+test("Rev184 F3-residual: /os/admin with a READY current status renders READY through the real route", async () => {
+  const source: OrganizationResourceBindingSource = {
+    resolveStatus: () => ({
+      tenantId: REVIEW_ORGANIZATION.tenantId,
+      organizationId: REVIEW_ORGANIZATION.organizationId,
+      state: "READY",
+      nextRequiredActor: "NONE",
+      unresolvedGates: [],
+    }),
+  };
+  await withServer({ ...devDeps, resourceBindingSource: source }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/os/admin`, { headers: { [STAFF_SESSION_TOKEN_HEADER]: FOUNDER_REVIEW_FIXTURE.sessionToken } });
+    const body = await response.text();
+    assert.match(body, /READY/);
   });
 });

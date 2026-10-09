@@ -19,6 +19,7 @@ import {
   type DestinationKey,
   type WorkProjectSource,
   type WorkJobSource,
+  type OrganizationResourceBindingSource,
 } from "./internal-os-view-state.js";
 import {
   renderInternalOsPage,
@@ -48,6 +49,15 @@ export interface InternalOsRequestHandlerDeps {
   readonly grants: ReadonlyArray<StaffAccessGrant>;
   readonly projectSource?: WorkProjectSource;
   readonly jobSource?: WorkJobSource;
+  /**
+   * Rev184 F3-residual: caller-injected read source for the Organization's
+   * current resource-binding status, threaded into the real `/os/admin`
+   * route - mirrors `projectSource`/`jobSource`'s own established optional-
+   * source pattern. Absent (the honest production default until a durable
+   * binding store is separately wired) renders `NOT_ACTIVE`, never
+   * fabricated content.
+   */
+  readonly resourceBindingSource?: OrganizationResourceBindingSource;
 }
 
 function toResponse(rendered: RenderedInternalOsPage): OutgoingResponseLike {
@@ -239,7 +249,15 @@ export function createInternalOsRequestHandler(deps: InternalOsRequestHandlerDep
         content = productsPageContent(nav, organizationName, resolveProductsView());
         break;
       case "admin":
-        content = adminPageContent(nav, organizationName, resolveAdminView({ organization: deps.organization, context }));
+        content = adminPageContent(
+          nav,
+          organizationName,
+          resolveAdminView({
+            organization: deps.organization,
+            context,
+            ...(deps.resourceBindingSource !== undefined ? { resourceBindingSource: deps.resourceBindingSource } : {}),
+          }),
+        );
         break;
     }
 

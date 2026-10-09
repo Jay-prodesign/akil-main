@@ -97,6 +97,7 @@ test("OS-V0-08: each module exports exactly the expected surface", () => {
     "resolveNotActiveView",
     "resolvePeopleView",
     "resolveProductsView",
+    "resolveResourceBindingView",
     "resolveWorkProjectDetailView",
     "resolveWorkView",
     "summarizeAccess",
