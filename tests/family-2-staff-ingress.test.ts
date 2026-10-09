@@ -15,7 +15,11 @@ import {
   AmbiguousStaffMembershipError,
 } from "../src/web/staff-membership-guard.js";
 import { createTenantScope } from "../src/domain/tenant-scope.js";
-import { createOrganizationMembership, type OrganizationMembership } from "../src/domain/organization-membership.js";
+import {
+  createOrganizationMembership,
+  revokeOrganizationMembership,
+  type OrganizationMembership,
+} from "../src/domain/organization-membership.js";
 
 const tenantScope = createTenantScope("tenant-a");
 const otherTenantScope = createTenantScope("tenant-b");
@@ -176,5 +180,68 @@ test("F2-16 (adversarial): requireMatchingStaffMembership throws NoStaffMembersh
         memberships: [membership()],
       }),
     NoStaffMembershipError,
+  );
+});
+
+// --- Rev131 Phase C: membership revocation/currentness floor (C10, C11) ---
+
+test("F2-17/C10 (adversarial): resolveMatchingStaffMembership returns undefined - never the revoked record - when the only matching membership is REVOKED", () => {
+  const revoked = revokeOrganizationMembership({
+    membership: membership(),
+    revokedAt: "2026-09-25T00:00:00.000Z",
+    revokedReason: "offboarded",
+  });
+  const found = resolveMatchingStaffMembership({
+    session: staffSession("staff-1"),
+    tenantId: tenantScope.tenantId,
+    memberships: [revoked],
+  });
+  assert.equal(found, undefined);
+});
+
+test("F2-18/C10 (adversarial): requireMatchingStaffMembership throws NoStaffMembershipError - not the revoked record - when the only matching membership is REVOKED", () => {
+  const revoked = revokeOrganizationMembership({
+    membership: membership(),
+    revokedAt: "2026-09-25T00:00:00.000Z",
+    revokedReason: "offboarded",
+  });
+  assert.throws(
+    () =>
+      requireMatchingStaffMembership({
+        session: staffSession("staff-1"),
+        tenantId: tenantScope.tenantId,
+        memberships: [revoked],
+      }),
+    NoStaffMembershipError,
+  );
+});
+
+test("F2-19/C11: one ACTIVE + one REVOKED membership for the same principal/tenant resolves the ACTIVE record, not ambiguous", () => {
+  const active = membership({ membershipId: "membership-active" });
+  const revoked = revokeOrganizationMembership({
+    membership: membership({ membershipId: "membership-revoked" }),
+    revokedAt: "2026-09-25T00:00:00.000Z",
+    revokedReason: "offboarded",
+  });
+  const found = resolveMatchingStaffMembership({
+    session: staffSession("staff-1"),
+    tenantId: tenantScope.tenantId,
+    memberships: [active, revoked],
+  });
+  assert.equal(found?.membershipId, "membership-active");
+});
+
+test("F2-20/C11: two ACTIVE memberships for the same principal/tenant remain ambiguous - REVOKED status does not change the ambiguity rule", () => {
+  assert.throws(
+    () =>
+      resolveMatchingStaffMembership({
+        session: staffSession("staff-1"),
+        tenantId: tenantScope.tenantId,
+        memberships: [
+          membership({ membershipId: "membership-1" }),
+          membership({ membershipId: "membership-2" }),
+        ],
+      }),
+    AmbiguousStaffMembershipError,
   );
 });

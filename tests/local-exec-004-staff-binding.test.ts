@@ -8,7 +8,11 @@ import {
 import { createAuthenticatedStaffPrincipal, type StaffSessionContext } from "../src/web/staff-session-context.js";
 import { NoStaffMembershipError, AmbiguousStaffMembershipError } from "../src/web/staff-membership-guard.js";
 import { createTenantScope } from "../src/domain/tenant-scope.js";
-import { createOrganizationMembership, type OrganizationMembership } from "../src/domain/organization-membership.js";
+import {
+  createOrganizationMembership,
+  revokeOrganizationMembership,
+  type OrganizationMembership,
+} from "../src/domain/organization-membership.js";
 import { createProjectOwnershipRef } from "../src/domain/project-ownership.js";
 import { createExecutionPolicy, InvalidLocalExecutionError } from "../src/domain/local-execution.js";
 
@@ -270,6 +274,127 @@ test("L4-10 (adversarial): resolveEligibleLocalWorkersForAuthenticatedStaff thro
 });
 
 // --- Rev106 correction (F1 - privilege escalation) ---
+
+// --- Rev131 Phase C: membership revocation/currentness floor (C13, C14) ---
+
+test("L4-12/C13 (adversarial): registerDeviceForAuthenticatedStaff throws NoStaffMembershipError - never registers a device - when the only matching membership is REVOKED", () => {
+  const revoked = revokeOrganizationMembership({
+    membership: membership(),
+    revokedAt: "2026-09-25T00:00:00.000Z",
+    revokedReason: "offboarded",
+  });
+  assert.throws(
+    () =>
+      registerDeviceForAuthenticatedStaff({
+        session: staffSession(),
+        tenantScope,
+        memberships: [revoked],
+        deviceId: "device-1",
+        publicKeyFingerprint: "fp-1",
+        platform: "macos",
+        bridgeVersion: "1.0.0",
+      }),
+    NoStaffMembershipError,
+  );
+});
+
+test("L4-13/C14 (adversarial): createLocalWorkerRegistrationForAuthenticatedStaff throws NoStaffMembershipError when the requester's only membership is REVOKED, even though the device was legitimately registered while ACTIVE", () => {
+  const active = membership();
+  const device = registerDeviceForAuthenticatedStaff({
+    session: staffSession(),
+    tenantScope,
+    memberships: [active],
+    deviceId: "device-1",
+    publicKeyFingerprint: "fp-1",
+    platform: "macos",
+    bridgeVersion: "1.0.0",
+  });
+  const revoked = revokeOrganizationMembership({
+    membership: active,
+    revokedAt: "2026-09-25T00:00:00.000Z",
+    revokedReason: "offboarded",
+  });
+  assert.throws(
+    () =>
+      createLocalWorkerRegistrationForAuthenticatedStaff({
+        session: staffSession(),
+        tenantScope,
+        memberships: [revoked],
+        device,
+        ...baseWorkerFields(),
+      }),
+    NoStaffMembershipError,
+  );
+});
+
+test("L4-14/C14 (adversarial): resolveEligibleLocalWorkersForAuthenticatedStaff throws NoStaffMembershipError when the requester's only membership is REVOKED", () => {
+  const active = membership();
+  const device = registerDeviceForAuthenticatedStaff({
+    session: staffSession(),
+    tenantScope,
+    memberships: [active],
+    deviceId: "device-1",
+    publicKeyFingerprint: "fp-1",
+    platform: "macos",
+    bridgeVersion: "1.0.0",
+  });
+  const registration = createLocalWorkerRegistrationForAuthenticatedStaff({
+    session: staffSession(),
+    tenantScope,
+    memberships: [active],
+    device,
+    ...baseWorkerFields(),
+  });
+  const revoked = revokeOrganizationMembership({
+    membership: active,
+    revokedAt: "2026-09-25T00:00:00.000Z",
+    revokedReason: "offboarded",
+  });
+  const executionPolicy = createExecutionPolicy({ tenantScope, executionMode: "PERSONAL_LOCAL" });
+  assert.throws(
+    () =>
+      resolveEligibleLocalWorkersForAuthenticatedStaff({
+        session: staffSession(),
+        tenantScope,
+        memberships: [revoked],
+        executionPolicy,
+        registrations: [registration],
+        targetOwnership,
+      }),
+    NoStaffMembershipError,
+  );
+});
+
+test("L4-15/C14: the existing ACTIVE-membership flow (device registration -> worker registration -> eligibility) remains green and unaffected by the revocation floor", () => {
+  const active = membership();
+  const device = registerDeviceForAuthenticatedStaff({
+    session: staffSession(),
+    tenantScope,
+    memberships: [active],
+    deviceId: "device-1",
+    publicKeyFingerprint: "fp-1",
+    platform: "macos",
+    bridgeVersion: "1.0.0",
+  });
+  const registration = createLocalWorkerRegistrationForAuthenticatedStaff({
+    session: staffSession(),
+    tenantScope,
+    memberships: [active],
+    device,
+    ...baseWorkerFields(),
+  });
+  const executionPolicy = createExecutionPolicy({ tenantScope, executionMode: "PERSONAL_LOCAL" });
+  const eligible = resolveEligibleLocalWorkersForAuthenticatedStaff({
+    session: staffSession(),
+    tenantScope,
+    memberships: [active],
+    executionPolicy,
+    registrations: [registration],
+    targetOwnership,
+  });
+  assert.equal(eligible.length, 1);
+  assert.equal(eligible[0]?.workerId, "worker-1");
+});
 
 test("L4-11 (Rev106 adversarial): an authenticated ordinary staff member can never self-elevate worker trust/authority - createLocalWorkerRegistrationForAuthenticatedStaff always mints UNTRUSTED/STANDARD regardless of caller intent", () => {
   const device = registerDeviceForAuthenticatedStaff({

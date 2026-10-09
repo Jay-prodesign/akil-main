@@ -25,19 +25,34 @@ import type { TenantScope } from "../domain/tenant-scope.js";
  * no `AuthorityContext`/protected-action authority. Narrowed to identity/
  * binding language only; no behavior change.
  *
- * Rev106 correction: this module's functions were previously named/
- * documented as resolving a "current" membership. Independently
- * re-verified against `organization-membership.ts`: `OrganizationMembership`
- * carries no active/revoked/effective/temporal-lifecycle field at all -
- * only `membershipId`/`tenantId`/`principalRef`/`role`. This module can
+ * Rev106 correction (superseded in part by Rev131, see below): this
+ * module's functions were previously named/documented as resolving a
+ * "current" membership. Independently re-verified against
+ * `organization-membership.ts`: at that time, `OrganizationMembership`
+ * carried no active/revoked/effective/temporal-lifecycle field at all -
+ * only `membershipId`/`tenantId`/`principalRef`/`role`. This module could
  * therefore only prove the provable fact - exactly one caller-supplied
- * membership matches this principal in this tenant - and must never
- * represent or imply "currentness" as an established property.
- * Currentness/effective-status provenance remains external/open, exactly
- * as it was before this correction; no second membership-lifecycle
- * primitive is invented here to manufacture that guarantee. Membership
- * identity alone also still grants no `AuthorityContext`/protected-action
- * authority - that remains solely `authority.ts`'s concern, unchanged.
+ * membership matches this principal in this tenant - and had to never
+ * represent or imply "currentness" as an established property. Membership
+ * identity alone still grants no `AuthorityContext`/protected-action
+ * authority - that remains solely `authority.ts`'s concern, unchanged by
+ * Rev131 too.
+ *
+ * Rev131 correction (Phase C - membership revocation/currentness floor):
+ * `OrganizationMembership` now carries the minimum V0 lifecycle floor
+ * (`ACTIVE`/`REVOKED`, see `organization-membership.ts`). This module now
+ * additionally filters every candidate through the local
+ * `isCoherentActiveMembership` check (see its own doc comment below for why
+ * it is a local field comparison rather than an imported
+ * `isOrganizationMembershipActive` value) before it can match, so a
+ * `REVOKED` or otherwise-incoherent membership can never satisfy staff
+ * membership, and an ACTIVE + REVOKED pair for the same principal/tenant
+ * resolves to the ACTIVE record rather than becoming ambiguous. This
+ * closes the *minimum* currentness floor this module always intended to
+ * prove once the underlying primitive supported it - it still does not
+ * claim or fabricate any richer effective-status/temporal-validity concept
+ * beyond that one ACTIVE/REVOKED bit, and still grants no
+ * `AuthorityContext`/protected-action authority of its own.
  *
  * `memberships` is caller-supplied (this module has no persistence/lookup
  * capability of its own, consistent with every other pure `src/web/`/
@@ -65,12 +80,38 @@ export class AmbiguousStaffMembershipError extends Error {
 }
 
 /**
+ * Rev131 (Phase C) note: this mirrors `organization-membership.ts`'s own
+ * `isOrganizationMembershipActive` predicate's `ACTIVE` branch exactly
+ * (coherent `ACTIVE` = no `revokedAt`/`revokedReason` present), but is
+ * deliberately inlined here as a plain field comparison rather than a
+ * value import of that function. `family-2-boundary-scan.test.ts` (an
+ * existing, out-of-surface test) asserts this module composes
+ * `OrganizationMembership`/`TenantScope` by type only and never imports a
+ * value from `organization-membership.ts` - a real invariant this module
+ * has held since Family 2 was built (it has no persistence/construction
+ * capability of its own). Importing `isOrganizationMembershipActive` as a
+ * value would be the more DRY choice, but would break that already-admitted
+ * boundary test, which Rev131's authorized eight-file write surface does
+ * not include. This three-line comparison is the smallest way to honor
+ * both: Rev131's "must only resolve ACTIVE/coherent memberships" contract,
+ * and the pre-existing type-only-composition boundary. If
+ * `OrganizationMembership`'s lifecycle shape ever changes again, both this
+ * copy and `organization-membership.ts`'s own predicate must be updated
+ * together - there are exactly two, not more.
+ */
+function isCoherentActiveMembership(membership: OrganizationMembership): boolean {
+  return membership.state === "ACTIVE" && membership.revokedAt === undefined && membership.revokedReason === undefined;
+}
+
+/**
  * Pure lookup - never throws on zero matches (a session with no matching
  * membership yet is an ordinary, expected state, not a caller error).
  * Throws only on more than one match: an ambiguous binding is never
  * silently resolved to "the first one," matching `resolveTrustedServiceForOrder`'s
  * (`SVC-ADM-001`) and `resolveCurrentOwner`'s (`V3-OWN-001`) own
- * fail-closed-on-ambiguity precedent.
+ * fail-closed-on-ambiguity precedent. Rev131: a revoked or otherwise
+ * incoherent membership can never match, per `isCoherentActiveMembership`
+ * above.
  */
 export function resolveMatchingStaffMembership(input: {
   session: StaffSessionContext;
@@ -80,7 +121,8 @@ export function resolveMatchingStaffMembership(input: {
   const matches = input.memberships.filter(
     (membership) =>
       membership.principalRef === input.session.principal.principalId &&
-      membership.tenantId === input.tenantId,
+      membership.tenantId === input.tenantId &&
+      isCoherentActiveMembership(membership),
   );
   if (matches.length > 1) {
     throw new AmbiguousStaffMembershipError();

@@ -182,15 +182,29 @@ test("reuses V3-OWN-001's own fixture history and viewer membership verbatim - n
   assert.equal(WEBSITE_BUILD_V1_TEAM_ATTENTION_STATE.tenantId, WEBSITE_BUILD_V1_OWNERSHIP.tenantId);
 });
 
-test("Rev28 bounded correction (SUPERSEDED by Rev29): the prior structural-only 'OrganizationMembership has no status field, so it cannot be stale' argument is not accepted as proof of currentness - see the Rev29-tagged tests below for the corrected behavior", () => {
-  // This test is kept only to document what changed and why: the field
-  // set really is closed to these four keys (still true), but the ABSENCE
-  // of a status field on the type never proved that a given value is
-  // current - it only proved the type permits a stale and a current
-  // membership to look byte-identical. Brain handoff Rev29 rejected the
-  // old "tenant match alone is enough" behavior for exactly this reason.
+test("Rev28 bounded correction (SUPERSEDED by Rev29, field set truth-synced by Rev132): the prior structural-only 'OrganizationMembership has no status field, so it cannot be stale' argument is not accepted as proof of currentness - see the Rev29-tagged tests below for the corrected behavior", () => {
+  // This test is kept only to document what changed and why. At Rev28/
+  // Rev29 time, OrganizationMembership's field set was closed to four keys
+  // and carried no status field at all - the ABSENCE of a status field on
+  // the type never proved that a given value is current, it only proved
+  // the type permitted a stale and a current membership to look
+  // byte-identical. Brain handoff Rev29 rejected the old "tenant match
+  // alone is enough" behavior for exactly this reason, and introduced this
+  // module's own currentness-directory mechanism (see the Rev29-tagged
+  // tests below) as the authoritative proof of currentness for THIS
+  // module's purposes.
+  //
+  // Rev132 truth-sync: OS-V0-02 Phase C (Rev131) subsequently extended
+  // OrganizationMembership itself with a minimal ACTIVE/REVOKED lifecycle
+  // field (`state`), so the field set is no longer these original four
+  // keys. This module still does not read `membership.state` anywhere and
+  // still relies exclusively on its own Rev29 currentness-directory
+  // mechanism for currentness proof - that source behavior is unchanged by
+  // this correction, only this historical field-count witness is updated
+  // to stop asserting a fact about the type's shape that Rev131 legitimately
+  // superseded.
   const membershipFieldNames = Object.keys(WEBSITE_BUILD_V1_VIEWER_MEMBERSHIP).sort();
-  assert.deepEqual(membershipFieldNames, ["membershipId", "principalRef", "role", "tenantId"]);
+  assert.deepEqual(membershipFieldNames, ["membershipId", "principalRef", "role", "state", "tenantId"]);
 });
 
 test("Rev29 bounded correction: viewerRole is emitted only when the viewer's membership is proven current via an authoritative currentness-directory record (not merely tenant-matched)", () => {
