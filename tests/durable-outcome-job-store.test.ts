@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createCustomer } from "../src/domain/customer.js";
 import { createProject } from "../src/domain/project.js";
 import { compilePlan } from "../src/domain/project-plan.js";
 import { deriveOutcomeJobSpecs } from "../src/domain/outcome-job-spec.js";
@@ -97,7 +98,11 @@ test("F3: persisting a full replayed wiring pass twice creates each job exactly 
     assert.equal(secondPass.created.length, 0);
     assert.equal(secondPass.alreadyPersisted.length, jobs.length);
 
-    const listed = storeA.list(fixture.tenantScope.tenantId, fixture.project.projectId);
+    const listed = storeA.list(
+      fixture.tenantScope.tenantId,
+      fixture.customer.customerId,
+      fixture.project.projectId,
+    );
     assert.equal(listed.length, jobs.length);
     assert.equal(new Set(listed.map((j) => j.jobId)).size, jobs.length);
 
@@ -105,7 +110,11 @@ test("F3: persisting a full replayed wiring pass twice creates each job exactly 
     // exact same de-duplicated job set - no in-memory index to diverge
     // from disk.
     const storeB = new FileDurableOutcomeJobStore(dir);
-    const listedAfterRestart = storeB.list(fixture.tenantScope.tenantId, fixture.project.projectId);
+    const listedAfterRestart = storeB.list(
+      fixture.tenantScope.tenantId,
+      fixture.customer.customerId,
+      fixture.project.projectId,
+    );
     assert.equal(listedAfterRestart.length, jobs.length);
     assert.deepEqual(
       [...listedAfterRestart].sort((a, b) => a.jobId.localeCompare(b.jobId)),
@@ -141,6 +150,70 @@ test("F3: claiming an already-persisted jobId under a different project (same te
     });
 
     assert.throws(() => store.putIfAbsent(conflictingJob), InvalidDurableOutcomeJobStoreError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CXP-001G (adversarial): claiming an already-persisted jobId under a different customer, same tenant AND same projectId string, fails closed", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableOutcomeJobStore(dir);
+    const { fixture, jobs } = admittedWiredJobs();
+    const job = jobs[0]!;
+    store.putIfAbsent(job);
+
+    // Deliberately reuses the SAME projectId string from a different
+    // customer within the same tenant, so this case is caught ONLY by a
+    // customerId check - a tenantId or projectId check alone would not
+    // distinguish it (project.ts does not enforce projectId global
+    // uniqueness across customers).
+    const otherCustomer = createCustomer({
+      tenantScope: fixture.tenantScope,
+      customerId: "cust-job-store-other-same-tenant",
+      displayName: "Other Customer, Same Tenant",
+    });
+    const sameProjectIdOtherCustomerProject = createProject({
+      tenantScope: fixture.tenantScope,
+      customer: otherCustomer,
+      projectId: job.projectId,
+      ownerRef: "owner-job-store-other-customer",
+      state: "active",
+    });
+    const conflictingJob = createOutcomeJob({
+      tenantScope: fixture.tenantScope,
+      customer: otherCustomer,
+      project: sameProjectIdOtherCustomerProject,
+      jobId: job.jobId,
+      jobFamily: job.jobFamily,
+      businessObjective: job.businessObjective,
+    });
+
+    assert.throws(() => store.putIfAbsent(conflictingJob), InvalidDurableOutcomeJobStoreError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CXP-001G (adversarial): list() does not leak a job to a different customer sharing the same tenantId and projectId string", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableOutcomeJobStore(dir);
+    const { fixture, jobs } = admittedWiredJobs();
+    const job = jobs[0]!;
+    store.putIfAbsent(job);
+
+    const otherCustomer = createCustomer({
+      tenantScope: fixture.tenantScope,
+      customerId: "cust-job-store-list-isolation",
+      displayName: "Other Customer, List Isolation",
+    });
+    const listedForOtherCustomer = store.list(job.tenantId, otherCustomer.customerId, job.projectId);
+    assert.equal(listedForOtherCustomer.length, 0);
+
+    const listedForOwningCustomer = store.list(job.tenantId, job.customerId, job.projectId);
+    assert.equal(listedForOwningCustomer.length, 1);
+    assert.deepEqual(listedForOwningCustomer[0], job);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

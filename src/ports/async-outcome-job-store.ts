@@ -20,6 +20,7 @@ export interface AsyncOutcomeJobStore {
   get(tenantId: TenantScope["tenantId"], jobId: OutcomeJob["jobId"]): Promise<OutcomeJob | undefined>;
   list(
     tenantId: TenantScope["tenantId"],
+    customerId: OutcomeJob["customerId"],
     projectId: OutcomeJob["projectId"],
   ): Promise<ReadonlyArray<OutcomeJob>>;
 }

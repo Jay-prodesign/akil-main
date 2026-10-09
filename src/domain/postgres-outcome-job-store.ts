@@ -136,9 +136,13 @@ export class PostgresOutcomeJobStore implements AsyncOutcomeJobStore {
         `putIfAbsent conflicted on tenant_id/job_id but no existing row could be read back for jobId "${job.jobId}"`,
       );
     }
-    if (existing.tenantId !== job.tenantId || existing.projectId !== job.projectId) {
+    if (
+      existing.tenantId !== job.tenantId ||
+      existing.customerId !== job.customerId ||
+      existing.projectId !== job.projectId
+    ) {
       throw new CorruptedOutcomeJobRowError(
-        `jobId "${job.jobId}" is already persisted under a different tenant/project`,
+        `jobId "${job.jobId}" is already persisted under a different tenant/customer/project`,
       );
     }
     return { job: existing, created: false };
@@ -163,13 +167,14 @@ export class PostgresOutcomeJobStore implements AsyncOutcomeJobStore {
 
   async list(
     tenantId: TenantScope["tenantId"],
+    customerId: OutcomeJob["customerId"],
     projectId: OutcomeJob["projectId"],
   ): Promise<ReadonlyArray<OutcomeJob>> {
     const result = await this.client.query<RawOutcomeJobRow>(
       `SELECT tenant_id, customer_id, project_id, job_id, job_family, business_objective, state
        FROM outcome_jobs
-       WHERE tenant_id = $1 AND project_id = $2`,
-      [tenantId, projectId],
+       WHERE tenant_id = $1 AND customer_id = $2 AND project_id = $3`,
+      [tenantId, customerId, projectId],
     );
     return result.rows.map((row) => validatePersistedOutcomeJobRow(row, tenantId));
   }

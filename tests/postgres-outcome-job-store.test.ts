@@ -57,9 +57,11 @@ class FakeSqlClient implements SqlClient {
       const row = this.rows.find((r) => r.tenant_id === tenantId && r.job_id === jobId);
       return { rows: (row !== undefined ? [row] : []) as unknown as ReadonlyArray<Row> };
     }
-    if (text.includes("project_id = $2")) {
-      const [tenantId, projectId] = params as string[];
-      const matches = this.rows.filter((r) => r.tenant_id === tenantId && r.project_id === projectId);
+    if (text.includes("project_id = $3")) {
+      const [tenantId, customerId, projectId] = params as string[];
+      const matches = this.rows.filter(
+        (r) => r.tenant_id === tenantId && r.customer_id === customerId && r.project_id === projectId,
+      );
       return { rows: matches as unknown as ReadonlyArray<Row> };
     }
     throw new Error(`FakeSqlClient: unrecognized query: ${text}`);
@@ -124,6 +126,75 @@ test("P4: putIfAbsent fails closed when the same jobId is reused for a different
   await assert.rejects(() => store.putIfAbsent(jobTwo), CorruptedOutcomeJobRowError);
 });
 
+test("CXP-001G (adversarial): putIfAbsent fails closed when the same jobId+projectId is reused for a different customer under the same tenant", async () => {
+  const store = new PostgresOutcomeJobStore(new FakeSqlClient());
+  const tenantScope = createTenantScope("tenant-pg-1");
+  const customerA = createCustomer({ tenantScope, customerId: "customer-pg-a", displayName: "PG Customer A" });
+  const customerB = createCustomer({ tenantScope, customerId: "customer-pg-b", displayName: "PG Customer B" });
+  const project = createProject({
+    tenantScope,
+    customer: customerA,
+    projectId: "project-pg-shared",
+    ownerRef: "owner-pg-1",
+    state: "ACTIVE",
+  });
+  const projectSameIdOtherCustomer = createProject({
+    tenantScope,
+    customer: customerB,
+    projectId: "project-pg-shared",
+    ownerRef: "owner-pg-2",
+    state: "ACTIVE",
+  });
+  const jobA = createOutcomeJob({
+    tenantScope,
+    customer: customerA,
+    project,
+    jobId: "job-shared-across-customers",
+    jobFamily: "WEBSITE_BUILD",
+    businessObjective: "Deliver website",
+  });
+  const jobB = createOutcomeJob({
+    tenantScope,
+    customer: customerB,
+    project: projectSameIdOtherCustomer,
+    jobId: "job-shared-across-customers",
+    jobFamily: "WEBSITE_BUILD",
+    businessObjective: "Deliver website",
+  });
+  await store.putIfAbsent(jobA);
+  await assert.rejects(() => store.putIfAbsent(jobB), CorruptedOutcomeJobRowError);
+});
+
+test("CXP-001G (adversarial): list filters by customer, excluding a different customer sharing the same tenant and projectId string", async () => {
+  const store = new PostgresOutcomeJobStore(new FakeSqlClient());
+  const tenantScope = createTenantScope("tenant-pg-1");
+  const customerA = createCustomer({ tenantScope, customerId: "customer-pg-a", displayName: "PG Customer A" });
+  const customerB = createCustomer({ tenantScope, customerId: "customer-pg-b", displayName: "PG Customer B" });
+  const projectA = createProject({
+    tenantScope,
+    customer: customerA,
+    projectId: "project-pg-shared-list",
+    ownerRef: "owner-pg-1",
+    state: "ACTIVE",
+  });
+  const jobA = createOutcomeJob({
+    tenantScope,
+    customer: customerA,
+    project: projectA,
+    jobId: "job-pg-list-a",
+    jobFamily: "WEBSITE_BUILD",
+    businessObjective: "Deliver website",
+  });
+  await store.putIfAbsent(jobA);
+
+  const listedForOtherCustomer = await store.list(tenantScope.tenantId, customerB.customerId, projectA.projectId);
+  assert.equal(listedForOtherCustomer.length, 0);
+
+  const listedForOwningCustomer = await store.list(tenantScope.tenantId, customerA.customerId, projectA.projectId);
+  assert.equal(listedForOwningCustomer.length, 1);
+  assert.deepEqual(listedForOwningCustomer[0], jobA);
+});
+
 test("P5: get returns undefined when no row exists", async () => {
   const store = new PostgresOutcomeJobStore(new FakeSqlClient());
   const tenantScope = createTenantScope("tenant-pg-empty");
@@ -148,7 +219,7 @@ test("P7: list filters by tenant and project, excluding other tenants/projects",
   await store.putIfAbsent(jobOtherProject);
   await store.putIfAbsent(jobOtherTenant);
 
-  const listed = await store.list(jobInScope.tenantId, jobInScope.projectId);
+  const listed = await store.list(jobInScope.tenantId, jobInScope.customerId, jobInScope.projectId);
   assert.equal(listed.length, 1);
   assert.deepEqual(listed[0], jobInScope);
 });
@@ -184,7 +255,7 @@ test("P9: list fails closed if any returned row has an empty required field", as
     state: "DRAFT",
   });
   await assert.rejects(
-    () => store.list("tenant-corrupt-2" as never, "project-corrupt-2" as never),
+    () => store.list("tenant-corrupt-2" as never, "" as never, "project-corrupt-2" as never),
     CorruptedOutcomeJobRowError,
   );
 });
