@@ -136,6 +136,58 @@ test("rejects diffing two plans with different planIds", () => {
   assert.throws(() => diffProjectPlans(planA, planB), InvalidProjectPlanDiffError);
 });
 
+test("CXP-001M (adversarial): rejects diffing two plans belonging to different customers within the SAME tenant, even when projectId/planId values collide across customers", () => {
+  const scope = createSoldScope({
+    tenantScope,
+    project,
+    soldScopeId: "scope-1",
+    outcomeContractRef: "contract-1",
+  });
+  const planV1 = compilePlan({
+    tenantScope,
+    project,
+    planId: "plan-cxp-001m",
+    blueprint,
+    soldScope: scope,
+    now: "2026-08-18T00:00:00.000Z",
+  });
+
+  // Deliberately reuses the SAME tenantScope and the SAME projectId/planId
+  // strings from a different customer, so this case is caught ONLY by a
+  // customerId check - a tenantId or projectId check alone would not
+  // distinguish it (project.ts does not enforce projectId global
+  // uniqueness across customers).
+  const otherCustomer = createCustomer({
+    tenantScope,
+    customerId: "cust-cxp-001m-other",
+    displayName: "Other Customer, Same Tenant",
+  });
+  const otherCustomerProject = createProject({
+    tenantScope,
+    customer: otherCustomer,
+    projectId: project.projectId,
+    ownerRef: "owner-cxp-001m-other",
+    state: "active",
+  });
+  const otherCustomerScope = createSoldScope({
+    tenantScope,
+    project: otherCustomerProject,
+    soldScopeId: "scope-cxp-001m-other",
+    outcomeContractRef: "contract-cxp-001m-other",
+  });
+  const otherCustomerPlanV2 = compilePlan({
+    tenantScope,
+    project: otherCustomerProject,
+    planId: "plan-cxp-001m",
+    version: 2,
+    blueprint,
+    soldScope: otherCustomerScope,
+    now: "2026-08-18T00:05:00.000Z",
+  });
+
+  assert.throws(() => diffProjectPlans(planV1, otherCustomerPlanV2), InvalidProjectPlanDiffError);
+});
+
 test("rejects diffing when next.version is not strictly greater than previous.version", () => {
   const scope = createSoldScope({
     tenantScope,
