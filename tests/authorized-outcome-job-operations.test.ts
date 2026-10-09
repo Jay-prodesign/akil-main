@@ -16,7 +16,13 @@ import {
 import {
   authorizedTransitionOutcomeJob,
   authorizedVerifyOutcomeJob,
+  authorizedTransitionOutcomeJobToExecutingViaRouting,
 } from "../src/application/authorized-outcome-job-operations.js";
+import {
+  createRoutedExecutionAssignment,
+  OutcomeJobExecutionNotRoutedError,
+} from "../src/domain/outcome-job-routing-execution.js";
+import { resolveWorkerRoute, type AdmittedWorker } from "../src/domain/worker-routing-policy.js";
 import type { TenantScope } from "../src/domain/tenant-scope.js";
 
 const tenantScope = createTenantScope("tenant-a");
@@ -188,6 +194,97 @@ test("T2 / EI-4: full-permission authority for a different tenant cannot verify 
         job,
         passingVerificationResultFor(job),
       ),
+    CrossTenantAuthorityError,
+  );
+});
+
+function readyJob(businessObjective?: string): OutcomeJob {
+  let job = draftJob(businessObjective);
+  job = authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "QUALIFIED");
+  job = authorizedTransitionOutcomeJob(fullWriteAuthority(), job, "READY");
+  return job;
+}
+
+function admittedWorker(workerId: string): AdmittedWorker {
+  return {
+    workerId,
+    declaredCapabilityRefs: ["cap:engineering.typescript"],
+    declaredToolRefs: [],
+    declaredPolicyConstraintRefs: [],
+    trustStatus: "ADMITTED",
+    availability: "AVAILABLE",
+    maxRiskLevel: "STANDARD",
+    authorityLevel: "STANDARD",
+    costWeight: 1,
+    evaluationEvidenceRef: `evidence:${workerId}`,
+  };
+}
+
+function routedAssignmentFor(job: OutcomeJob) {
+  const decision = resolveWorkerRoute({
+    requiredCapabilityRef: "cap:engineering.typescript",
+    riskLevel: "STANDARD",
+    requiredToolRefs: [],
+    requiredPolicyConstraintRefs: [],
+    requiredAuthorityLevel: "STANDARD",
+    requiresIndependentReview: false,
+    executorCandidates: [admittedWorker("claude")],
+  });
+  return createRoutedExecutionAssignment({ job, decision, boundAt: "2026-09-15T00:00:00.000Z" });
+}
+
+test("Rev98 Family 12 (routing glue): WRITE authority with a valid, matching RoutedExecutionAssignment transitions a READY job to EXECUTING", () => {
+  const job = readyJob();
+  const executing = authorizedTransitionOutcomeJobToExecutingViaRouting(
+    fullWriteAuthority(),
+    job,
+    routedAssignmentFor(job),
+  );
+  assert.equal(executing.state, "EXECUTING");
+});
+
+test("Rev98 Family 12 (routing glue): READ-only authority cannot begin execution via routing even with a valid assignment", () => {
+  const job = readyJob();
+  assert.throws(
+    () => authorizedTransitionOutcomeJobToExecutingViaRouting(readOnlyAuthority(), job, routedAssignmentFor(job)),
+    InsufficientAuthorityError,
+  );
+});
+
+test("Rev98 Family 12 (routing glue) adversarial: WRITE authority without any assignment cannot begin execution via this path - a READY job is never moved to EXECUTING by default", () => {
+  const job = readyJob();
+  assert.throws(
+    () => authorizedTransitionOutcomeJobToExecutingViaRouting(fullWriteAuthority(), job, undefined),
+    OutcomeJobExecutionNotRoutedError,
+  );
+});
+
+test("Rev98 Family 12 (routing glue) adversarial: an assignment bound to a different job cannot authorize this job's execution", () => {
+  const job = readyJob();
+  const otherDraft = createOutcomeJob({
+    tenantScope,
+    customer,
+    project,
+    jobId: "job-2",
+    jobFamily: "onboarding",
+    businessObjective: "Verify tenant isolation kernel end to end",
+  });
+  const otherJob = authorizedTransitionOutcomeJob(
+    fullWriteAuthority(),
+    authorizedTransitionOutcomeJob(fullWriteAuthority(), otherDraft, "QUALIFIED"),
+    "READY",
+  );
+  assert.throws(
+    () => authorizedTransitionOutcomeJobToExecutingViaRouting(fullWriteAuthority(), job, routedAssignmentFor(otherJob)),
+    OutcomeJobExecutionNotRoutedError,
+  );
+});
+
+test("Rev98 Family 12 (routing glue) / T2: full-permission authority for a different tenant cannot begin execution via routing for this job", () => {
+  const job = readyJob();
+  const crossTenantAuthority = fullWriteAuthority(otherTenantScope);
+  assert.throws(
+    () => authorizedTransitionOutcomeJobToExecutingViaRouting(crossTenantAuthority, job, routedAssignmentFor(job)),
     CrossTenantAuthorityError,
   );
 });

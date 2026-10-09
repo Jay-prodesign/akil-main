@@ -10,6 +10,10 @@ import {
   type OutcomeJob,
   type OutcomeJobState,
 } from "../domain/outcome-job.js";
+import {
+  authorizeOutcomeJobExecutionFromRouting,
+  type RoutedExecutionAssignment,
+} from "../domain/outcome-job-routing-execution.js";
 import type { VerificationResult } from "../domain/verification-result.js";
 
 /**
@@ -44,4 +48,26 @@ export function authorizedVerifyOutcomeJob(
   requirePermission(authority, "EXECUTE");
   requireProtectedActionAuthorization(authority, "verifyOutcomeJob");
   return verifyOutcomeJob(job, verificationResult);
+}
+
+/**
+ * Rev98 Family 12 (admitted-routing -> authorized-execution glue): the
+ * properly-glued path from a `ROUTED` `WorkerRoutingDecision` to a job's
+ * own `EXECUTING` transition. Same tenant match and WRITE permission as
+ * `authorizedTransitionOutcomeJob` (this does not introduce a new
+ * privilege tier for beginning execution - see
+ * `outcome-job-routing-execution.ts`'s own doc comment for why the
+ * ordinary path is deliberately left open rather than narrowed here),
+ * plus a valid, exactly-matching `RoutedExecutionAssignment` delegated
+ * entirely to the existing, unmodified
+ * `authorizeOutcomeJobExecutionFromRouting`.
+ */
+export function authorizedTransitionOutcomeJobToExecutingViaRouting(
+  authority: AuthorityContext,
+  job: OutcomeJob,
+  assignment: RoutedExecutionAssignment | undefined,
+): OutcomeJob {
+  requireSameTenant(authority, job.tenantId);
+  requirePermission(authority, "WRITE");
+  return authorizeOutcomeJobExecutionFromRouting({ job, assignment });
 }
