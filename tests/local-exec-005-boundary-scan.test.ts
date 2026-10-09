@@ -67,6 +67,24 @@ test("LOCAL-EXEC-005 (Rev109 correction): SharedRepoBranchClaim.accessVerified i
   assert.doesNotMatch(content, /accessVerified:\s*boolean/);
 });
 
+test("LOCAL-EXEC-005 (independent-review fix): planCollaborationModeTransition validates from/to via an equality-based Set membership check (isRecognizedCollaborationModeValue) before ever indexing the COLLABORATION_RANK object literal, so a prototype-chain key (e.g. 'constructor') cannot bypass fail-closed validation", () => {
+  const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
+  const fnStart = content.indexOf("export function planCollaborationModeTransition");
+  assert.ok(fnStart >= 0, "planCollaborationModeTransition not found");
+  const bodyStart = content.indexOf("): CollaborationTransitionPreflight {", fnStart);
+  assert.ok(bodyStart >= 0, "planCollaborationModeTransition's body opening not found");
+  const fnBody = content.slice(bodyStart, content.indexOf("\n}", bodyStart));
+  const guardCheckIndex = fnBody.indexOf("isRecognizedCollaborationModeValue(input.from)");
+  const rankIndexIndex = fnBody.indexOf("COLLABORATION_RANK[input.from]");
+  assert.ok(guardCheckIndex >= 0, "expected an explicit isRecognizedCollaborationModeValue guard");
+  assert.ok(rankIndexIndex >= 0, "expected COLLABORATION_RANK to be indexed after validation");
+  assert.ok(guardCheckIndex < rankIndexIndex, "the recognized-mode guard must run before the rank table is ever indexed");
+  const guardFnStart = content.indexOf("function isRecognizedCollaborationModeValue");
+  assert.ok(guardFnStart >= 0, "isRecognizedCollaborationModeValue not found");
+  const guardFnBody = content.slice(guardFnStart, content.indexOf("\n}", guardFnStart));
+  assert.match(guardFnBody, /RECOGNIZED_COLLABORATION_MODES\.has\(/, "expected a Set.has() membership check, not an object-key existence check");
+});
+
 test("LOCAL-EXEC-005: never calls fetch, a node: builtin, or the system clock - pure domain composition only", () => {
   const content = readFileSync(join(REPO_ROOT, MODULE_FILE), "utf8");
   assert.doesNotMatch(content, /\bfetch\s*\(/);

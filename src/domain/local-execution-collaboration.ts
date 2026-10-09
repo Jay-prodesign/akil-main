@@ -71,6 +71,33 @@ const COLLABORATION_RANK: Readonly<Record<CollaborationMode, number>> = {
 };
 
 /**
+ * A same-shape fail-closed bug already found and fixed once in this
+ * codebase (`worker-routing-policy.ts`'s `AUTHORITY_RANK`, Rev60 F1;
+ * `local-execution-hardening.ts`'s `EXECUTION_MODE_RANK`, independent-
+ * review correction) was independently re-verified here and confirmed
+ * live: indexing `COLLABORATION_RANK` directly with an untrusted value
+ * and checking only `=== undefined` is bypassable, because plain-object
+ * bracket indexing walks the prototype chain - a caller-supplied string
+ * like `"constructor"` or `"toString"` resolves to an inherited
+ * `Object.prototype` value instead of `undefined`
+ * (live-reproduced: `planCollaborationModeTransition({from:"constructor",
+ * to:"toString", ...})` returned a fabricated `WIDENING` plan instead of
+ * throwing). An equality-based `Set` membership check - which only ever
+ * matches its own declared members and cannot resolve through the
+ * prototype chain - must run *before* the rank table is ever indexed.
+ */
+const RECOGNIZED_COLLABORATION_MODES: ReadonlySet<string> = new Set<string>([
+  "PRIVATE",
+  "ISOLATED_PROJECT",
+  "SHARED_ARTIFACT",
+  "SHARED_REPO",
+]);
+
+function isRecognizedCollaborationModeValue(value: unknown): value is CollaborationMode {
+  return typeof value === "string" && RECOGNIZED_COLLABORATION_MODES.has(value);
+}
+
+/**
  * §14: "Changing PRIVATE -> SHARED requires a preflight showing exactly
  * what project data/code will become visible. Changing SHARED -> PRIVATE
  * stops future access but cannot make a human/device forget data already
@@ -109,11 +136,11 @@ export function planCollaborationModeTransition(input: {
   newlyVisibleToRefs: ReadonlyArray<unknown>;
   visibleResourceRefs: ReadonlyArray<unknown>;
 }): CollaborationTransitionPreflight {
-  const fromRank = COLLABORATION_RANK[input.from];
-  const toRank = COLLABORATION_RANK[input.to];
-  if (fromRank === undefined || toRank === undefined) {
+  if (!isRecognizedCollaborationModeValue(input.from) || !isRecognizedCollaborationModeValue(input.to)) {
     throw new InvalidCollaborationTransitionError("from/to must both be recognized CollaborationMode values");
   }
+  const fromRank = COLLABORATION_RANK[input.from];
+  const toRank = COLLABORATION_RANK[input.to];
   if (
     !Array.isArray(input.newlyVisibleToRefs) ||
     input.newlyVisibleToRefs.some((ref) => typeof ref !== "string" || ref.trim().length === 0)
