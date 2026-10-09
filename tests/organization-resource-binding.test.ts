@@ -30,6 +30,11 @@ import {
   type OrganizationResourceBinding,
 } from "../src/domain/organization-resource-binding.js";
 import type { WorkerRoutingDecision } from "../src/domain/worker-routing-policy.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { FileDurableConfigurationPolicyDecisionStore } from "../src/domain/durable-configuration-policy-decision-store.js";
+import { resolveAndProjectConfigurationPolicyDecision } from "../src/domain/resolve-and-project-configuration-policy-decision.js";
 
 function fixture(tenantSuffix = "akilta") {
   const tenantScope = createTenantScope(`tenant-org-${tenantSuffix}`);
@@ -779,4 +784,93 @@ test("Rev183 F2: the five new fields default to an honest empty [] posture, neve
   assert.deepEqual(binding.usageQuotaNamespaceRefs, []);
   assert.deepEqual(binding.auditRecoveryRefs, []);
   assert.deepEqual(binding.admittedCapabilityRefs, []);
+});
+
+// --- OS-V0-11 integration witness (read-only reuse - organization-resource-binding.ts itself is never modified) ---
+
+function platformConfigControl(overrides: Record<string, unknown> = {}) {
+  return {
+    kind: "CONFIG",
+    scope: "PLATFORM",
+    key: "theme",
+    sourceRef: "platform-theme-default",
+    version: "1",
+    identity: {},
+    ...overrides,
+  };
+}
+
+test("OS-V0-11 integration witness: resolveAndProjectConfigurationPolicyDecision's resolution.effectiveConfigRefs feeds resolveOrganizationResourceBindingStatus's currentEffectiveConfigRefs byte-for-byte, and a drift between two decisions explains exactly the CONFIG_NOT_CURRENT the existing currentness gate independently reports", () => {
+  const { organization, membership, project, ownership, tenantScope } = fixture("os-v0-11-witness");
+  const decisionStore = new FileDurableConfigurationPolicyDecisionStore(
+    mkdtempSync(join(tmpdir(), "os-v0-11-org-binding-witness-")),
+  );
+  const identity = { tenantId: tenantScope.tenantId, projectId: project.projectId };
+
+  const first = resolveAndProjectConfigurationPolicyDecision({
+    store: decisionStore,
+    identity,
+    controls: [platformConfigControl()],
+    decisionId: "decision-1",
+    now: "2026-01-02T00:00:00.000Z",
+  });
+
+  const binding = createOrganizationResourceBinding({
+    organization,
+    memberships: [membership],
+    project,
+    ownership,
+    effectiveConfigRefs: first.resolution.effectiveConfigRefs,
+    boundAt: "2026-01-02T00:00:00.000Z",
+  });
+
+  // The binding's own currentness gate accepts the durable decision's
+  // own refs unchanged - no transformation, no second ref encoding.
+  const readyStatus = resolveOrganizationResourceBindingStatus({
+    binding,
+    organization,
+    currentMemberships: [membership],
+    currentServicePrincipals: [],
+    currentConnections: [],
+    currentProject: project,
+    currentEffectiveConfigRefs: first.resolution.effectiveConfigRefs,
+    currentEffectivePolicyRefs: [],
+    currentWorkerRouteDecisions: [],
+    currentKnowledgeEvidenceRefs: [],
+  });
+  assert.equal(readyStatus.state, "READY");
+
+  // A materially different platform control (same key, new sourceRef/
+  // version) is resolved and durably projected as a drifted decision.
+  const second = resolveAndProjectConfigurationPolicyDecision({
+    store: decisionStore,
+    identity,
+    controls: [platformConfigControl({ sourceRef: "platform-theme-dark", version: "2" })],
+    decisionId: "decision-2",
+    now: "2026-01-02T00:01:00.000Z",
+  });
+  assert.equal(second.stale, true);
+  assert.equal(second.drift.length, 1);
+  assert.equal(second.drift[0]?.key, "theme");
+
+  // Feeding the FRESH decision's refs as the current evidence reproduces
+  // exactly the same staleness the existing gate independently detects -
+  // the durable drift explanation and the binding's own currentness check
+  // agree on which ref stopped being current, without either depending on
+  // the other's internals.
+  const staleStatus = resolveOrganizationResourceBindingStatus({
+    binding,
+    organization,
+    currentMemberships: [membership],
+    currentServicePrincipals: [],
+    currentConnections: [],
+    currentProject: project,
+    currentEffectiveConfigRefs: second.resolution.effectiveConfigRefs,
+    currentEffectivePolicyRefs: [],
+    currentWorkerRouteDecisions: [],
+    currentKnowledgeEvidenceRefs: [],
+  });
+  assert.equal(staleStatus.state, "ACTION_REQUIRED");
+  assert.equal(staleStatus.nextRequiredAction?.code, "CONFIG_NOT_CURRENT");
+  assert.deepEqual(binding.effectiveConfigRefs, first.resolution.effectiveConfigRefs, "the historical binding evidence is never mutated by a later drifted decision");
 });
