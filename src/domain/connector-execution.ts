@@ -217,9 +217,15 @@ export function executeConnectorCapability(input: {
   let authSecretValue: string;
   try {
     authSecretValue = input.secretResolver.resolve(instance.binding.secretRef);
-  } catch (cause) {
+  } catch {
+    // OS-V0-15 (Rev197 #13 secret-exfiltration witness): the resolver's own
+    // thrown message is never forwarded verbatim - an untrusted/third-party
+    // resolver implementation could embed the real secret value (or other
+    // sensitive request content) in its own exception text, and this layer
+    // must never become a channel that echoes that text back out. Only the
+    // opaque secretRef id is ever cited.
     throw new UnresolvedConnectorSecretError(
-      `secretResolver could not resolve secretRef "${instance.binding.secretRef}" (${(cause as Error).message})`,
+      `secretResolver could not resolve secretRef "${instance.binding.secretRef}"`,
     );
   }
   if (typeof authSecretValue !== "string" || authSecretValue.length === 0) {
@@ -243,12 +249,20 @@ export function executeConnectorCapability(input: {
   const response = input.transport.execute(transportRequest);
 
   if (response.outcome === "AUTHORIZATION_FAILED") {
+    // Rev198 F1 (OS-V0-15 #13 secret-exfiltration): the transport is the one
+    // boundary that actually receives the resolved authSecretValue - an
+    // untrusted/careless/malicious transport implementation could embed
+    // that value in its own `errorMessage`, so that text is never forwarded
+    // verbatim. Only the capability/connection identity (never transport
+    // free text) is cited.
     throw new ConnectorExecutionAuthorizationError(
-      response.errorMessage ?? "transport reported an authorization failure",
+      `transport reported an authorization failure for capability "${endpoint.capabilityRef}" on connectionBindingId "${instance.binding.connectionBindingId}"`,
     );
   }
   if (response.outcome === "TRANSPORT_ERROR") {
-    throw new ConnectorExecutionTransportError(response.errorMessage ?? "transport reported an error");
+    throw new ConnectorExecutionTransportError(
+      `transport reported an error for capability "${endpoint.capabilityRef}" on connectionBindingId "${instance.binding.connectionBindingId}"`,
+    );
   }
 
   return {
