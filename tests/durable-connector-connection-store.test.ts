@@ -14,6 +14,7 @@ import {
 import {
   FileDurableConnectorConnectionStore,
   ConnectorConnectionVersionConflictError,
+  ConnectorConnectionOwnershipMismatchError,
   CorruptedConnectorConnectionFileError,
 } from "../src/domain/durable-connector-connection-store.js";
 
@@ -161,6 +162,55 @@ test("M4 (adversarial, lost-update prevention): save() rejects an update with a 
     const stillOriginal = store.get(requirement.ownership.tenantId, instance.binding.connectionBindingId);
     assert.equal(stillOriginal?.version, 1);
     assert.equal(stillOriginal?.instance.binding.connectionState, "REQUESTED");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CXP-001T (adversarial): save() rejects an update whose new ownership differs from the existing record's, even with the exact correct expectedVersion and a colliding connectionBindingId under the SAME tenant", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableConnectorConnectionStore(dir);
+    const descriptor = githubDescriptor();
+    const ownershipA = ownership("shared-tenant");
+    const instanceA = requestConnectorConnection({
+      requirement: requirementFor(descriptor, ownershipA),
+      connectorDescriptor: descriptor,
+      connectionBindingId: "bind-shared",
+      workspaceRef: "workspace-a",
+      integrationInstanceRef: "instance-a",
+      delegatedScope: [],
+      authMode: "OAUTH2",
+    });
+    const created = store.save(instanceA);
+
+    // Deliberately reuses the SAME tenantId and the SAME connectionBindingId
+    // string from a different customer/project, so this case is caught
+    // ONLY by an ownership-equality check - connectionBindingId is a bare
+    // caller-supplied string with no uniqueness guarantee across
+    // customers/projects within a tenant (connection-authority.ts).
+    const ownershipB = createProjectOwnershipRef({
+      tenantId: ownershipA.tenantId,
+      customerId: "customer-shared-tenant-other",
+      projectId: "project-shared-tenant-other",
+    });
+    const instanceB = requestConnectorConnection({
+      requirement: requirementFor(descriptor, ownershipB),
+      connectorDescriptor: descriptor,
+      connectionBindingId: "bind-shared",
+      workspaceRef: "workspace-b",
+      integrationInstanceRef: "instance-b",
+      delegatedScope: [],
+      authMode: "OAUTH2",
+    });
+
+    // instanceB coincidentally supplies the exact correct expectedVersion
+    // for instanceA's already-persisted record.
+    assert.throws(() => store.save(instanceB, created.version), ConnectorConnectionOwnershipMismatchError);
+
+    // instanceA's own record is completely untouched by the rejected attempt.
+    const stillOriginal = store.get(ownershipA.tenantId, instanceA.binding.connectionBindingId);
+    assert.deepEqual(stillOriginal, created);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
