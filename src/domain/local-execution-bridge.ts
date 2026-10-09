@@ -213,8 +213,24 @@ export interface BridgeDeviceReplayState {
   readonly seenMessageIds: ReadonlySet<string>;
 }
 
+/**
+ * OS-V1-06 (Provider/Worker Adapter Certification) F1: `gapDetected` on the
+ * `ACCEPTED` variant only - §17's own monotonic-identity requirement was
+ * previously enforced as "strictly greater than," which accepts both a
+ * contiguous sequence AND a sequence with a silent gap (e.g. `1` then `5`)
+ * identically, with no signal that intervening events (`2`/`3`/`4`) were
+ * ever lost. A lost intervening `RUN_EVENT`/`CHECKPOINT` message is exactly
+ * the "event loss" this task's own contract requires a witness for - this
+ * module still never fabricates retransmission/recovery of the lost
+ * message (no such transport exists here), but the gap itself is now a
+ * structural, observable fact a caller can act on (e.g. treat an
+ * intervening checkpoint as unconfirmed) rather than silently invisible.
+ * `gapDetected` is always `false` on a device's bootstrapping first
+ * message (no prior state to compare against - nothing was "lost" before
+ * the stream began).
+ */
 export type BridgeReplayOutcome =
-  | { readonly disposition: "ACCEPTED"; readonly nextState: BridgeDeviceReplayState }
+  | { readonly disposition: "ACCEPTED"; readonly nextState: BridgeDeviceReplayState; readonly gapDetected: boolean }
   | { readonly disposition: "DUPLICATE"; readonly nextState: BridgeDeviceReplayState };
 
 export function validateBridgeMessageReplay(input: {
@@ -233,10 +249,12 @@ export function validateBridgeMessageReplay(input: {
       `eventSeq ${envelope.eventSeq} is not strictly greater than the last accepted eventSeq ${priorState.lastAcceptedEventSeq} for device ${envelope.deviceId}`,
     );
   }
+  const gapDetected = priorState !== undefined && envelope.eventSeq > priorState.lastAcceptedEventSeq + 1;
   const seenMessageIds = new Set<string>(priorState?.seenMessageIds ?? []);
   seenMessageIds.add(envelope.messageId);
   return {
     disposition: "ACCEPTED",
+    gapDetected,
     nextState: {
       deviceId: envelope.deviceId,
       lastAcceptedEventSeq: envelope.eventSeq,
