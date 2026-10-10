@@ -25,3 +25,8 @@ No DigitalOcean/Cloudflare account, credential, or API call. No live deploy. No 
 ## Status
 
 **IMPLEMENTED / SELF-VALIDATED** (workflow YAML only; `npm run build`/`npm run test`/`npx tsc --noEmit` all still pass unmodified at `11caf9fd...` + this change, since no source file changed). Pending: (1) Brain/Founder review per `AGENTS.md` §10 — Claude's authority ends at `IMPLEMENTED`; (2) the first real CI run of `publish-image` on a push to `main`, to be watched and recorded here once this merges.
+
+## Follow-up fix (first real `publish-image` run)
+
+- Actions dispatch was blocked by an account billing/spending-limit annotation on every run while the repo was private ("The job was not started because recent account payments have failed or your spending limit needs to be increased"). Founder resolved it by making the repository public (2026-10-10); full history was scanned for credential patterns first and only test-fixture markers were found.
+- PR #136 merged as `945d35c`; PR #137 merged as `5dcbee9`. The first `publish-image` run on `main` (run `38033287134`) failed: `invalid tag "ghcr.io/Jay-prodesign/akil-main:…": repository name must be lowercase`. `github.repository` preserves owner casing, so the job now lowercases it into `IMAGE` before tagging.
