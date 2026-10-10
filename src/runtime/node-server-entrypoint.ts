@@ -33,6 +33,10 @@ export function createNodeRuntime(config: AppConfig): { readonly server: Server;
     devSessionFixtures: WEB_SHELL_DEV_SESSION_FIXTURES,
     snapshotSource: createWebShellFixtureSnapshotSource(),
     teamAttentionSource: createWebShellFixtureTeamAttentionSource(),
+    healthCheck: () => {
+      const result = health(config);
+      return { healthy: result.status !== "UNHEALTHY", body: JSON.stringify(result) };
+    },
   });
   return { server, health: () => health(config) };
 }
