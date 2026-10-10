@@ -1,0 +1,61 @@
+# DEPLOY-002: DigitalOcean App Platform spec candidate — example only, not a
+# live binding. Rename to `app.yaml` and apply only once a real DigitalOcean
+# account/spend decision is made (`doctl apps create --spec app.yaml`, or the
+# App Platform console). No account ID, app ID, or credential is ever meant
+# to live in this checked-in file — matching the same `.example` convention
+# RUNTIME-001 already established for `deploy/cloudflare/wrangler.toml.example`.
+#
+# Scope note: this spec intentionally has ONE service only. The canonical
+# target topology (AA-002) also names a non-public WORKER component and a
+# PRE_DEPLOY migration job, but neither has a real entry point in this repo
+# yet — there is no background-job worker executable, and no migration is
+# ever applied (RUNTIME-001/DEP-ORCH-001 both explicitly defer real
+# migration execution). Inventing a WORKER/migration spec entry with nothing
+# behind it would misrepresent what this deploys. Add them here once their
+# own entry points exist, not before.
+#
+# This single WEB service deploys exactly what RUNTIME-001 built: the
+# fixture-backed demo shell (src/fixtures/web-shell.ts), not a real
+# persistence-backed or Shopify-connected backend. PERSISTENCE_DRIVER stays
+# FILE deliberately — flipping it to POSTGRES here would claim a database
+# wiring that createNodeRuntime() does not actually consume (it always
+# serves the fixtures regardless of config.persistenceDriver).
+
+name: akilta-backend
+
+services:
+  - name: web
+    image:
+      registry_type: GHCR
+      repository: jay-prodesign/akil-main
+      tag: main
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    http_port: 8080
+    envs:
+      - key: PORT
+        value: "8080"
+      - key: DEPLOYMENT_ENV
+        value: production
+      - key: PERSISTENCE_DRIVER
+        value: FILE
+    # No HTTP /health route exists on this runtime yet (AA-002's own
+    # "SAFE DARK LIMIT" notes this). Use a TCP check, not an http_path,
+    # until a real health route is built.
+    health_check:
+      port: 8080
+      initial_delay_seconds: 10
+      period_seconds: 10
+
+# Deferred, not fabricated:
+# - No `workers:` entry (no worker executable exists in src/ yet).
+# - No `jobs:` PRE_DEPLOY entry (no migration is ever applied by this repo
+#   today; migrations/0001_outcome_jobs.sql exists but has never been run
+#   against a real database).
+# - No `databases:` entry (Managed PostgreSQL attachment is its own later
+#   decision, gated on actually wiring AsyncOutcomeJobStore/
+#   PostgresOutcomeJobStore into a real call site, which RUNTIME-001
+#   explicitly left undone).
+# - No `domains:` entry (Cloudflare/app.akilta.com DNS is configured on the
+#   Cloudflare side, pointed at this app's own DigitalOcean-issued ingress
+#   hostname, per AA-002's DOMAIN TOPOLOGY section).
