@@ -14,11 +14,25 @@ import type { TeamAttentionSource } from "./team-attention-view-state.js";
  * (A7/A8) choose the fail-closed production provider whenever
  * `isProduction` is true, never the dev-fixture one.
  */
+/**
+ * DEPLOY-003: a health probe's result, shaped deliberately as plain
+ * {healthy, body} rather than importing `runtime/health-check.ts`'s
+ * `HealthCheckResult` here - this file stays decoupled from the
+ * runtime layer (node-server-entrypoint.ts already depends on both and
+ * does that mapping), matching this module's existing "only translates
+ * a real socket request/response" responsibility (ADR 0001).
+ */
+export interface HealthProbeResponse {
+  readonly healthy: boolean;
+  readonly body: string;
+}
+
 export function createHttpServer(deps: {
   isProduction: boolean;
   devSessionFixtures?: ReadonlyMap<string, SessionContext>;
   snapshotSource: ClientProjectSnapshotSource;
   teamAttentionSource?: TeamAttentionSource;
+  healthCheck?: () => HealthProbeResponse;
 }): Server {
   const sessionProvider = deps.isProduction
     ? createProductionSessionProvider()
@@ -36,6 +50,18 @@ export function createHttpServer(deps: {
   return createServer((req, res) => {
     const method = req.method ?? "GET";
     const url = new URL(req.url ?? "/", "http://localhost");
+
+    // DEPLOY-003: health checks are a transport-level concern (no
+    // session/snapshot involvement), so they're handled here, before
+    // translating into the authenticated-shell request path at all -
+    // never routed through handleRequest/requireSession.
+    if (method === "GET" && url.pathname === "/health" && deps.healthCheck !== undefined) {
+      const probe = deps.healthCheck();
+      res.writeHead(probe.healthy ? 200 : 503, { "content-type": "application/json" });
+      res.end(probe.body);
+      return;
+    }
+
     const headers: Record<string, string | undefined> = {};
     for (const [key, value] of Object.entries(req.headers)) {
       headers[key] = Array.isArray(value) ? value[0] : value;
