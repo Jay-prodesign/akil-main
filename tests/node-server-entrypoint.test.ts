@@ -46,6 +46,20 @@ test("N2: createNodeRuntime boots a real server that serves the existing shell e
   }
 });
 
+test("N4 (DEPLOY-003): GET /health on the booted runtime returns 200 with a HEALTHY JSON body, with no session token required", async () => {
+  const config = resolveAppConfig({ DEPLOYMENT_ENV: "development" });
+  const runtime = createNodeRuntime(config);
+  const port = await listenOnEphemeralPort(runtime.server);
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/health`);
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { status: string };
+    assert.equal(body.status, "HEALTHY");
+  } finally {
+    await closeServer(runtime.server);
+  }
+});
+
 test("N3: an unauthenticated request against the booted runtime is rejected, not silently served", async () => {
   const config = resolveAppConfig({ DEPLOYMENT_ENV: "development" });
   const runtime = createNodeRuntime(config);
