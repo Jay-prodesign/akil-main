@@ -12,9 +12,11 @@ import {
   applySubscriptionLifecycleFact,
   reconstructSubscription,
   deriveEntitlement,
+  changeSubscriptionPlan,
   AmbiguousExternalCustomerLinkageError,
   ExternalSubscriptionPlanMappingAlreadyAdmittedError,
   InvalidSubscriptionEntitlementError,
+  SubscriptionPlanChangeError,
   type Subscription,
   type SubscriptionLifecycleFact,
 } from "../src/domain/subscription-entitlement.js";
@@ -30,6 +32,13 @@ const planA = createSubscriptionPlan({
   subscriptionPlanId: "plan-pro",
   displayName: "Pro",
   grantedEntitlementRefs: ["feature:advisor", "feature:priority-support"],
+});
+
+const planAAlt = createSubscriptionPlan({
+  tenantScope: tenantA,
+  subscriptionPlanId: "plan-elite",
+  displayName: "Elite",
+  grantedEntitlementRefs: ["feature:advisor", "feature:priority-support", "feature:dedicated-account-manager"],
 });
 
 function elevatedWorker(overrides: Partial<AdmittedWorker> = {}): AdmittedWorker {
@@ -581,4 +590,202 @@ test("S29 (Rev61 F2, adversarial - cloned-fact mismatch witness): applySubscript
   // The genuine, untampered fact still applies correctly.
   const activated = applySubscriptionLifecycleFact(pending, genuineFact);
   assert.equal(activated.status, "ACTIVE");
+});
+
+// ---------------------------------------------------------------------------
+// changeSubscriptionPlan (APP-SUB-001 V2-floor extension: "upgrade/downgrade"
+// per the OS blueprint's own V2 wording, deliberately unlabeled as either
+// since no price/tier field exists anywhere in this module to honestly
+// classify direction).
+// ---------------------------------------------------------------------------
+
+function activeSubscriptionOnPlanA(subscriptionId: string, externalSubscriptionContractRef: string) {
+  const { linkage, mapping } = admittedLinkageAndMapping({
+    externalCustomerRef: `sc-${subscriptionId}`,
+    externalProductOrVariantRef: `prod-${subscriptionId}`,
+    externalSellingPlanRef: `sp-${subscriptionId}`,
+  });
+  const pending = createPendingSubscription({ subscriptionId, customerLinkage: linkage, planMapping: mapping, externalSubscriptionContractRef });
+  const activationFact = verifiedFact(pending, { factId: `f-${subscriptionId}-activate`, factType: "ACTIVATION_VERIFIED", occurredAt: "2026-10-11T00:00:00.000Z" });
+  return { linkage, active: applySubscriptionLifecycleFact(pending, activationFact) };
+}
+
+function admittedPlanAAltMapping(storefrontRef: string) {
+  const registry = createExternalSubscriptionPlanMappingRegistry();
+  return registry.admit({
+    storefrontRef,
+    externalProductOrVariantRef: "prod-elite",
+    externalSellingPlanRef: "sp-elite",
+    plan: planAAlt,
+    authorizingWorker: elevatedWorker(),
+    evidenceRef: "internal://tests/plan-change-elite",
+    admittedAt: "2026-10-11T00:00:00.000Z",
+  });
+}
+
+test("S30 (successful plan change): supersedes the current ACTIVE subscription and the new one is bound to the target plan, with correct forward provenance", () => {
+  const { linkage, active } = activeSubscriptionOnPlanA("sub-30", "ext-contract-30");
+  const targetMapping = admittedPlanAAltMapping(active.storefrontRef);
+
+  const { supersededSubscription, newSubscription } = changeSubscriptionPlan({
+    currentSubscription: active,
+    customerLinkage: linkage,
+    targetPlanMapping: targetMapping,
+    newSubscriptionId: "sub-30-v2",
+    newExternalSubscriptionContractRef: "ext-contract-30-v2",
+    supersessionFactId: "f-sub-30-superseded",
+    occurredAt: "2026-10-11T01:00:00.000Z",
+    externalFactRef: "ext-plan-change-30",
+  });
+
+  assert.equal(supersededSubscription.status, "SUPERSEDED");
+  assert.equal(deriveEntitlement(supersededSubscription, planA).isActive, false);
+
+  assert.equal(newSubscription.subscriptionId, "sub-30-v2");
+  assert.equal(newSubscription.status, "PENDING_ACTIVATION");
+  assert.equal(newSubscription.subscriptionPlanId, planAAlt.subscriptionPlanId);
+  assert.equal(newSubscription.supersedesSubscriptionId, active.subscriptionId);
+  assert.equal(active.supersedesSubscriptionId, undefined);
+});
+
+test("S31 (wrong customerLinkage rejected): a customerLinkage belonging to a different customer/tenant/storefront than the current subscription is never accepted", () => {
+  const { linkage: _unused, active } = activeSubscriptionOnPlanA("sub-31", "ext-contract-31");
+  const targetMapping = admittedPlanAAltMapping(active.storefrontRef);
+  const foreignLinkageRegistry = createExternalCustomerLinkageRegistry();
+  const foreignLinkage = foreignLinkageRegistry.linkOnce({
+    storefrontRef: active.storefrontRef,
+    externalCustomerRef: "sc-someone-else-31",
+    tenantScope: tenantA,
+    customer: customerA2,
+    linkedAt: "2026-10-11T00:00:00.000Z",
+  });
+
+  assert.throws(
+    () =>
+      changeSubscriptionPlan({
+        currentSubscription: active,
+        customerLinkage: foreignLinkage,
+        targetPlanMapping: targetMapping,
+        newSubscriptionId: "sub-31-v2",
+        newExternalSubscriptionContractRef: "ext-contract-31-v2",
+        supersessionFactId: "f-sub-31-superseded",
+        occurredAt: "2026-10-11T01:00:00.000Z",
+        externalFactRef: "ext-plan-change-31",
+      }),
+    SubscriptionPlanChangeError,
+  );
+  assert.equal(active.status, "ACTIVE");
+});
+
+test("S32 (cross-tenant/storefront targetPlanMapping rejected): a plan mapping admitted under a different storefront than the current subscription is never accepted, even for the same tenant", () => {
+  const { linkage, active } = activeSubscriptionOnPlanA("sub-32", "ext-contract-32");
+  const foreignStorefrontMapping = admittedPlanAAltMapping("storefront.other.example.com");
+
+  assert.throws(
+    () =>
+      changeSubscriptionPlan({
+        currentSubscription: active,
+        customerLinkage: linkage,
+        targetPlanMapping: foreignStorefrontMapping,
+        newSubscriptionId: "sub-32-v2",
+        newExternalSubscriptionContractRef: "ext-contract-32-v2",
+        supersessionFactId: "f-sub-32-superseded",
+        occurredAt: "2026-10-11T01:00:00.000Z",
+        externalFactRef: "ext-plan-change-32",
+      }),
+    SubscriptionPlanChangeError,
+  );
+  assert.equal(active.status, "ACTIVE");
+});
+
+test("S33 (same-plan \"change\" rejected): a targetPlanMapping resolving to the subscription's own current plan is not a genuine change", () => {
+  const { linkage, active } = activeSubscriptionOnPlanA("sub-33", "ext-contract-33");
+  const samePlanMapping = createExternalSubscriptionPlanMappingRegistry().admit({
+    storefrontRef: active.storefrontRef,
+    externalProductOrVariantRef: "prod-33-same",
+    externalSellingPlanRef: "sp-33-same",
+    plan: planA,
+    authorizingWorker: elevatedWorker(),
+    evidenceRef: "internal://tests/s33-same-plan",
+    admittedAt: "2026-10-11T00:00:00.000Z",
+  });
+
+  assert.throws(
+    () =>
+      changeSubscriptionPlan({
+        currentSubscription: active,
+        customerLinkage: linkage,
+        targetPlanMapping: samePlanMapping,
+        newSubscriptionId: "sub-33-v2",
+        newExternalSubscriptionContractRef: "ext-contract-33-v2",
+        supersessionFactId: "f-sub-33-superseded",
+        occurredAt: "2026-10-11T01:00:00.000Z",
+        externalFactRef: "ext-plan-change-33",
+      }),
+    SubscriptionPlanChangeError,
+  );
+});
+
+test("S34 (PENDING_ACTIVATION cannot be plan-changed): a subscription that was never verified-activated is rejected", () => {
+  const { linkage, mapping } = admittedLinkageAndMapping({ externalCustomerRef: "sc-34", externalProductOrVariantRef: "prod-34", externalSellingPlanRef: "sp-34" });
+  const pending = createPendingSubscription({ subscriptionId: "sub-34", customerLinkage: linkage, planMapping: mapping, externalSubscriptionContractRef: "ext-contract-34" });
+  const targetMapping = admittedPlanAAltMapping(pending.storefrontRef);
+
+  assert.throws(
+    () =>
+      changeSubscriptionPlan({
+        currentSubscription: pending,
+        customerLinkage: linkage,
+        targetPlanMapping: targetMapping,
+        newSubscriptionId: "sub-34-v2",
+        newExternalSubscriptionContractRef: "ext-contract-34-v2",
+        supersessionFactId: "f-sub-34-superseded",
+        occurredAt: "2026-10-11T01:00:00.000Z",
+        externalFactRef: "ext-plan-change-34",
+      }),
+    SubscriptionPlanChangeError,
+  );
+});
+
+test("S35 (already-terminal CANCELED cannot be plan-changed): a canceled subscription is rejected, never resurrected via a plan change", () => {
+  const { linkage, active } = activeSubscriptionOnPlanA("sub-35", "ext-contract-35");
+  const canceledFact = verifiedFact(active, { factId: "f-sub-35-cancel", factType: "CANCELED", occurredAt: "2026-10-11T00:30:00.000Z" });
+  const canceled = applySubscriptionLifecycleFact(active, canceledFact);
+  assert.equal(canceled.status, "CANCELED");
+  const targetMapping = admittedPlanAAltMapping(active.storefrontRef);
+
+  assert.throws(
+    () =>
+      changeSubscriptionPlan({
+        currentSubscription: canceled,
+        customerLinkage: linkage,
+        targetPlanMapping: targetMapping,
+        newSubscriptionId: "sub-35-v2",
+        newExternalSubscriptionContractRef: "ext-contract-35-v2",
+        supersessionFactId: "f-sub-35-superseded",
+        occurredAt: "2026-10-11T01:00:00.000Z",
+        externalFactRef: "ext-plan-change-35",
+      }),
+    SubscriptionPlanChangeError,
+  );
+});
+
+test("S36 (new-id collision rejected): newSubscriptionId must be distinct from the subscription being superseded", () => {
+  const { linkage, active } = activeSubscriptionOnPlanA("sub-36", "ext-contract-36");
+  const targetMapping = admittedPlanAAltMapping(active.storefrontRef);
+
+  assert.throws(
+    () =>
+      changeSubscriptionPlan({
+        currentSubscription: active,
+        customerLinkage: linkage,
+        targetPlanMapping: targetMapping,
+        newSubscriptionId: "sub-36",
+        newExternalSubscriptionContractRef: "ext-contract-36-v2",
+        supersessionFactId: "f-sub-36-superseded",
+        occurredAt: "2026-10-11T01:00:00.000Z",
+        externalFactRef: "ext-plan-change-36",
+      }),
+    SubscriptionPlanChangeError,
+  );
 });

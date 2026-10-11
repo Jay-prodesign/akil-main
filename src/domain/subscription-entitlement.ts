@@ -314,7 +314,7 @@ export function createExternalSubscriptionPlanMappingRegistry(): ExternalSubscri
 
 export type SubscriptionId = string & { readonly __brand: "SubscriptionId" };
 
-export type SubscriptionStatus = "PENDING_ACTIVATION" | "ACTIVE" | "PAST_DUE" | "PAUSED" | "CANCELED" | "EXPIRED";
+export type SubscriptionStatus = "PENDING_ACTIVATION" | "ACTIVE" | "PAST_DUE" | "PAUSED" | "CANCELED" | "EXPIRED" | "SUPERSEDED";
 
 export type SubscriptionLifecycleFactType =
   | "ACTIVATION_VERIFIED"
@@ -324,7 +324,8 @@ export type SubscriptionLifecycleFactType =
   | "PAUSED"
   | "RESUMED"
   | "CANCELED"
-  | "EXPIRED";
+  | "EXPIRED"
+  | "PLAN_CHANGE_SUPERSEDED";
 
 /**
  * `factId` is the idempotency key (E7-style, mirroring `engineering-run-
@@ -445,6 +446,8 @@ export interface Subscription {
   readonly status: SubscriptionStatus;
   readonly currentPeriodEnd: string | undefined;
   readonly appliedFacts: ReadonlyArray<SubscriptionLifecycleFact>;
+  /** Set only when this subscription was itself born from `changeSubscriptionPlan` superseding a prior one - `undefined` for every ordinarily-created subscription. Forward provenance only; never mutated after construction. */
+  readonly supersedesSubscriptionId: SubscriptionId | undefined;
 }
 
 /**
@@ -482,6 +485,7 @@ export function createPendingSubscription(input: {
     status: "PENDING_ACTIVATION",
     currentPeriodEnd: undefined,
     appliedFacts: [],
+    supersedesSubscriptionId: undefined,
   };
 }
 
@@ -516,6 +520,8 @@ function resolveNextStatus(from: SubscriptionStatus, factType: SubscriptionLifec
         : undefined;
     case "EXPIRED":
       return from === "PAST_DUE" ? "EXPIRED" : undefined;
+    case "PLAN_CHANGE_SUPERSEDED":
+      return from === "ACTIVE" || from === "PAST_DUE" || from === "PAUSED" ? "SUPERSEDED" : undefined;
   }
 }
 
@@ -599,6 +605,103 @@ export function reconstructSubscription(
   facts: ReadonlyArray<SubscriptionLifecycleFact>,
 ): Subscription {
   return facts.reduce(applySubscriptionLifecycleFact, initial);
+}
+
+export class SubscriptionPlanChangeError extends Error {
+  constructor(reason: string) {
+    super(`Invalid subscription plan change: ${reason}`);
+    this.name = "SubscriptionPlanChangeError";
+  }
+}
+
+export interface SubscriptionPlanChangeResult {
+  readonly supersededSubscription: Subscription;
+  readonly newSubscription: Subscription;
+}
+
+/**
+ * APP-SUB-001 V2-floor extension (AKILTA OS blueprint's own V2 section:
+ * "customer-facing ... upgrade/downgrade ... flows"): a plan change is
+ * modeled as superseding the current subscription with a brand-new one
+ * bound to the target plan, never as mutating `subscriptionPlanId` in
+ * place - consistent with this repository's established "new record,
+ * provenance-preserving, never silent mutation" discipline
+ * (`ownership-assignment.ts`'s `reassignOwnership`,
+ * `partner-capability-admission.ts`'s revoke-is-terminal/no-resurrection).
+ *
+ * Deliberately NOT labeled "upgrade" or "downgrade": `SubscriptionPlan`
+ * carries no price/tier/rank field anywhere in this repository, so
+ * classifying a change's direction would require fabricating a pricing
+ * hierarchy this repository does not have - exactly the invented business
+ * scope this checkpoint's own governing authorization (REV215) forbids. A
+ * caller with its own external pricing source may label the change itself;
+ * this function only proves the change is scope-safe and replay-safe.
+ *
+ * Fails closed unless: `customerLinkage` matches the current subscription's
+ * own tenant/customer/storefront exactly (never a different customer's
+ * linkage); `targetPlanMapping` belongs to the same tenant/storefront
+ * (never cross-tenant); the target plan actually differs from the current
+ * one (a same-plan "change" is not genuine); and the current subscription
+ * is `ACTIVE`, `PAST_DUE`, or `PAUSED` (a subscription that is still
+ * `PENDING_ACTIVATION`, or already terminal, cannot be plan-changed).
+ */
+export function changeSubscriptionPlan(input: {
+  currentSubscription: Subscription;
+  customerLinkage: ExternalCustomerLinkage;
+  targetPlanMapping: ExternalSubscriptionPlanMapping;
+  newSubscriptionId: unknown;
+  newExternalSubscriptionContractRef: unknown;
+  supersessionFactId: unknown;
+  occurredAt: unknown;
+  externalFactRef: unknown;
+}): SubscriptionPlanChangeResult {
+  const { currentSubscription, customerLinkage, targetPlanMapping } = input;
+  if (
+    customerLinkage.tenantId !== currentSubscription.tenantId ||
+    customerLinkage.customerId !== currentSubscription.customerId ||
+    customerLinkage.storefrontRef !== currentSubscription.storefrontRef
+  ) {
+    throw new SubscriptionPlanChangeError(
+      "customerLinkage does not match the current subscription's own tenant/customer/storefront - a plan change can never be constructed from the wrong customer's linkage",
+    );
+  }
+  if (targetPlanMapping.tenantId !== currentSubscription.tenantId || targetPlanMapping.storefrontRef !== currentSubscription.storefrontRef) {
+    throw new SubscriptionPlanChangeError(
+      "targetPlanMapping belongs to a different tenant/storefront than the current subscription - cross-tenant/cross-storefront plan changes are never permitted",
+    );
+  }
+  if (targetPlanMapping.subscriptionPlanId === currentSubscription.subscriptionPlanId) {
+    throw new SubscriptionPlanChangeError(
+      "targetPlanMapping resolves to the same SubscriptionPlan the current subscription is already bound to - this is not a genuine plan change",
+    );
+  }
+  if (currentSubscription.status !== "ACTIVE" && currentSubscription.status !== "PAST_DUE" && currentSubscription.status !== "PAUSED") {
+    throw new SubscriptionPlanChangeError(
+      `current subscription status "${currentSubscription.status}" cannot be plan-changed - only ACTIVE, PAST_DUE, or PAUSED subscriptions may change plan`,
+    );
+  }
+  const newSubscriptionId = requireNonEmptyString(input.newSubscriptionId, "newSubscriptionId") as SubscriptionId;
+  if (newSubscriptionId === currentSubscription.subscriptionId) {
+    throw new SubscriptionPlanChangeError("newSubscriptionId must be distinct from the superseded subscription's own id");
+  }
+  const supersessionFact = createVerifiedSubscriptionLifecycleFact({
+    subscription: currentSubscription,
+    storefrontRef: currentSubscription.storefrontRef,
+    externalSubscriptionContractRef: currentSubscription.externalSubscriptionContractRef,
+    factId: input.supersessionFactId,
+    factType: "PLAN_CHANGE_SUPERSEDED",
+    occurredAt: input.occurredAt,
+    externalFactRef: input.externalFactRef,
+  });
+  const supersededSubscription = applySubscriptionLifecycleFact(currentSubscription, supersessionFact);
+  const pending = createPendingSubscription({
+    subscriptionId: newSubscriptionId,
+    customerLinkage,
+    planMapping: targetPlanMapping,
+    externalSubscriptionContractRef: input.newExternalSubscriptionContractRef,
+  });
+  const newSubscription: Subscription = { ...pending, supersedesSubscriptionId: currentSubscription.subscriptionId };
+  return { supersededSubscription, newSubscription };
 }
 
 // ---------------------------------------------------------------------------
