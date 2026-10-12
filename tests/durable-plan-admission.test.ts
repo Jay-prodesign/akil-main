@@ -1137,6 +1137,111 @@ test("Brain Rev44 F2 (adversarial): two distinct tenant/customer/project/plan tu
   }
 });
 
+test("AUD-DURABILITY-GAP-V2 P15: a forged EVALUATION_RECORDED.eventId not equal to the deterministic evaluationEventId(result) is rejected", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const plan = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: fixture.project,
+      planId: "plan-aud-v2-p15",
+      version: 1,
+      blueprint: fixture.blueprint,
+      soldScope: fixture.soldScope,
+      evidence: fixture.evidence,
+      now: "2026-09-10T00:00:00.000Z",
+    });
+    const result = admitPlan({
+      plan,
+      blueprint: fixture.blueprint,
+      readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, plan),
+    });
+    const store = new FileDurablePlanAdmissionStore(dir);
+    recordEvaluation({ store, result, recordedAt: "2026-09-10T00:00:00.000Z" });
+    const filePath = singleFilePathIn(dir);
+    const legitEvent = JSON.parse(readFileSync(filePath, "utf8").trim());
+    const getState = () =>
+      store.getState(fixture.tenantScope.tenantId, fixture.customer.customerId, fixture.project.projectId, plan.planId);
+
+    overwriteFileWithSingleLine(filePath, { ...legitEvent, eventId: "forged-eventId-not-deterministic" });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "non-deterministic eventId must be rejected");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AUD-DURABILITY-GAP-V2 P16: an EVALUATION_RECORDED.result claiming an impossible status/field-shape combination that admitPlan() can never produce is rejected", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const plan = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: fixture.project,
+      planId: "plan-aud-v2-p16",
+      version: 1,
+      blueprint: fixture.blueprint,
+      soldScope: fixture.soldScope,
+      evidence: fixture.evidence,
+      now: "2026-09-10T00:00:00.000Z",
+    });
+    const approval = createApprovalReference({
+      plan,
+      approvalId: "approval-aud-v2-p16",
+      approvedAt: "2026-09-10T00:00:00.000Z",
+      approverRef: "owner:founder",
+    });
+    const result = admitPlan({
+      plan,
+      blueprint: fixture.blueprint,
+      readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, plan),
+      approval,
+    });
+    assert.equal(result.status, "ADMITTED");
+    const store = new FileDurablePlanAdmissionStore(dir);
+    recordEvaluation({ store, result, recordedAt: "2026-09-10T00:00:00.000Z" });
+    const filePath = singleFilePathIn(dir);
+    const legitEvent = JSON.parse(readFileSync(filePath, "utf8").trim());
+    const getState = () =>
+      store.getState(fixture.tenantScope.tenantId, fixture.customer.customerId, fixture.project.projectId, plan.planId);
+
+    // legitEvent.result.status is "ADMITTED" with evaluatedApprovalId set and
+    // blockedReasons: [] / no awaiting - the one legal ADMITTED shape.
+    // Each forgery below breaks exactly one of those three fields.
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      result: { ...legitEvent.result, blockedReasons: ["forged blocked reason"] },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "ADMITTED with populated blockedReasons must be rejected");
+
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      result: { ...legitEvent.result, awaiting: { entity: "plan-approval", reason: "forged" } },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "ADMITTED with a populated awaiting must be rejected");
+
+    const { evaluatedApprovalId: _omitted, ...resultWithoutApproval } = legitEvent.result;
+    overwriteFileWithSingleLine(filePath, { ...legitEvent, result: resultWithoutApproval });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "ADMITTED with no evaluatedApprovalId must be rejected");
+
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      result: { ...legitEvent.result, blockedReasons: "not-an-array" },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "non-array blockedReasons must be rejected");
+
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      result: { ...legitEvent.result, awaiting: { entity: "", reason: "x" } },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "malformed awaiting.entity must be rejected");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// AUD-DURABILITY-GAP-V2: "node:crypto" (randomUUID, for unique lock tmp-file
+// names) is now also allowed - a Node built-in, not a new runtime dependency,
+// the same primitive already accepted for durable-connector-connection-store.ts.
 test("OS-V0-03 P14: boundary - durable-plan-admission-store.ts introduces no new import/dependency and the source-file line count grows only by the validator", () => {
   const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
   const sourcePath = join(REPO_ROOT, "src/domain/durable-plan-admission-store.ts");
@@ -1152,7 +1257,10 @@ test("OS-V0-03 P14: boundary - durable-plan-admission-store.ts introduces no new
     "./plan-admission-run-state.js",
   ];
   for (const specifier of importedModules) {
-    assert.ok(specifier === "node:fs" || specifier === "node:path" || allowedModules.includes(specifier ?? ""), `unexpected import specifier: ${specifier}`);
+    assert.ok(
+      specifier === "node:fs" || specifier === "node:path" || specifier === "node:crypto" || allowedModules.includes(specifier ?? ""),
+      `unexpected import specifier: ${specifier}`,
+    );
   }
   for (const forbidden of ["worker-routing-policy.js", "worker-invoker.js", "organization-membership.js", "organization-service-principal.js", "authority.js"]) {
     assert.equal(content.includes(forbidden), false, `must not import "${forbidden}"`);
