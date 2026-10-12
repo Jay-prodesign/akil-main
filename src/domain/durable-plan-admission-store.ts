@@ -1,4 +1,5 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, linkSync, unlinkSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { TenantScope } from "./tenant-scope.js";
 import type { Customer } from "./customer.js";
@@ -8,6 +9,7 @@ import type { PlanAdmissionResult } from "./plan-admission.js";
 import {
   createAnswerRecordedEvent,
   createEvaluationRecordedEvent,
+  evaluationEventId,
   type PlanAdmissionEvent,
 } from "./plan-admission-event.js";
 import {
@@ -26,6 +28,13 @@ export class CorruptedPlanAdmissionEventError extends Error {
   constructor(reason: string) {
     super(`Corrupted persisted PlanAdmissionEvent: ${reason}`);
     this.name = "CorruptedPlanAdmissionEventError";
+  }
+}
+
+export class PlanAdmissionStoreLockTimeoutError extends Error {
+  constructor(planKeyDescription: string) {
+    super(`Timed out waiting for the durable plan-admission lock for plan ${planKeyDescription}`);
+    this.name = "PlanAdmissionStoreLockTimeoutError";
   }
 }
 
@@ -134,6 +143,58 @@ function validatePersistedPlanAdmissionEvent(
         `EVALUATION_RECORDED.result.status is not a recognized AdmissionStatus: ${JSON.stringify(result.status)}`,
       );
     }
+    const status = result.status as "ADMITTED" | "BLOCKED" | "WAITING";
+
+    // AUD-DURABILITY-GAP-V2 F3: `eventId` is supposed to be the deterministic
+    // `evaluationEventId(result)` - a forged line could carry any other
+    // string. Recomputing and comparing closes that gap rather than trusting
+    // the persisted eventId at face value.
+    const recomputedEventId = evaluationEventId({ planId: planId as ProjectPlanVersion["planId"], planVersion });
+    if (candidate.eventId !== recomputedEventId) {
+      throw new CorruptedPlanAdmissionEventError(
+        `EVALUATION_RECORDED.eventId ("${String(candidate.eventId)}") does not equal the deterministic evaluationEventId for this result ("${recomputedEventId}")`,
+      );
+    }
+
+    if (!Array.isArray(result.blockedReasons) || result.blockedReasons.some((reason) => typeof reason !== "string")) {
+      throw new CorruptedPlanAdmissionEventError("EVALUATION_RECORDED.result.blockedReasons must be an array of strings");
+    }
+    const blockedReasons = result.blockedReasons as string[];
+
+    let awaiting: { entity: string; reason: string } | undefined;
+    if (result.awaiting !== undefined) {
+      if (typeof result.awaiting !== "object" || result.awaiting === null || Array.isArray(result.awaiting)) {
+        throw new CorruptedPlanAdmissionEventError("EVALUATION_RECORDED.result.awaiting must be a JSON object");
+      }
+      const awaitingObj = result.awaiting as Record<string, unknown>;
+      awaiting = {
+        entity: requireNonEmptyStringField(awaitingObj.entity, "result.awaiting.entity"),
+        reason: requireNonEmptyStringField(awaitingObj.reason, "result.awaiting.reason"),
+      };
+    }
+
+    let evaluatedApprovalId: string | undefined;
+    if (result.evaluatedApprovalId !== undefined) {
+      evaluatedApprovalId = requireNonEmptyStringField(result.evaluatedApprovalId, "result.evaluatedApprovalId");
+    }
+
+    // AUD-DURABILITY-GAP-V2 F3 (Rev77 point 3): `admitPlan` (plan-admission.ts)
+    // only ever produces three legal status/field combinations - a forged or
+    // corrupted line could claim an impossible combination (e.g. ADMITTED
+    // with populated blockedReasons, or BLOCKED with an evaluatedApprovalId).
+    // This enforces exactly those three combinations on replay.
+    const shapeIsConsistent =
+      status === "BLOCKED"
+        ? blockedReasons.length > 0 && awaiting === undefined && evaluatedApprovalId === undefined
+        : status === "WAITING"
+          ? blockedReasons.length === 0 && awaiting !== undefined && evaluatedApprovalId === undefined
+          : blockedReasons.length === 0 && awaiting === undefined && evaluatedApprovalId !== undefined;
+    if (!shapeIsConsistent) {
+      throw new CorruptedPlanAdmissionEventError(
+        `EVALUATION_RECORDED.result has status "${status}" with an impossible combination of blockedReasons/awaiting/evaluatedApprovalId (blockedReasons: ${blockedReasons.length}, awaiting: ${awaiting !== undefined}, evaluatedApprovalId: ${evaluatedApprovalId !== undefined}) - admitPlan() can never produce this shape`,
+      );
+    }
+
     return candidate as unknown as PlanAdmissionEvent;
   }
 
@@ -197,10 +258,96 @@ export interface DurablePlanAdmissionStore {
  */
 export class FileDurablePlanAdmissionStore implements DurablePlanAdmissionStore {
   private readonly baseDir: string;
+  private static readonly LOCK_TIMEOUT_MS = 5000;
+  private static readonly LOCK_RETRY_BACKOFF_MS = 5;
 
   constructor(baseDir: string) {
     this.baseDir = baseDir;
     mkdirSync(this.baseDir, { recursive: true });
+    mkdirSync(this.lockDir(), { recursive: true });
+  }
+
+  private lockDir(): string {
+    return join(this.baseDir, ".locks");
+  }
+
+  private lockPathFor(
+    tenantId: TenantScope["tenantId"],
+    customerId: Customer["customerId"],
+    projectId: Project["projectId"],
+    planId: ProjectPlanVersion["planId"],
+  ): string {
+    const safeKey = Buffer.from(planKey(tenantId, customerId, projectId, planId), "utf8").toString("base64url");
+    return join(this.lockDir(), `${safeKey}.lock`);
+  }
+
+  /**
+   * AUD-DURABILITY-GAP-V2 F1: real cross-process mutual exclusion for
+   * `appendEvent`'s read-modify-write critical section, reusing the exact
+   * `linkSync` atomic-creation primitive already accepted for
+   * `FileDurableConnectorConnectionStore.save`,
+   * `FileDurableOutcomeJobStore.putIfAbsent`, and
+   * `FileDurableEngineeringStore.appendEvent`. Before this correction, two
+   * concurrent writers appending to the same plan's event log (e.g. a
+   * `recordEvaluation` racing a `recordAnswer`) could both read the same
+   * prior content and one could silently clobber the other's appended event.
+   */
+  private withPlanLock<T>(
+    tenantId: TenantScope["tenantId"],
+    customerId: Customer["customerId"],
+    projectId: Project["projectId"],
+    planId: ProjectPlanVersion["planId"],
+    criticalSection: () => T,
+  ): T {
+    const lockPath = this.lockPathFor(tenantId, customerId, projectId, planId);
+    const tmpPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(tmpPath, String(process.pid), "utf8");
+    const deadline = Date.now() + FileDurablePlanAdmissionStore.LOCK_TIMEOUT_MS;
+    for (;;) {
+      try {
+        linkSync(tmpPath, lockPath);
+        break;
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "EEXIST") {
+          try {
+            unlinkSync(tmpPath);
+          } catch {
+            // best-effort cleanup only
+          }
+          throw cause;
+        }
+        if (Date.now() > deadline) {
+          try {
+            unlinkSync(tmpPath);
+          } catch {
+            // best-effort cleanup only
+          }
+          throw new PlanAdmissionStoreLockTimeoutError(`"${tenantId}"/"${customerId}"/"${projectId}"/"${planId}"`);
+        }
+        Atomics.wait(
+          new Int32Array(new SharedArrayBuffer(4)),
+          0,
+          0,
+          FileDurablePlanAdmissionStore.LOCK_RETRY_BACKOFF_MS,
+        );
+      }
+    }
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // best-effort cleanup only - lockPath (the hard-linked copy) is what
+      // actually arbitrates ownership from here on.
+    }
+    try {
+      return criticalSection();
+    } finally {
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // best-effort: a stuck lock is bounded for the next acquirer by
+        // the caller-visible timeout above, rather than deadlocking forever.
+      }
+    }
   }
 
   private filePathFor(
@@ -216,14 +363,16 @@ export class FileDurablePlanAdmissionStore implements DurablePlanAdmissionStore 
   }
 
   appendEvent(event: PlanAdmissionEvent): void {
-    const filePath = this.filePathFor(event.tenantId, event.customerId, event.projectId, event.planId);
-    const line = `${JSON.stringify(event)}\n`;
-    if (existsSync(filePath)) {
-      const existing = readFileSync(filePath, "utf8");
-      writeFileSync(filePath, existing + line, "utf8");
-    } else {
-      writeFileSync(filePath, line, "utf8");
-    }
+    this.withPlanLock(event.tenantId, event.customerId, event.projectId, event.planId, () => {
+      const filePath = this.filePathFor(event.tenantId, event.customerId, event.projectId, event.planId);
+      const line = `${JSON.stringify(event)}\n`;
+      if (existsSync(filePath)) {
+        const existing = readFileSync(filePath, "utf8");
+        writeFileSync(filePath, existing + line, "utf8");
+      } else {
+        writeFileSync(filePath, line, "utf8");
+      }
+    });
   }
 
   getEvents(

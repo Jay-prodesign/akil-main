@@ -1,4 +1,5 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, linkSync, unlinkSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { TenantScope } from "./tenant-scope.js";
 import type { OutcomeJob, OutcomeJobState } from "./outcome-job.js";
@@ -14,6 +15,13 @@ export class CorruptedOutcomeJobLineError extends Error {
   constructor(filePath: string, reason: string) {
     super(`Corrupted durable outcome-job line (${filePath}): ${reason}`);
     this.name = "CorruptedOutcomeJobLineError";
+  }
+}
+
+export class OutcomeJobStoreLockTimeoutError extends Error {
+  constructor(tenantId: string) {
+    super(`Timed out waiting for the durable outcome-job lock for tenant "${tenantId}"`);
+    this.name = "OutcomeJobStoreLockTimeoutError";
   }
 }
 
@@ -130,15 +138,93 @@ export interface DurableOutcomeJobStore {
  */
 export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
   private readonly baseDir: string;
+  private static readonly LOCK_TIMEOUT_MS = 5000;
+  private static readonly LOCK_RETRY_BACKOFF_MS = 5;
 
   constructor(baseDir: string) {
     this.baseDir = baseDir;
     mkdirSync(this.baseDir, { recursive: true });
+    mkdirSync(this.lockDir(), { recursive: true });
   }
 
   private filePathFor(tenantId: TenantScope["tenantId"]): string {
     const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
     return join(this.baseDir, `${safeKey}.jsonl`);
+  }
+
+  private lockDir(): string {
+    return join(this.baseDir, ".locks");
+  }
+
+  private lockPathFor(tenantId: TenantScope["tenantId"]): string {
+    const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
+    return join(this.lockDir(), `${safeKey}.lock`);
+  }
+
+  /**
+   * AUD-DURABILITY-GAP-V2 F1: real cross-process mutual exclusion for
+   * `putIfAbsent`'s read-check-write critical section, reusing the exact
+   * `linkSync` atomic-creation primitive already accepted for
+   * `FileDurableConnectorConnectionStore.save` (CONN-001 Rev94 F1). Before
+   * this correction, two independent processes could both read the same
+   * tenant file, both observe the target jobId absent, and both append -
+   * each believing it alone created the job (a lost-update/duplicate-append
+   * race, the exact `AUD-DURABILITY-GAP` finding class Brain's Rev62/Rev74
+   * review identified for this store). `linkSync(tmpPath, lockPath)` either
+   * creates the `lockPath` directory entry or fails with `EEXIST`,
+   * atomically, so exactly one process can hold the lock for a given tenant
+   * at a time - the check-then-append is now indivisible across processes.
+   */
+  private withTenantLock<T>(tenantId: TenantScope["tenantId"], criticalSection: () => T): T {
+    const lockPath = this.lockPathFor(tenantId);
+    const tmpPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(tmpPath, String(process.pid), "utf8");
+    const deadline = Date.now() + FileDurableOutcomeJobStore.LOCK_TIMEOUT_MS;
+    for (;;) {
+      try {
+        linkSync(tmpPath, lockPath);
+        break;
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "EEXIST") {
+          try {
+            unlinkSync(tmpPath);
+          } catch {
+            // best-effort cleanup only
+          }
+          throw cause;
+        }
+        if (Date.now() > deadline) {
+          try {
+            unlinkSync(tmpPath);
+          } catch {
+            // best-effort cleanup only
+          }
+          throw new OutcomeJobStoreLockTimeoutError(tenantId);
+        }
+        Atomics.wait(
+          new Int32Array(new SharedArrayBuffer(4)),
+          0,
+          0,
+          FileDurableOutcomeJobStore.LOCK_RETRY_BACKOFF_MS,
+        );
+      }
+    }
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // best-effort cleanup only - lockPath (the hard-linked copy) is what
+      // actually arbitrates ownership from here on.
+    }
+    try {
+      return criticalSection();
+    } finally {
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // best-effort: a stuck lock is bounded for the next acquirer by
+        // the caller-visible timeout above, rather than deadlocking forever.
+      }
+    }
   }
 
   private readAll(tenantId: TenantScope["tenantId"]): OutcomeJob[] {
@@ -174,28 +260,30 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
   }
 
   putIfAbsent(job: OutcomeJob): PersistJobResult {
-    const existing = this.get(job.tenantId, job.jobId);
-    if (existing !== undefined) {
-      if (
-        existing.tenantId !== job.tenantId ||
-        existing.customerId !== job.customerId ||
-        existing.projectId !== job.projectId
-      ) {
-        throw new InvalidDurableOutcomeJobStoreError(
-          `jobId "${job.jobId}" is already persisted under a different tenant/customer/project`,
-        );
+    return this.withTenantLock(job.tenantId, () => {
+      const existing = this.get(job.tenantId, job.jobId);
+      if (existing !== undefined) {
+        if (
+          existing.tenantId !== job.tenantId ||
+          existing.customerId !== job.customerId ||
+          existing.projectId !== job.projectId
+        ) {
+          throw new InvalidDurableOutcomeJobStoreError(
+            `jobId "${job.jobId}" is already persisted under a different tenant/customer/project`,
+          );
+        }
+        return { job: existing, created: false };
       }
-      return { job: existing, created: false };
-    }
-    const filePath = this.filePathFor(job.tenantId);
-    const line = `${JSON.stringify(job)}\n`;
-    if (existsSync(filePath)) {
-      const existingContent = readFileSync(filePath, "utf8");
-      writeFileSync(filePath, existingContent + line, "utf8");
-    } else {
-      writeFileSync(filePath, line, "utf8");
-    }
-    return { job, created: true };
+      const filePath = this.filePathFor(job.tenantId);
+      const line = `${JSON.stringify(job)}\n`;
+      if (existsSync(filePath)) {
+        const existingContent = readFileSync(filePath, "utf8");
+        writeFileSync(filePath, existingContent + line, "utf8");
+      } else {
+        writeFileSync(filePath, line, "utf8");
+      }
+      return { job, created: true };
+    });
   }
 
   get(tenantId: TenantScope["tenantId"], jobId: OutcomeJob["jobId"]): OutcomeJob | undefined {

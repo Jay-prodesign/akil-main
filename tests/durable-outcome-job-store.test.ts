@@ -471,6 +471,9 @@ test("OS-V0-03 B10: the same jobId string reused under a different tenant remain
   }
 });
 
+// AUD-DURABILITY-GAP-V2: "node:crypto" (randomUUID, for unique lock tmp-file
+// names) is now also allowed - a Node built-in, not a new runtime dependency,
+// the same primitive already accepted for durable-connector-connection-store.ts.
 test("OS-V0-03 B13: boundary - durable-outcome-job-store.ts introduces no new import/dependency", () => {
   const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
   const sourcePath = join(REPO_ROOT, "src/domain/durable-outcome-job-store.ts");
@@ -478,7 +481,10 @@ test("OS-V0-03 B13: boundary - durable-outcome-job-store.ts introduces no new im
   const importedModules = [...content.matchAll(/from\s+"([^"]+)"/g)].map((match) => match[1]);
   const allowedModules = ["./tenant-scope.js", "./outcome-job.js"];
   for (const specifier of importedModules) {
-    assert.ok(specifier === "node:fs" || specifier === "node:path" || allowedModules.includes(specifier ?? ""), `unexpected import specifier: ${specifier}`);
+    assert.ok(
+      specifier === "node:fs" || specifier === "node:path" || specifier === "node:crypto" || allowedModules.includes(specifier ?? ""),
+      `unexpected import specifier: ${specifier}`,
+    );
   }
   for (const forbidden of ["postgres-outcome-job-store.js", "durable-plan-admission-store.js", "durable-engineering-store.js"]) {
     assert.equal(content.includes(forbidden), false, `must not import "${forbidden}"`);
