@@ -17,15 +17,20 @@ import {
   type Subscription,
 } from "../src/domain/subscription-entitlement.js";
 import {
-  createQuotaAdmissionScope,
-  createQuotaEnvelope,
-  projectQuotaReadModel,
-  EMPTY_QUOTA_LEDGER,
-} from "../src/domain/execution-quota-admission.js";
-import {
   projectSubscriptionUsageStatus,
   InvalidSubscriptionUsageStatusError,
 } from "../src/domain/subscription-usage-status.js";
+
+/**
+ * Brain review correction (F1 - domain conflation, PR #147 comment
+ * `6152522225`): this file no longer imports or composes
+ * `execution-quota-admission.ts`'s `QuotaReadModel`/`QuotaAdmissionScope` -
+ * that module is internal execution-admission, a different domain from
+ * customer-facing commercial usage, per APP-SUB-001's own rejected-reuse
+ * reasoning. U5-U7 and the quota-scope fixtures these tests previously
+ * exercised are removed accordingly; U5 is a new, narrower test replacing
+ * them (commercialUsage is always the single NOT_CONFIGURED literal).
+ */
 
 const tenantA = createTenantScope("tenant-a");
 const tenantB = createTenantScope("tenant-b");
@@ -92,37 +97,18 @@ function activeSubscriptionFor(customer: ReturnType<typeof createCustomer>, plan
   return applySubscriptionLifecycleFact(pending, activationFact);
 }
 
-function quotaScopeFor(customer: ReturnType<typeof createCustomer>) {
-  return createQuotaAdmissionScope({
-    tenantScope: createTenantScope(customer.tenantId),
-    customerId: customer.customerId,
-    projectId: "proj-1",
-    planId: "plan-1",
-    planVersion: 1,
-  });
-}
-
-test("U1: a subscription, its own entitlement, and its own quota scope compose into one truthful customer-safe usage status", () => {
+test("U1: a subscription and its own entitlement compose into one truthful customer-safe usage status", () => {
   const subscription = activeSubscriptionFor(customerA, planA);
   const entitlement = deriveEntitlement(subscription, planA);
-  const quotaScope = quotaScopeFor(customerA);
-  const envelope = createQuotaEnvelope({
-    scope: quotaScope,
-    envelopeRef: "envelope-1",
-    sourceFingerprint: "qfp-1",
-    unitLimit: 100,
-  });
-  const quotaReadModel = projectQuotaReadModel(EMPTY_QUOTA_LEDGER, envelope);
 
-  const status = projectSubscriptionUsageStatus({ subscription, entitlement, quotaScope, quotaReadModel });
+  const status = projectSubscriptionUsageStatus({ subscription, entitlement });
 
   assert.equal(status.tenantId, tenantA.tenantId);
   assert.equal(status.customerId, customerA.customerId);
   assert.equal(status.subscriptionStatus, "ACTIVE");
   assert.equal(status.isEntitled, true);
   assert.deepEqual(status.entitlementRefs, ["feature:advisor", "feature:priority-support"]);
-  assert.equal(status.usage.unitLimit, 100);
-  assert.equal(status.usage.unitRemaining, 100);
+  assert.equal(status.commercialUsage, "NOT_CONFIGURED");
 });
 
 test("U2: a non-activated subscription composes with isEntitled false and empty entitlementRefs - never fabricated", () => {
@@ -150,14 +136,12 @@ test("U2: a non-activated subscription composes with isEntitled false and empty 
     externalSubscriptionContractRef: "ext-contract-pending",
   });
   const entitlement = deriveEntitlement(pending, planA);
-  const quotaScope = quotaScopeFor(customerA);
-  const envelope = createQuotaEnvelope({ scope: quotaScope, envelopeRef: "envelope-2", sourceFingerprint: "qfp-2", unitLimit: 50 });
-  const quotaReadModel = projectQuotaReadModel(EMPTY_QUOTA_LEDGER, envelope);
 
-  const status = projectSubscriptionUsageStatus({ subscription: pending, entitlement, quotaScope, quotaReadModel });
+  const status = projectSubscriptionUsageStatus({ subscription: pending, entitlement });
   assert.equal(status.subscriptionStatus, "PENDING_ACTIVATION");
   assert.equal(status.isEntitled, false);
   assert.deepEqual(status.entitlementRefs, []);
+  assert.equal(status.commercialUsage, "NOT_CONFIGURED");
 });
 
 test("U3 (adversarial): an entitlement belonging to a different tenant is rejected fail-closed, never silently composed", () => {
@@ -170,12 +154,9 @@ test("U3 (adversarial): an entitlement belonging to a different tenant is reject
   });
   const subscriptionB = activeSubscriptionFor(customerB, planB);
   const foreignEntitlement = deriveEntitlement(subscriptionB, planB);
-  const quotaScope = quotaScopeFor(customerA);
-  const envelope = createQuotaEnvelope({ scope: quotaScope, envelopeRef: "envelope-3", sourceFingerprint: "qfp-3", unitLimit: 10 });
-  const quotaReadModel = projectQuotaReadModel(EMPTY_QUOTA_LEDGER, envelope);
 
   assert.throws(
-    () => projectSubscriptionUsageStatus({ subscription: subscriptionA, entitlement: foreignEntitlement, quotaScope, quotaReadModel }),
+    () => projectSubscriptionUsageStatus({ subscription: subscriptionA, entitlement: foreignEntitlement }),
     InvalidSubscriptionUsageStatusError,
   );
 });
@@ -184,61 +165,30 @@ test("U4 (adversarial): an entitlement belonging to a different customer within 
   const subscriptionA = activeSubscriptionFor(customerA, planA);
   const subscriptionA2 = activeSubscriptionFor(customerA2, planA);
   const foreignEntitlement = deriveEntitlement(subscriptionA2, planA);
-  const quotaScope = quotaScopeFor(customerA);
-  const envelope = createQuotaEnvelope({ scope: quotaScope, envelopeRef: "envelope-4", sourceFingerprint: "qfp-4", unitLimit: 10 });
-  const quotaReadModel = projectQuotaReadModel(EMPTY_QUOTA_LEDGER, envelope);
 
   assert.throws(
-    () => projectSubscriptionUsageStatus({ subscription: subscriptionA, entitlement: foreignEntitlement, quotaScope, quotaReadModel }),
+    () => projectSubscriptionUsageStatus({ subscription: subscriptionA, entitlement: foreignEntitlement }),
     InvalidSubscriptionUsageStatusError,
   );
 });
 
-test("U5 (adversarial): a quotaScope belonging to a different tenant is rejected fail-closed", () => {
+test("U5: commercialUsage is always exactly the single NOT_CONFIGURED literal - never a fabricated numeric value, regardless of subscription state", () => {
   const subscriptionA = activeSubscriptionFor(customerA, planA);
   const entitlement = deriveEntitlement(subscriptionA, planA);
-  const foreignQuotaScope = quotaScopeFor(customerB);
-  const envelope = createQuotaEnvelope({ scope: foreignQuotaScope, envelopeRef: "envelope-5", sourceFingerprint: "qfp-5", unitLimit: 10 });
-  const quotaReadModel = projectQuotaReadModel(EMPTY_QUOTA_LEDGER, envelope);
-
-  assert.throws(
-    () => projectSubscriptionUsageStatus({ subscription: subscriptionA, entitlement, quotaScope: foreignQuotaScope, quotaReadModel }),
-    InvalidSubscriptionUsageStatusError,
-  );
+  const status = projectSubscriptionUsageStatus({ subscription: subscriptionA, entitlement });
+  assert.equal(status.commercialUsage, "NOT_CONFIGURED");
+  assert.equal(typeof status.commercialUsage, "string");
 });
 
-test("U6 (adversarial): a quotaScope belonging to a different customer within the SAME tenant is rejected fail-closed", () => {
-  const subscriptionA = activeSubscriptionFor(customerA, planA);
-  const entitlement = deriveEntitlement(subscriptionA, planA);
-  const foreignQuotaScope = quotaScopeFor(customerA2);
-  const envelope = createQuotaEnvelope({ scope: foreignQuotaScope, envelopeRef: "envelope-6", sourceFingerprint: "qfp-6", unitLimit: 10 });
-  const quotaReadModel = projectQuotaReadModel(EMPTY_QUOTA_LEDGER, envelope);
-
-  assert.throws(
-    () => projectSubscriptionUsageStatus({ subscription: subscriptionA, entitlement, quotaScope: foreignQuotaScope, quotaReadModel }),
-    InvalidSubscriptionUsageStatusError,
-  );
-});
-
-test("U7: the composed usage status propagates INCOMPLETE/NOT_CONFIGURED monetary states verbatim from the underlying QuotaReadModel - never recomputed or smoothed over", () => {
-  const subscription = activeSubscriptionFor(customerA, planA);
-  const entitlement = deriveEntitlement(subscription, planA);
-  const quotaScope = quotaScopeFor(customerA);
-  const unitOnlyEnvelope = createQuotaEnvelope({ scope: quotaScope, envelopeRef: "envelope-7", sourceFingerprint: "qfp-7", unitLimit: 10 });
-  const quotaReadModel = projectQuotaReadModel(EMPTY_QUOTA_LEDGER, unitOnlyEnvelope);
-
-  const status = projectSubscriptionUsageStatus({ subscription, entitlement, quotaScope, quotaReadModel });
-  assert.equal(status.usage.monetary.status, "NOT_CONFIGURED");
-});
-
-test("B1 (boundary scan, structural): subscription-usage-status.ts imports only from subscription-entitlement.js, execution-quota-admission.js, tenant-scope.js, and customer.js - no authority.ts or organization-membership.ts coupling, no new runtime dependency", () => {
+test("B1 (boundary scan, structural): subscription-usage-status.ts imports only from subscription-entitlement.js, tenant-scope.js, and customer.js - no authority.ts, organization-membership.ts, or execution-quota-admission.ts coupling, no new runtime dependency", () => {
   const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
   const content = readFileSync(join(REPO_ROOT, "src/domain/subscription-usage-status.ts"), "utf8");
   const importedModules = [...content.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]);
-  const allowed = new Set(["./tenant-scope.js", "./customer.js", "./subscription-entitlement.js", "./execution-quota-admission.js"]);
+  const allowed = new Set(["./tenant-scope.js", "./customer.js", "./subscription-entitlement.js"]);
   for (const specifier of importedModules) {
     assert.ok(allowed.has(specifier ?? ""), `unexpected import specifier: ${specifier}`);
   }
   assert.doesNotMatch(content, /from ["']\.\/authority\.js["']/);
   assert.doesNotMatch(content, /from ["']\.\/organization-membership\.js["']/);
+  assert.doesNotMatch(content, /from ["']\.\/execution-quota-admission\.js["']/);
 });
