@@ -5,6 +5,7 @@ import { createDevFixtureSessionProvider } from "./dev-fixture-session-provider.
 import { createRequestHandler, type IncomingRequestLike } from "./request-handler.js";
 import type { ClientProjectSnapshotSource } from "./snapshot-view-state.js";
 import type { TeamAttentionSource } from "./team-attention-view-state.js";
+import type { IdentityVerifier } from "./identity-verifier.js";
 
 /**
  * V2-APP-001 (ADR 0001): the only file in this shell that imports
@@ -19,9 +20,12 @@ export function createHttpServer(deps: {
   devSessionFixtures?: ReadonlyMap<string, SessionContext>;
   snapshotSource: ClientProjectSnapshotSource;
   teamAttentionSource?: TeamAttentionSource;
+  identityVerifier?: IdentityVerifier;
 }): Server {
   const sessionProvider = deps.isProduction
-    ? createProductionSessionProvider()
+    ? createProductionSessionProvider(
+        deps.identityVerifier !== undefined ? { verifier: deps.identityVerifier } : undefined,
+      )
     : createDevFixtureSessionProvider({
         fixtures: deps.devSessionFixtures ?? new Map(),
         isProduction: false,
