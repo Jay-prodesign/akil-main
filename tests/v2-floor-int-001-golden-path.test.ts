@@ -18,12 +18,6 @@ import {
   deriveEntitlement,
 } from "../src/domain/subscription-entitlement.js";
 import {
-  createQuotaAdmissionScope,
-  createQuotaEnvelope,
-  projectQuotaReadModel,
-  EMPTY_QUOTA_LEDGER,
-} from "../src/domain/execution-quota-admission.js";
-import {
   projectSubscriptionUsageStatus,
   InvalidSubscriptionUsageStatusError,
 } from "../src/domain/subscription-usage-status.js";
@@ -44,6 +38,17 @@ import {
  * accepted adversarial floor, only that the three compose correctly and
  * that a cross-tenant substitution anywhere along the chain still fails
  * closed end to end, not just within a single module in isolation.
+ *
+ * Rev: Brain review correction (F1 - domain conflation, PR #147 comment
+ * `6152522225`) removed `execution-quota-admission.ts`'s `QuotaReadModel`
+ * from `subscription-usage-status.ts` entirely - `projectSubscriptionUsage
+ * Status` now takes only `{ subscription, entitlement }` and returns a
+ * `commercialUsage: "NOT_CONFIGURED"` literal rather than borrowed internal
+ * quota data. GOLDEN1 and GOLDEN3 below are updated accordingly: GOLDEN1
+ * no longer composes a quota scope at all, and GOLDEN3's adversarial
+ * cross-tenant substitution now exercises the ENTITLEMENT argument (the
+ * one fail-closed guard this module still has) instead of the now-removed
+ * quotaScope argument.
  */
 
 function elevatedWorker(): AdmittedWorker {
@@ -137,23 +142,6 @@ function activateSubscriptionAndDeriveEntitlement(input: {
   return { tenantScope, customer, plan, subscription, entitlement };
 }
 
-function quotaScopeAndReadModelFor(tenantId: string, customerId: string, unitLimit: number) {
-  const quotaScope = createQuotaAdmissionScope({
-    tenantScope: createTenantScope(tenantId),
-    customerId,
-    projectId: "proj-golden",
-    planId: "plan-golden",
-    planVersion: 1,
-  });
-  const envelope = createQuotaEnvelope({
-    scope: quotaScope,
-    envelopeRef: `envelope-${customerId}`,
-    sourceFingerprint: `qfp-${customerId}`,
-    unitLimit,
-  });
-  return { quotaScope, quotaReadModel: projectQuotaReadModel(EMPTY_QUOTA_LEDGER, envelope) };
-}
-
 test("GOLDEN1: a prospective customer's onboarding request, once admitted, produces a real Organization/tenant that a Customer, Subscription, Entitlement, and customer-safe usage status all compose into correctly end to end", () => {
   const admission = onboardOrganization({
     requestId: "req-golden-1",
@@ -172,7 +160,7 @@ test("GOLDEN1: a prospective customer's onboarding request, once admitted, produ
   // The admitted Organization's own tenantId is the exact tenant the rest of
   // the golden path (Customer -> Subscription -> Entitlement -> usage
   // status) must now operate inside - never a separately re-derived one.
-  const { tenantScope, customer, subscription, entitlement } = activateSubscriptionAndDeriveEntitlement({
+  const { customer, subscription, entitlement } = activateSubscriptionAndDeriveEntitlement({
     tenantId: admission.organization.tenantId,
     customerId: "cust-golden-1",
     displayName: "Golden Customer One",
@@ -182,16 +170,14 @@ test("GOLDEN1: a prospective customer's onboarding request, once admitted, produ
   assert.equal(subscription.status, "ACTIVE");
   assert.equal(entitlement.isActive, true);
 
-  const { quotaScope, quotaReadModel } = quotaScopeAndReadModelFor(tenantScope.tenantId, customer.customerId, 100);
-  const status = projectSubscriptionUsageStatus({ subscription, entitlement, quotaScope, quotaReadModel });
+  const status = projectSubscriptionUsageStatus({ subscription, entitlement });
 
   assert.equal(status.tenantId, admission.organization.tenantId);
   assert.equal(status.customerId, customer.customerId);
   assert.equal(status.subscriptionStatus, "ACTIVE");
   assert.equal(status.isEntitled, true);
   assert.deepEqual(status.entitlementRefs, ["feature:advisor", "feature:priority-support"]);
-  assert.equal(status.usage.unitLimit, 100);
-  assert.equal(status.usage.unitRemaining, 100);
+  assert.equal(status.commercialUsage, "NOT_CONFIGURED");
 });
 
 test("GOLDEN2 (adversarial): a REJECTED onboarding request never produces an Organization/tenant - there is structurally nothing for a Customer/Subscription to attach to", () => {
@@ -226,7 +212,7 @@ test("GOLDEN2 (adversarial): a REJECTED onboarding request never produces an Org
   );
 });
 
-test("GOLDEN3 (adversarial): composing a Customer/Subscription/Entitlement from one onboarded Organization's tenant with a quota scope minted under a DIFFERENT onboarded Organization's tenant fails closed end to end, exactly as it would within a single module", () => {
+test("GOLDEN3 (adversarial): composing a Subscription from one onboarded Organization's tenant with an Entitlement derived under a DIFFERENT onboarded Organization's tenant fails closed end to end, exactly as it would within a single module", () => {
   const orgOne = onboardOrganization({
     requestId: "req-golden-3a",
     requestedByRef: "prospect:golden-3a",
@@ -243,27 +229,28 @@ test("GOLDEN3 (adversarial): composing a Customer/Subscription/Entitlement from 
   });
   assert.notEqual(orgOne.organization.tenantId, orgTwo.organization.tenantId);
 
-  const { customer, subscription, entitlement } = activateSubscriptionAndDeriveEntitlement({
+  const { subscription } = activateSubscriptionAndDeriveEntitlement({
     tenantId: orgOne.organization.tenantId,
     customerId: "cust-golden-3",
     displayName: "Golden Customer Three",
     planEntitlementRefs: ["feature:advisor"],
   });
+  const { entitlement: foreignEntitlement } = activateSubscriptionAndDeriveEntitlement({
+    tenantId: orgTwo.organization.tenantId,
+    customerId: "cust-golden-3-foreign",
+    displayName: "Golden Customer Three Foreign",
+    planEntitlementRefs: ["feature:advisor"],
+  });
 
-  // A quota scope minted for the SECOND onboarded organization's tenant can
-  // never compose into the FIRST organization's customer's usage status -
-  // the same fail-closed ownership check already proven inside
+  // An entitlement derived under the SECOND onboarded organization's tenant
+  // can never compose into the FIRST organization's subscription's usage
+  // status - the same fail-closed ownership check already proven inside
   // subscription-usage-status.ts's own isolated tests, now proven to still
   // hold when the tenant identity on each side of the boundary originated
   // from a real, independently-admitted onboarding flow rather than a bare
   // hand-constructed TenantScope.
-  const { quotaScope: foreignQuotaScope, quotaReadModel } = quotaScopeAndReadModelFor(
-    orgTwo.organization.tenantId,
-    customer.customerId,
-    10,
-  );
   assert.throws(
-    () => projectSubscriptionUsageStatus({ subscription, entitlement, quotaScope: foreignQuotaScope, quotaReadModel }),
+    () => projectSubscriptionUsageStatus({ subscription, entitlement: foreignEntitlement }),
     InvalidSubscriptionUsageStatusError,
   );
 });

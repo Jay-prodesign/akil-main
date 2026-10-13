@@ -45,3 +45,10 @@ No modification to `organization-onboarding.ts`, `subscription-entitlement.ts`, 
 ## Status
 
 **IMPLEMENTED / SELF-VALIDATED** — pending Brain/Founder independent review per `AGENTS.md` §10; Claude's authority ends at this status. `MERGE_DISPOSITION: HOLD_MERGE` — stacked on PR #140/#141/#147's own ranges; merge requires all three merged first, plus its own separately-granted protected owner-gate, never inferred from any other PR's grant. Risk classification: LOW, test-only — this checkpoint adds zero production source and references no module outside what PR #140/#141/#147 already introduced.
+
+## Brain review correction on PR #147 — downstream fix (same pass)
+
+- Brain's independent review found `APP-SUB-002`'s `subscription-usage-status.ts` conflated `execution-quota-admission.ts`'s internal execution-admission domain with customer-facing commercial usage (PR #147 comment `6152522225`) — see `APP-SUB-002.md`'s own "Brain review correction" section. That fix removed `quotaScope`/`quotaReadModel` from `projectSubscriptionUsageStatus` entirely, replacing `usage: QuotaReadModel` with `commercialUsage: "NOT_CONFIGURED"`.
+- This branch merged that correction in (`git merge claude/app-sub-002-usage-status-projection`, clean, no conflicts) and updated its own downstream consumers: **GOLDEN1** no longer composes a quota scope — it asserts `commercialUsage === "NOT_CONFIGURED"` directly. **GOLDEN3** was redesigned: since `quotaScope` no longer exists as an argument, its cross-tenant adversarial substitution now exercises the `entitlement` argument instead — a `Subscription` from one onboarded organization's tenant composed with an `Entitlement` derived under a different onboarded organization's tenant, which still throws `InvalidSubscriptionUsageStatusError`. **GOLDEN2** was untouched (it never touched `subscription-usage-status.ts`).
+- Full regression after the merge + fix: **2736/2736 passing** (2716 corrected baseline + 17 ORG-ONBOARD-001 cherry-pick + 3 GOLDEN tests), clean strict typecheck.
+- Status unchanged: `IMPLEMENTED / SELF-VALIDATED`, `HOLD_MERGE`.
