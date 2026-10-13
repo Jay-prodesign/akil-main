@@ -9,6 +9,9 @@ import type { ProjectCommunicationRecord } from "../domain/project-communication
 import { buildAdvisorResult, type AdvisorResult } from "../domain/delivery-advisor.js";
 import type { TeamAttentionViewState } from "./team-attention-view-state.js";
 import type { TeamAttentionProjection } from "../domain/team-attention-projection.js";
+import type { CustomerCommercialStatusViewState } from "./customer-commercial-view-state.js";
+import type { BillingReferenceStatusViewState } from "./billing-reference-view-state.js";
+import type { CustomerLifecycleReadinessViewState } from "./customer-lifecycle-readiness-view-state.js";
 
 /**
  * V2-APP-001 (IN SCOPE H) / V2-CDO-006: the deterministic, closed set of
@@ -20,17 +23,24 @@ import type { TeamAttentionProjection } from "../domain/team-attention-projectio
  * Activation Discipline). Every other kind, including `BLOCKED`, is live:
  * `request-handler.ts` reaches it from a real `ClientProjectSnapshot`.
  */
+interface CommercialLifecycleSections {
+  readonly teamAttention?: TeamAttentionViewState;
+  readonly commercialStatus?: CustomerCommercialStatusViewState;
+  readonly billingReferenceStatus?: BillingReferenceStatusViewState;
+  readonly lifecycleReadiness?: CustomerLifecycleReadinessViewState;
+}
+
 export type ShellPageContent =
   | { readonly kind: "LOADING" }
   | { readonly kind: "EMPTY" }
   | { readonly kind: "UNAVAILABLE"; readonly reason: string }
   | { readonly kind: "UNSUPPORTED"; readonly reason: string }
-  | { readonly kind: "BLOCKED"; readonly snapshot: ClientProjectSnapshot; readonly teamAttention?: TeamAttentionViewState }
+  | ({ readonly kind: "BLOCKED"; readonly snapshot: ClientProjectSnapshot } & CommercialLifecycleSections)
   | { readonly kind: "ERROR"; readonly reason: string }
   | { readonly kind: "NOT_FOUND" }
   | { readonly kind: "UNAUTHENTICATED" }
   | { readonly kind: "FORBIDDEN_TENANT_SCOPE" }
-  | { readonly kind: "READY"; readonly snapshot: ClientProjectSnapshot; readonly teamAttention?: TeamAttentionViewState };
+  | ({ readonly kind: "READY"; readonly snapshot: ClientProjectSnapshot } & CommercialLifecycleSections);
 
 export interface RenderedShellPage {
   readonly status: number;
@@ -386,6 +396,90 @@ function renderTeamAttentionSection(view: TeamAttentionViewState | undefined): s
 }
 
 /**
+ * V2-CUST-SURFACE-001: subscription/entitlement/commercial-usage status,
+ * surfaced read-only. `commercialUsage` renders its own truthful literal
+ * verbatim (today always `NOT_CONFIGURED` - no real metering source
+ * exists) rather than a computed number. This section carries no
+ * mutating upgrade/downgrade/cancel control - per this checkpoint's own
+ * scope, a CTA is never rendered unless an already-admitted authenticated
+ * action path genuinely supports it, and no such path exists yet.
+ */
+function renderCustomerCommercialStatusSection(view: CustomerCommercialStatusViewState | undefined): string {
+  if (view === undefined || view.kind !== "READY") {
+    return `
+  <section aria-labelledby="subscription-status-heading">
+    <h2 id="subscription-status-heading">Subscription &amp; entitlement</h2>
+    <p class="status status-neutral" role="status">Unavailable</p>
+    <p>Subscription status could not be loaded for this account. This does not affect your project status above.</p>
+  </section>`;
+  }
+
+  const { status } = view;
+  return `
+  <section aria-labelledby="subscription-status-heading">
+    <h2 id="subscription-status-heading">Subscription &amp; entitlement</h2>
+    <p>Subscription status: <strong>${escapeHtml(status.subscriptionStatus)}</strong></p>
+    <p>Entitled: ${status.isEntitled ? "Yes" : "No"}</p>
+    <p>Usage: ${escapeHtml(status.commercialUsage)}</p>
+  </section>`;
+}
+
+/**
+ * V2-CUST-SURFACE-001: billing-reference status, surfaced read-only. The
+ * underlying `BillingReferenceRecord` carries no monetary amount field
+ * anywhere (see `billing-reference.ts`), so none is rendered here either
+ * - never a fabricated figure.
+ */
+function renderBillingReferenceStatusSection(view: BillingReferenceStatusViewState | undefined): string {
+  if (view === undefined || view.kind !== "READY") {
+    return `
+  <section aria-labelledby="billing-reference-heading">
+    <h2 id="billing-reference-heading">Billing reference</h2>
+    <p class="status status-neutral" role="status">Unavailable</p>
+    <p>Billing reference status could not be loaded for this account. This does not affect your project status above.</p>
+  </section>`;
+  }
+
+  const { record } = view;
+  return `
+  <section aria-labelledby="billing-reference-heading">
+    <h2 id="billing-reference-heading">Billing reference</h2>
+    <p>Reference status: <strong>${escapeHtml(record.status)}</strong></p>
+  </section>`;
+}
+
+/**
+ * V2-CUST-SURFACE-001: customer lifecycle/offboarding/backup readiness,
+ * surfaced read-only. No offboard/export/delete CTA is rendered here -
+ * per this checkpoint's own scope, a mutating action path only renders
+ * when an already-admitted authenticated authority genuinely supports
+ * it, and no such path exists yet on this customer-facing surface.
+ */
+function renderCustomerLifecycleReadinessSection(view: CustomerLifecycleReadinessViewState | undefined): string {
+  if (view === undefined || view.kind !== "READY") {
+    return `
+  <section aria-labelledby="lifecycle-readiness-heading">
+    <h2 id="lifecycle-readiness-heading">Account lifecycle</h2>
+    <p class="status status-neutral" role="status">Unavailable</p>
+    <p>Account lifecycle status could not be loaded. This does not affect your project status above.</p>
+  </section>`;
+  }
+
+  const { projection } = view;
+  const executionLine =
+    projection.offboardingExecutionStatus !== undefined
+      ? `<p>Offboarding execution: ${escapeHtml(projection.offboardingExecutionStatus)}</p>`
+      : "";
+  return `
+  <section aria-labelledby="lifecycle-readiness-heading">
+    <h2 id="lifecycle-readiness-heading">Account lifecycle</h2>
+    <p>Offboarding status: <strong>${escapeHtml(projection.offboardingStatus)}</strong></p>
+    ${executionLine}
+    <p>Backup/export readiness: ${escapeHtml(projection.backupReadiness)}</p>
+  </section>`;
+}
+
+/**
  * V2-CDO-006 minimum IA: identity header, next action, (blocker card when
  * blocked), timeline, working artifact, capabilities, recent updates,
  * verified-completed-work count. Every section is driven only by fields
@@ -394,7 +488,13 @@ function renderTeamAttentionSection(view: TeamAttentionViewState | undefined): s
  */
 function renderSnapshotBody(
   snapshot: ClientProjectSnapshot,
-  options?: { blocked?: boolean; teamAttention?: TeamAttentionViewState },
+  options?: {
+    blocked?: boolean;
+    teamAttention?: TeamAttentionViewState;
+    commercialStatus?: CustomerCommercialStatusViewState;
+    billingReferenceStatus?: BillingReferenceStatusViewState;
+    lifecycleReadiness?: CustomerLifecycleReadinessViewState;
+  },
 ): string {
   const header = `
   <section aria-labelledby="project-identity-heading">
@@ -416,6 +516,9 @@ function renderSnapshotBody(
   ${renderCommunicationsSection(snapshot.recentCommunications)}
   ${renderAdvisorSection(snapshot)}
   ${renderTeamAttentionSection(options?.teamAttention)}
+  ${renderCustomerCommercialStatusSection(options?.commercialStatus)}
+  ${renderBillingReferenceStatusSection(options?.billingReferenceStatus)}
+  ${renderCustomerLifecycleReadinessSection(options?.lifecycleReadiness)}
   <section aria-labelledby="verified-work-heading">
     <h2 id="verified-work-heading">Verified completed work</h2>
     <p>${snapshot.verifiedCompletedJobIds.length} item(s) verified complete.</p>
@@ -485,6 +588,11 @@ export function renderShellPage(content: ShellPageContent): RenderedShellPage {
           bodyHtml: renderSnapshotBody(content.snapshot, {
             blocked: true,
             ...(content.teamAttention !== undefined ? { teamAttention: content.teamAttention } : {}),
+            ...(content.commercialStatus !== undefined ? { commercialStatus: content.commercialStatus } : {}),
+            ...(content.billingReferenceStatus !== undefined
+              ? { billingReferenceStatus: content.billingReferenceStatus }
+              : {}),
+            ...(content.lifecycleReadiness !== undefined ? { lifecycleReadiness: content.lifecycleReadiness } : {}),
           }),
         }),
       };
@@ -540,10 +648,14 @@ export function renderShellPage(content: ShellPageContent): RenderedShellPage {
           title: "Project status",
           statusLabel: "Signed in",
           statusTone: "success",
-          bodyHtml: renderSnapshotBody(
-            content.snapshot,
-            content.teamAttention !== undefined ? { teamAttention: content.teamAttention } : undefined,
-          ),
+          bodyHtml: renderSnapshotBody(content.snapshot, {
+            ...(content.teamAttention !== undefined ? { teamAttention: content.teamAttention } : {}),
+            ...(content.commercialStatus !== undefined ? { commercialStatus: content.commercialStatus } : {}),
+            ...(content.billingReferenceStatus !== undefined
+              ? { billingReferenceStatus: content.billingReferenceStatus }
+              : {}),
+            ...(content.lifecycleReadiness !== undefined ? { lifecycleReadiness: content.lifecycleReadiness } : {}),
+          }),
         }),
       };
   }
