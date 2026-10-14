@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { createInternalOsHttpServer } from "../src/web/internal-os-http-server.js";
 import { STAFF_SESSION_TOKEN_HEADER } from "../src/web/internal-os-request-handler.js";
-import type { OrganizationResourceBindingSource, OperationalObservabilitySource } from "../src/web/internal-os-view-state.js";
+import type { OrganizationResourceBindingSource, OperationalObservabilitySource, CustomerOffboardingAdminSource } from "../src/web/internal-os-view-state.js";
 import type { OperationalObservabilityView } from "../src/domain/operational-observability-view.js";
+import type { CustomerOffboardingRequest, CustomerOffboardingRequestId } from "../src/domain/customer-offboarding.js";
 import {
   REVIEW_ORGANIZATION,
   buildReviewStaffSessionFixtureMap,
@@ -262,6 +263,48 @@ test("Rev195 F1: access denial on /os/admin remains fail-closed with a wired ope
   const view: OperationalObservabilityView = { connections: [], pendingApprovals: [], auditEvidence: [] };
   const source: OperationalObservabilitySource = { resolveView: () => view };
   await withServer({ ...devDeps, operationalObservabilitySource: source }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/os/admin`, { headers: { [STAFF_SESSION_TOKEN_HEADER]: MEMBER_REVIEW_FIXTURE.sessionToken } });
+    assert.equal(response.status, 403);
+  });
+});
+
+// --- V2-ADMIN-SURFACE-001: the real /os/admin route must actually thread customerOffboardingAdminSource, not just define it ---
+
+test("V2-ADMIN-SURFACE-001: /os/admin with no customerOffboardingAdminSource wired renders the honest NOT_ACTIVE posture through the real production-shaped route", async () => {
+  await withServer(devDeps, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/os/admin`, { headers: { [STAFF_SESSION_TOKEN_HEADER]: FOUNDER_REVIEW_FIXTURE.sessionToken } });
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    assert.match(body, /Pending offboarding requests/);
+    assert.match(body, /NOT ACTIVE/);
+  });
+});
+
+test("V2-ADMIN-SURFACE-001: /os/admin with a wired customerOffboardingAdminSource renders its real pending requests through the real route, with no mutating control", async () => {
+  const request: CustomerOffboardingRequest = {
+    requestId: "offboard-route-1" as CustomerOffboardingRequestId,
+    tenantId: REVIEW_ORGANIZATION.tenantId,
+    customerId: REVIEW_PROJECT_ALPHA.customerId,
+    requestedByRef: "membership-requester-route",
+    requestedAt: "2026-01-05T00:00:00.000Z",
+    status: "REQUESTED",
+  };
+  const source: CustomerOffboardingAdminSource = { listPendingRequests: () => [request] };
+  await withServer({ ...devDeps, customerOffboardingAdminSource: source }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/os/admin`, { headers: { [STAFF_SESSION_TOKEN_HEADER]: FOUNDER_REVIEW_FIXTURE.sessionToken } });
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    assert.match(body, new RegExp(REVIEW_PROJECT_ALPHA.customerId));
+    assert.match(body, /REQUESTED/);
+    assert.match(body, /membership-requester-route/);
+    assert.doesNotMatch(body, /<button/i);
+    assert.doesNotMatch(body, /<form/i);
+  });
+});
+
+test("V2-ADMIN-SURFACE-001: access denial on /os/admin remains fail-closed with a wired customerOffboardingAdminSource - a Member fixture (no WRITE) still gets 403", async () => {
+  const source: CustomerOffboardingAdminSource = { listPendingRequests: () => [] };
+  await withServer({ ...devDeps, customerOffboardingAdminSource: source }, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/os/admin`, { headers: { [STAFF_SESSION_TOKEN_HEADER]: MEMBER_REVIEW_FIXTURE.sessionToken } });
     assert.equal(response.status, 403);
   });

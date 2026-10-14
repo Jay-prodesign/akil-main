@@ -29,9 +29,11 @@ import {
   type WorkJobSource,
   type OrganizationResourceBindingSource,
   type OperationalObservabilitySource,
+  type CustomerOffboardingAdminSource,
 } from "../src/web/internal-os-view-state.js";
 import { composeOperationalObservabilityView } from "../src/domain/operational-observability-view.js";
 import { createConnectionRequirement, createConnectionBinding, transitionConnectionBinding } from "../src/domain/connection-authority.js";
+import { requestCustomerOffboarding, type CustomerOffboardingRequest } from "../src/domain/customer-offboarding.js";
 
 const tenantScope = createTenantScope("tenant-os-v0-08-view");
 const organization: Organization = activateOrganization({
@@ -344,4 +346,85 @@ test("OS-V0-12: resolveAdminView surfaces a wired OperationalObservabilitySource
     assert.equal(view.operationalObservability.view.connections[0]?.connectionState, "REVOKED");
     assert.equal(view.operationalObservability.view.connections[0]?.killSwitchEngaged, true);
   }
+});
+
+test("V2-ADMIN-SURFACE-001: resolveAdminView's pendingOffboardingRequests defaults to NOT_ACTIVE when no source is supplied - honest default, never fabricated", () => {
+  const context = contextFor([]);
+  const view = resolveAdminView({ organization, context });
+  assert.deepEqual(view.pendingOffboardingRequests, { kind: "NOT_ACTIVE" });
+});
+
+test("V2-ADMIN-SURFACE-001: resolveAdminView renders READY with an empty list when a source is wired but has nothing pending", () => {
+  const context = contextFor([]);
+  const source: CustomerOffboardingAdminSource = { listPendingRequests: () => [] };
+  const view = resolveAdminView({ organization, context, customerOffboardingAdminSource: source });
+  assert.deepEqual(view.pendingOffboardingRequests, { kind: "READY", requests: [] });
+});
+
+test("V2-ADMIN-SURFACE-001: resolveAdminView surfaces a wired source's real pending REQUESTED offboarding requests", () => {
+  const context = contextFor([]);
+  const request = requestCustomerOffboarding({
+    requestId: "offboard-req-1",
+    customer,
+    requestedByRef: "membership-requester",
+    requestedAt: "2026-01-05T00:00:00.000Z",
+  });
+  const source: CustomerOffboardingAdminSource = { listPendingRequests: () => [request] };
+  const view = resolveAdminView({ organization, context, customerOffboardingAdminSource: source });
+  assert.equal(view.pendingOffboardingRequests.kind, "READY");
+  if (view.pendingOffboardingRequests.kind === "READY") {
+    assert.deepEqual(view.pendingOffboardingRequests.requests, [
+      {
+        requestId: request.requestId,
+        customerId: customer.customerId,
+        requestedByRef: "membership-requester",
+        requestedAt: "2026-01-05T00:00:00.000Z",
+      },
+    ]);
+  }
+});
+
+test("V2-ADMIN-SURFACE-001 adversarial: a request from a FOREIGN tenant is silently filtered out, never leaked into this Organization's pending list", () => {
+  const context = contextFor([]);
+  const foreignTenantScope = createTenantScope("tenant-foreign-admin-offboard");
+  const foreignCustomer = createCustomer({ tenantScope: foreignTenantScope, customerId: "customer-foreign", displayName: "Foreign Customer" });
+  const foreignRequest = requestCustomerOffboarding({
+    requestId: "offboard-req-foreign",
+    customer: foreignCustomer,
+    requestedByRef: "membership-foreign",
+    requestedAt: "2026-01-05T00:00:00.000Z",
+  });
+  const source: CustomerOffboardingAdminSource = { listPendingRequests: () => [foreignRequest] };
+  const view = resolveAdminView({ organization, context, customerOffboardingAdminSource: source });
+  assert.deepEqual(view.pendingOffboardingRequests, { kind: "READY", requests: [] });
+});
+
+test("V2-ADMIN-SURFACE-001 adversarial: an already-DENIED request is never shown as pending, even if a buggy source returns it", () => {
+  const context = contextFor([]);
+  const request: CustomerOffboardingRequest = {
+    ...requestCustomerOffboarding({
+      requestId: "offboard-req-denied",
+      customer,
+      requestedByRef: "membership-requester",
+      requestedAt: "2026-01-05T00:00:00.000Z",
+    }),
+    status: "DENIED",
+    decidedByRef: "membership-decider",
+    decidedAt: "2026-01-06T00:00:00.000Z",
+    denialReason: "not eligible",
+  };
+  const source: CustomerOffboardingAdminSource = { listPendingRequests: () => [request] };
+  const view = resolveAdminView({ organization, context, customerOffboardingAdminSource: source });
+  assert.deepEqual(view.pendingOffboardingRequests, { kind: "READY", requests: [] });
+});
+
+test("V2-ADMIN-SURFACE-001 adversarial: a throwing source degrades to NOT_ACTIVE rather than propagating", () => {
+  const context = contextFor([]);
+  const source: CustomerOffboardingAdminSource = {
+    listPendingRequests: () => {
+      throw new Error("source unavailable");
+    },
+  };
+  const view = resolveAdminView({ organization, context, customerOffboardingAdminSource: source });
+  assert.deepEqual(view.pendingOffboardingRequests, { kind: "NOT_ACTIVE" });
 });
