@@ -10,6 +10,8 @@ import type {
   OrganizationResourceBindingStatus,
 } from "../domain/organization-resource-binding.js";
 import type { OperationalObservabilityView } from "../domain/operational-observability-view.js";
+import type { Customer } from "../domain/customer.js";
+import type { CustomerOffboardingRequest, CustomerOffboardingRequestId } from "../domain/customer-offboarding.js";
 import {
   requireInternalOsProjectAccess,
   InternalOsAccessDeniedError,
@@ -485,12 +487,86 @@ export function resolveOperationalObservabilityView(
   return { kind: "READY", view: source.resolveView(organization) };
 }
 
+/**
+ * V2-ADMIN-SURFACE-001 (fresh current-main + canonical-blueprint scan,
+ * REV215): the customer-commercial-lifecycle floor slices landed by
+ * V2-CUST-SURFACE-001 (`APP-SUB-002`/`APP-BILL-001`/`CUS-OFFBOARD-001`/`002`)
+ * surfaced a real staff-facing gap - `completeCustomerOffboarding`
+ * (`customer-offboarding.ts`) requires a deciding staff principal distinct
+ * from the original requester, but nothing anywhere in `/os/admin` ever
+ * lists a pending `CustomerOffboardingRequest` for a staff member to act
+ * on. Canonical OS blueprint §33.13 V1-04 names "approvals and pending
+ * attention" as a required admin/control-plane concern; this closes the
+ * visibility half of it. Mirrors `OrganizationResourceBindingSource`'s own
+ * established optional-source pattern exactly: no durable
+ * `CustomerOffboardingRequest` store exists anywhere in this repository
+ * today (confirmed by repo-wide inspection), so this module invents no
+ * persistence of its own - an absent source renders `NOT_ACTIVE`, never
+ * fabricated content. This checkpoint is deliberately READ-ONLY: completing
+ * or denying a request requires an authenticated admin-mutation boundary
+ * exactly like `connector-connection-admin-access.ts`'s own, which in turn
+ * requires a durable store this checkpoint does not invent - exposing a
+ * decide/complete/deny control here without one would be exactly the kind
+ * of non-functional CTA V2-CUST-SURFACE-001 itself refused to render.
+ */
+export interface CustomerOffboardingAdminSource {
+  listPendingRequests(organization: Organization): ReadonlyArray<CustomerOffboardingRequest>;
+}
+
+export interface PendingOffboardingRequestSummary {
+  readonly requestId: CustomerOffboardingRequestId;
+  readonly customerId: Customer["customerId"];
+  readonly requestedByRef: string;
+  readonly requestedAt: string;
+}
+
+export type PendingOffboardingRequestsViewState =
+  | { readonly kind: "NOT_ACTIVE" }
+  | { readonly kind: "READY"; readonly requests: ReadonlyArray<PendingOffboardingRequestSummary> };
+
+/**
+ * Tenant isolation fails closed exactly like `resolveResourceBindingView`:
+ * `source` is optional so an unwired caller degrades to `NOT_ACTIVE` rather
+ * than throwing or fabricating data; a throwing source also degrades to
+ * `NOT_ACTIVE` rather than propagating. The returned requests are
+ * independently re-verified against the given `organization`'s own
+ * `tenantId` and filtered to `status === "REQUESTED"` before ever being
+ * summarized - mirroring the Rev28 bounded correction already applied
+ * throughout this corridor - so a faulty or compromised source can never
+ * leak a foreign tenant's requests, and a stale/already-decided request can
+ * never be shown as pending.
+ */
+export function resolvePendingOffboardingRequestsView(
+  organization: Organization,
+  source: CustomerOffboardingAdminSource | undefined,
+): PendingOffboardingRequestsViewState {
+  if (source === undefined) {
+    return { kind: "NOT_ACTIVE" };
+  }
+  let requests: ReadonlyArray<CustomerOffboardingRequest>;
+  try {
+    requests = source.listPendingRequests(organization);
+  } catch {
+    return { kind: "NOT_ACTIVE" };
+  }
+  const summaries: PendingOffboardingRequestSummary[] = requests
+    .filter((request) => request.tenantId === organization.tenantId && request.status === "REQUESTED")
+    .map((request) => ({
+      requestId: request.requestId,
+      customerId: request.customerId,
+      requestedByRef: request.requestedByRef,
+      requestedAt: request.requestedAt,
+    }));
+  return { kind: "READY", requests: summaries };
+}
+
 export interface AdminViewState {
   readonly kind: "READY";
   readonly organization: OrganizationSummary;
   readonly access: AccessSummary;
   readonly resourceBinding: AdminResourceBindingViewState;
   readonly operationalObservability: OperationalObservabilityViewState;
+  readonly pendingOffboardingRequests: PendingOffboardingRequestsViewState;
   readonly notActiveConcepts: ReadonlyArray<string>;
 }
 
@@ -521,6 +597,7 @@ export function resolveAdminView(input: {
   context: InternalOsAccessContext;
   resourceBindingSource?: OrganizationResourceBindingSource;
   operationalObservabilitySource?: OperationalObservabilitySource;
+  customerOffboardingAdminSource?: CustomerOffboardingAdminSource;
 }): AdminViewState {
   return {
     kind: "READY",
@@ -528,6 +605,7 @@ export function resolveAdminView(input: {
     access: summarizeAccess(input.context.access),
     resourceBinding: resolveResourceBindingView(input.organization, input.resourceBindingSource),
     operationalObservability: resolveOperationalObservabilityView(input.organization, input.operationalObservabilitySource),
+    pendingOffboardingRequests: resolvePendingOffboardingRequestsView(input.organization, input.customerOffboardingAdminSource),
     notActiveConcepts: ADMIN_NOT_ACTIVE_CONCEPTS,
   };
 }

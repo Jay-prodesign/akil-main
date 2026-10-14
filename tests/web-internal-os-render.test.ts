@@ -11,7 +11,7 @@ import {
   adminPageContent,
 } from "../src/web/internal-os-render.js";
 import { NAV_DESTINATIONS } from "../src/web/internal-os-view-state.js";
-import type { HomeViewState, WorkViewState, PeopleViewState, ProductsViewState, AdminViewState } from "../src/web/internal-os-view-state.js";
+import type { HomeViewState, WorkViewState, PeopleViewState, ProductsViewState, AdminViewState, PendingOffboardingRequestSummary } from "../src/web/internal-os-view-state.js";
 
 const ORG_NAME = "AKILTA <Test> & \"Org\"";
 
@@ -140,6 +140,7 @@ test("Admin renders the organization/access it was given plus every NOT_ACTIVE c
     access: { role: "ADMIN", permissions: ["READ"], canPerformProtectedActions: false },
     resourceBinding: { kind: "NOT_ACTIVE" },
     operationalObservability: { kind: "NOT_ACTIVE" },
+    pendingOffboardingRequests: { kind: "NOT_ACTIVE" },
     notActiveConcepts: ["Workers", "Connections", "Policies"],
   };
   const rendered = renderInternalOsPage(adminPageContent(NAV_DESTINATIONS, "Org", view));
@@ -165,6 +166,7 @@ test("Rev183 F3: Admin renders the Organization's current resource-binding state
       },
     },
     operationalObservability: { kind: "NOT_ACTIVE" },
+    pendingOffboardingRequests: { kind: "NOT_ACTIVE" },
     notActiveConcepts: [],
   };
   const rendered = renderInternalOsPage(adminPageContent(NAV_DESTINATIONS, "Org", view));
@@ -182,6 +184,7 @@ test("Rev183 F3: Admin renders NOT_BOUND distinctly from NOT_ACTIVE when the Org
     access: { role: "ADMIN", permissions: ["READ"], canPerformProtectedActions: false },
     resourceBinding: { kind: "NOT_BOUND" },
     operationalObservability: { kind: "NOT_ACTIVE" },
+    pendingOffboardingRequests: { kind: "NOT_ACTIVE" },
     notActiveConcepts: [],
   };
   const rendered = renderInternalOsPage(adminPageContent(NAV_DESTINATIONS, "Org", view));
@@ -254,10 +257,68 @@ test("no rendered page across any content kind ever contains a mutating form or 
     renderInternalOsPage(workPageContent(NAV_DESTINATIONS, "Org", homeView.work)),
     renderInternalOsPage(peoplePageContent(NAV_DESTINATIONS, "Org", { kind: "READY", self: { principalDisplayName: "X", organizationRole: "STAFF", membershipState: "ACTIVE" } })),
     renderInternalOsPage(productsPageContent(NAV_DESTINATIONS, "Org", { kind: "READY", products: [{ name: "X", status: "ACTIVE" }] })),
-    renderInternalOsPage(adminPageContent(NAV_DESTINATIONS, "Org", { kind: "READY", organization: { displayName: "Org", state: "ACTIVE" }, access: { role: "OWNER", permissions: ["READ", "WRITE", "EXECUTE"], canPerformProtectedActions: true }, resourceBinding: { kind: "NOT_ACTIVE" }, operationalObservability: { kind: "NOT_ACTIVE" }, notActiveConcepts: ["Workers"] })),
+    renderInternalOsPage(adminPageContent(NAV_DESTINATIONS, "Org", { kind: "READY", organization: { displayName: "Org", state: "ACTIVE" }, access: { role: "OWNER", permissions: ["READ", "WRITE", "EXECUTE"], canPerformProtectedActions: true }, resourceBinding: { kind: "NOT_ACTIVE" }, operationalObservability: { kind: "NOT_ACTIVE" }, pendingOffboardingRequests: { kind: "NOT_ACTIVE" }, notActiveConcepts: ["Workers"] })),
   ];
   for (const page of pages) {
     assert.doesNotMatch(page.html, /<button/i);
     assert.doesNotMatch(page.html, /<form/i);
   }
+});
+
+test("V2-ADMIN-SURFACE-001: Admin renders NOT_ACTIVE for pending offboarding requests when no source is wired", () => {
+  const view: AdminViewState = {
+    kind: "READY",
+    organization: { displayName: "Org", state: "ACTIVE" },
+    access: { role: "ADMIN", permissions: ["READ", "WRITE"], canPerformProtectedActions: false },
+    resourceBinding: { kind: "NOT_ACTIVE" },
+    operationalObservability: { kind: "NOT_ACTIVE" },
+    pendingOffboardingRequests: { kind: "NOT_ACTIVE" },
+    notActiveConcepts: [],
+  };
+  const rendered = renderInternalOsPage(adminPageContent(NAV_DESTINATIONS, "Org", view));
+  assert.match(rendered.html, /Pending offboarding requests/);
+  assert.match(rendered.html, /NOT ACTIVE/);
+});
+
+test("V2-ADMIN-SURFACE-001: Admin renders an empty-queue message when a source is wired but nothing is pending", () => {
+  const view: AdminViewState = {
+    kind: "READY",
+    organization: { displayName: "Org", state: "ACTIVE" },
+    access: { role: "ADMIN", permissions: ["READ", "WRITE"], canPerformProtectedActions: false },
+    resourceBinding: { kind: "NOT_ACTIVE" },
+    operationalObservability: { kind: "NOT_ACTIVE" },
+    pendingOffboardingRequests: { kind: "READY", requests: [] },
+    notActiveConcepts: [],
+  };
+  const rendered = renderInternalOsPage(adminPageContent(NAV_DESTINATIONS, "Org", view));
+  assert.match(rendered.html, /No pending offboarding requests/);
+});
+
+test("V2-ADMIN-SURFACE-001: Admin renders real pending offboarding requests with escaped text and zero mutating controls", () => {
+  const view: AdminViewState = {
+    kind: "READY",
+    organization: { displayName: "Org", state: "ACTIVE" },
+    access: { role: "ADMIN", permissions: ["READ", "WRITE"], canPerformProtectedActions: false },
+    resourceBinding: { kind: "NOT_ACTIVE" },
+    operationalObservability: { kind: "NOT_ACTIVE" },
+    pendingOffboardingRequests: {
+      kind: "READY",
+      requests: [
+        {
+          requestId: "offboard-render-1" as PendingOffboardingRequestSummary["requestId"],
+          customerId: "customer-render-1" as PendingOffboardingRequestSummary["customerId"],
+          requestedByRef: "membership-render-1",
+          requestedAt: "2026-01-05T00:00:00.000Z",
+        },
+      ],
+    },
+    notActiveConcepts: [],
+  };
+  const rendered = renderInternalOsPage(adminPageContent(NAV_DESTINATIONS, "Org", view));
+  assert.match(rendered.html, /customer-render-1/);
+  assert.match(rendered.html, /REQUESTED/);
+  assert.match(rendered.html, /membership-render-1/);
+  assert.doesNotMatch(rendered.html, /<button/i);
+  assert.doesNotMatch(rendered.html, /<form/i);
+  assert.doesNotMatch(rendered.html, /<input/i);
 });

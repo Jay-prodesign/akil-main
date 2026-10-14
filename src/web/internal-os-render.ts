@@ -1,4 +1,4 @@
-import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, AdminResourceBindingViewState, OperationalObservabilityViewState, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary } from "./internal-os-view-state.js";
+import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, AdminResourceBindingViewState, OperationalObservabilityViewState, PendingOffboardingRequestsViewState, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary } from "./internal-os-view-state.js";
 
 export interface RenderedInternalOsPage {
   readonly status: number;
@@ -347,6 +347,40 @@ function renderOperationalObservabilityCard(view: OperationalObservabilityViewSt
   </section>`;
 }
 
+/**
+ * V2-ADMIN-SURFACE-001: read-only pending-offboarding-request queue -
+ * exactly the same "escaped text only, no mutation control" discipline as
+ * `renderResourceBindingCard`/`renderOperationalObservabilityCard`. No
+ * decide/complete/deny affordance is rendered anywhere, since no
+ * authenticated admin-mutation boundary or durable store for this request
+ * type exists yet - see `resolvePendingOffboardingRequestsView`'s own doc
+ * comment for why that is deliberate, not an oversight.
+ */
+function renderPendingOffboardingRequestsCard(view: PendingOffboardingRequestsViewState): string {
+  if (view.kind === "NOT_ACTIVE") {
+    return `
+  <section aria-labelledby="admin-pending-offboarding-heading" class="card">
+    <h2 id="admin-pending-offboarding-heading">Pending offboarding requests</h2>
+    <p class="status status-neutral" role="status">NOT ACTIVE</p>
+    <p>This area is not yet connected to a live data source in this build.</p>
+  </section>`;
+  }
+  const itemsHtml =
+    view.requests.length > 0
+      ? `<ul>\n      ${view.requests
+          .map(
+            (request) =>
+              `<li>${escapeHtml(request.customerId)}: <span class="status status-warning" role="status">REQUESTED</span> by ${escapeHtml(request.requestedByRef)} at ${escapeHtml(request.requestedAt)}</li>`,
+          )
+          .join("\n      ")}\n    </ul>`
+      : `<p>No pending offboarding requests.</p>`;
+  return `
+  <section aria-labelledby="admin-pending-offboarding-heading" class="card">
+    <h2 id="admin-pending-offboarding-heading">Pending offboarding requests</h2>
+    ${itemsHtml}
+  </section>`;
+}
+
 function renderAdminBody(view: AdminViewState): string {
   const notActiveItems = view.notActiveConcepts
     .map((concept) => `<li>${escapeHtml(concept)}: <span class="status status-neutral" role="status">NOT ACTIVE</span></li>`)
@@ -356,6 +390,7 @@ function renderAdminBody(view: AdminViewState): string {
   ${renderAccessCard(view.access)}
   ${renderResourceBindingCard(view.resourceBinding)}
   ${renderOperationalObservabilityCard(view.operationalObservability)}
+  ${renderPendingOffboardingRequestsCard(view.pendingOffboardingRequests)}
   <section aria-labelledby="admin-not-active-heading" class="card">
     <h2 id="admin-not-active-heading">Not yet active in this build</h2>
     <ul>
