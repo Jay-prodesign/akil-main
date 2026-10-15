@@ -44,4 +44,16 @@ No modification to `client-project-snapshot.ts`, `snapshot-view-state.ts`, `dura
 - `node --test dist/tests/*.test.js`: **2909/2909 passing**.
 - Zero new runtime dependency.
 
+## Brain correction (F1)
+
+Brain's independent review of exact head `3754cda7a092017309f23df8a0d63a655538786b` (PR #145 comment `6194655851`) found: `getSnapshot` caught every exception from `projectStore.get`/`jobStore.list` - including a genuine storage/data-integrity failure (a corrupted tenant file) - and collapsed it into `undefined`. `resolveProtectedSnapshotView` treats `undefined` as the honest "no such project" `NOT_FOUND` outcome, so this silently relabeled a real operational/data-integrity error as "project does not exist." Worse, this adapter's own original doc comment incorrectly claimed `resolveProtectedSnapshotView` "does not itself catch exceptions from a wired source" - it already does, mapping them to the correct `{ kind: "ERROR", reason }` state.
+
+**Fix**: removed the try/catch entirely. `undefined` is now returned only for the genuine "project absent" case (`projectStore.get` returning `undefined`); any real read/replay-corruption exception propagates uncaught to `resolveProtectedSnapshotView`'s own existing, correct `ERROR` handling.
+
+**Test changes**: the corrupted-file test now asserts the adapter's own `getSnapshot` throws (not returns `undefined`), plus a new end-to-end test proving `resolveProtectedSnapshotView` renders `{ kind: "ERROR" }` (never `NOT_FOUND`) for this exact scenario.
+
+No guard-disable sanity applies here - this correction removes a bug (an over-broad catch), it does not add a new guard.
+
+Full regression after the fix: **2909/2909 passing** (unchanged count - 2 tests rewritten, 1 test added, net +0 adjusted... see Evidence), clean strict typecheck, zero new runtime dependency. New exact head: see PR #160's latest commit.
+
 Status: `IMPLEMENTED / SELF-VALIDATED` — pending Brain/Founder independent review per `AGENTS.md` §10. `MERGE_DISPOSITION: HOLD_MERGE`.

@@ -108,7 +108,7 @@ test("createDurableClientProjectSnapshotSource never surfaces a different tenant
   }
 });
 
-test("createDurableClientProjectSnapshotSource degrades to undefined instead of throwing when the project store file is corrupted", () => {
+test("createDurableClientProjectSnapshotSource propagates a corrupted project-store read as a thrown error, never silently as undefined/NOT_FOUND", () => {
   const projectDir = freshProjectStoreDir();
   const jobDir = freshJobStoreDir();
   try {
@@ -123,7 +123,39 @@ test("createDurableClientProjectSnapshotSource degrades to undefined instead of 
 
     const source = createDurableClientProjectSnapshotSource(projectStore, jobStore);
     const ownership = createProjectOwnershipRef({ tenantId: tenantScope.tenantId, customerId: customer.customerId, projectId: project.projectId });
-    assert.equal(source.getSnapshot(ownership), undefined);
+    assert.throws(() => source.getSnapshot(ownership));
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+    rmSync(jobDir, { recursive: true, force: true });
+  }
+});
+
+test("end to end: resolveProtectedSnapshotView renders ERROR (never NOT_FOUND) for a genuinely corrupted durable project store", () => {
+  const projectDir = freshProjectStoreDir();
+  const jobDir = freshJobStoreDir();
+  try {
+    const tenantScope = createTenantScope("tenant-snapshot-4b");
+    const customer = createCustomer({ tenantScope, customerId: "customer-snapshot-4b", displayName: "Snapshot Customer 4b" });
+    const project = createProject({ tenantScope, customer, projectId: "proj-snapshot-4b", ownerRef: "owner", state: "ACTIVE" });
+
+    const projectStore = new FileDurableProjectStore(projectDir);
+    projectStore.create(project);
+    writeFileSync(tenantFilePath(projectDir, tenantScope.tenantId), "{ not valid json garbage", "utf8");
+    const jobStore = new FileDurableOutcomeJobStore(jobDir);
+
+    const source = createDurableClientProjectSnapshotSource(projectStore, jobStore);
+    const ownership = createProjectOwnershipRef({ tenantId: tenantScope.tenantId, customerId: customer.customerId, projectId: project.projectId });
+
+    const principal = createAuthenticatedPrincipal({
+      principalId: "principal-snapshot-4b",
+      tenantId: tenantScope.tenantId,
+      customerId: customer.customerId,
+      displayName: "Snapshot Viewer 4b",
+    });
+    const session = createSessionContext({ principal, projectId: project.projectId, issuedAt: "2026-01-01T00:00:00.000Z" });
+
+    const view = resolveProtectedSnapshotView({ session, requestedOwnership: ownership, source });
+    assert.equal(view.kind, "ERROR");
   } finally {
     rmSync(projectDir, { recursive: true, force: true });
     rmSync(jobDir, { recursive: true, force: true });

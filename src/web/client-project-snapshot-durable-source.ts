@@ -42,14 +42,22 @@ import type { ClientProjectSnapshotSource } from "./snapshot-view-state.js";
  * before ever reaching `READY`, so this adapter does not need to
  * duplicate that check.
  *
- * A store read failure (e.g. a corrupted tenant file) must never crash
- * the entire customer-facing `/portal` render - `resolveProtectedSnapshotView`
- * does not itself catch exceptions from a wired source, so `getSnapshot`
- * catches internally and degrades to `undefined` (the same honest
- * `NOT_FOUND` outcome already used when no snapshot exists at all),
- * mirroring `operational-observability-admin-source.ts`'s own established
- * "a throwing source degrades to the safe default rather than
- * propagating" precedent.
+ * Brain CHANGES_REQUIRED (PR #160, exact head `3754cda7a092017309f23df8a0d63a655538786b`,
+ * F1): the original version of this adapter caught EVERY exception from
+ * `projectStore.get`/`jobStore.list` - including a genuine storage/data-
+ * integrity failure (a corrupted tenant file) - and collapsed it into
+ * `undefined`, which `resolveProtectedSnapshotView` treats as the honest
+ * "no such project" `NOT_FOUND` outcome. That conflated two genuinely
+ * different conditions: "this project does not exist" versus "the store
+ * could not be read." `resolveProtectedSnapshotView` (`snapshot-view-
+ * state.ts`) ALREADY catches exceptions thrown by `source.getSnapshot`
+ * and maps them to the explicit `{ kind: "ERROR", reason }` state - this
+ * adapter's own earlier doc comment incorrectly claimed otherwise. The
+ * correct behavior is therefore to NOT catch here at all: `undefined` is
+ * returned only for the genuine "project absent" case (`projectStore.get`
+ * returning `undefined`), and any real read/replay-corruption exception
+ * propagates uncaught to `resolveProtectedSnapshotView`'s own existing,
+ * correct `ERROR` handling - never silently relabeled as `NOT_FOUND`.
  */
 export function createDurableClientProjectSnapshotSource(
   projectStore: DurableProjectStore,
@@ -57,17 +65,13 @@ export function createDurableClientProjectSnapshotSource(
 ): ClientProjectSnapshotSource {
   return {
     getSnapshot(ownership: ProjectOwnershipRef): ClientProjectSnapshot | undefined {
-      try {
-        const stored = projectStore.get(ownership.tenantId, ownership.customerId, ownership.projectId);
-        if (stored === undefined) {
-          return undefined;
-        }
-        const project = stored.project;
-        const jobs = jobStore.list(project.tenantId, project.customerId, project.projectId);
-        return buildClientProjectSnapshot({ ownership, project, jobs });
-      } catch {
+      const stored = projectStore.get(ownership.tenantId, ownership.customerId, ownership.projectId);
+      if (stored === undefined) {
         return undefined;
       }
+      const project = stored.project;
+      const jobs = jobStore.list(project.tenantId, project.customerId, project.projectId);
+      return buildClientProjectSnapshot({ ownership, project, jobs });
     },
   };
 }
