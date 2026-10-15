@@ -142,9 +142,24 @@ function fail(filePath: string, reason: string): never {
   throw new CorruptedProjectFileError(filePath, reason);
 }
 
+/**
+ * Brain CHANGES_REQUIRED (PR #158, exact head `f8391ccd8dad7459983eb2c14cfa7e504a60aa22`,
+ * F1): the original version of this function rejected only empty/
+ * whitespace-only strings, not leading/trailing whitespace - weaker than
+ * `project.ts`'s own `createProject` constructor invariant (its
+ * `requireNonEmptyString` explicitly rejects `value.trim() !== value`),
+ * so a corrupted/hand-forged record such as `projectId: " proj "` could
+ * be replayed even though the live constructor would reject it. Every
+ * field validated through this function (`tenantId`/`customerId`/
+ * `projectId`/`ownerRef`/`state`) now preserves that exact canonical-trim
+ * invariant on replay too.
+ */
 function requireNonEmptyStringField(value: unknown, field: string, filePath: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
     fail(filePath, `${field} must be a non-empty string`);
+  }
+  if (value.trim() !== value) {
+    fail(filePath, `${field} must not contain leading or trailing whitespace`);
   }
   return value as string;
 }
