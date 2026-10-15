@@ -58,4 +58,16 @@ No modification to `project.ts`, `organization-resource-binding.ts`, `customer-o
 - Zero new runtime dependency.
 - Files touched: `src/domain/durable-project-store.ts` (new), `src/web/work-project-admin-source.ts` (new), `tests/durable-project-store.test.ts` (new), `tests/durable-project-store-concurrency.test.ts` (new), `tests/helpers/project-store-race-worker.ts` (new), `tests/web-work-project-admin-source.test.ts` (new), this exec-plan, `docs/engineering/CURRENT_STATE.md`.
 
+## Brain correction (F1)
+
+Brain's independent review of exact head `f8391ccd8dad7459983eb2c14cfa7e504a60aa22` (PR #145 comment `6194622589`) found: `validatePersistedProject`'s `requireNonEmptyStringField` rejected only empty/whitespace-only strings, not leading/trailing whitespace - weaker than `project.ts`'s own `createProject` constructor invariant (`requireNonEmptyString` explicitly rejects `value.trim() !== value`), so a corrupted/hand-forged record such as `projectId: " proj "` could be replayed even though the live constructor would reject it.
+
+**Fix**: `requireNonEmptyStringField` now also fails closed (`CorruptedProjectFileError`) whenever `value.trim() !== value`, applied uniformly to every field it validates (`tenantId`/`customerId`/`projectId`/`ownerRef`/`state`).
+
+**New adversarial tests** (5): leading/trailing whitespace in `projectId`, `ownerRef`, `state`, `customerId`, `tenantId` each independently proven to fail closed.
+
+**Guard-disable sanity**: the new trim check was removed entirely and the suite rebuilt. Exactly 2 of the 5 new tests failed (`ownerRef`, `state`) - the two fields where this is the ONLY guard. The other 3 (`projectId`, `customerId`, `tenantId`) still failed closed even with the trim check removed, via pre-existing independent guards: a whitespace-corrupted `projectId`/`customerId` breaks the stored-key-vs-embedded-identity check (since the stored key was computed from the original, uncorrupted values), and a whitespace-corrupted `tenantId` breaks the cross-tenant-contamination check (since it no longer exactly equals the tenant file's own `expectedTenantId`). No pre-existing test regressed. This confirms the new guard is uniquely load-bearing for exactly `ownerRef`/`state` and redundant-but-correct defense-in-depth for the other three - restored and verified byte-identical via `diff` before the final regression run.
+
+Full regression after the fix: **2905/2905 passing** (2900 pre-existing + 5 new), clean strict typecheck, zero new runtime dependency. New exact head: see PR #158's latest commit.
+
 Status: `IMPLEMENTED / SELF-VALIDATED` — pending Brain/Founder independent review per `AGENTS.md` §10. `MERGE_DISPOSITION: HOLD_MERGE`.
