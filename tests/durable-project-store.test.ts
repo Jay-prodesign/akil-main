@@ -371,3 +371,97 @@ test("corrupted: an empty ownerRef throws", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- Brain CHANGES_REQUIRED (PR #158 exact head f8391ccd8dad7459983eb2c14cfa7e504a60aa22, F1):
+// canonical-trim invariant must be preserved on replay for every field,
+// matching project.ts's/customer.ts's/tenant-scope.ts's own construction-time rejection. ---
+
+test("corrupted: a projectId with leading/trailing whitespace throws", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableProjectStore(dir);
+    const project = freshProject("proj-17");
+    const forged = {
+      [compoundKeyFor(project.customerId, project.projectId)]: {
+        version: 1,
+        project: { ...project, projectId: ` ${project.projectId} ` },
+      },
+    };
+    writeFileSync(tenantFilePath(dir, TENANT.tenantId), JSON.stringify(forged), "utf8");
+    assert.throws(() => store.listByTenant(TENANT.tenantId), CorruptedProjectFileError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("corrupted: an ownerRef with leading/trailing whitespace throws", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableProjectStore(dir);
+    const project = freshProject("proj-18");
+    const forged = {
+      [compoundKeyFor(project.customerId, project.projectId)]: {
+        version: 1,
+        project: { ...project, ownerRef: " owner " },
+      },
+    };
+    writeFileSync(tenantFilePath(dir, TENANT.tenantId), JSON.stringify(forged), "utf8");
+    assert.throws(() => store.listByTenant(TENANT.tenantId), CorruptedProjectFileError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("corrupted: a state with leading/trailing whitespace throws", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableProjectStore(dir);
+    const project = freshProject("proj-19");
+    const forged = {
+      [compoundKeyFor(project.customerId, project.projectId)]: {
+        version: 1,
+        project: { ...project, state: " ACTIVE " },
+      },
+    };
+    writeFileSync(tenantFilePath(dir, TENANT.tenantId), JSON.stringify(forged), "utf8");
+    assert.throws(() => store.listByTenant(TENANT.tenantId), CorruptedProjectFileError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("corrupted: a customerId with leading/trailing whitespace throws", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableProjectStore(dir);
+    const project = freshProject("proj-20");
+    const forged = {
+      [compoundKeyFor(project.customerId, project.projectId)]: {
+        version: 1,
+        project: { ...project, customerId: ` ${project.customerId} ` },
+      },
+    };
+    writeFileSync(tenantFilePath(dir, TENANT.tenantId), JSON.stringify(forged), "utf8");
+    assert.throws(() => store.listByTenant(TENANT.tenantId), CorruptedProjectFileError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("corrupted: a tenantId with leading/trailing whitespace throws", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableProjectStore(dir);
+    const project = freshProject("proj-21");
+    const forged = {
+      [compoundKeyFor(project.customerId, project.projectId)]: {
+        version: 1,
+        project: { ...project, tenantId: ` ${project.tenantId} ` },
+      },
+    };
+    writeFileSync(tenantFilePath(dir, TENANT.tenantId), JSON.stringify(forged), "utf8");
+    assert.throws(() => store.listByTenant(TENANT.tenantId), CorruptedProjectFileError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
