@@ -44,7 +44,7 @@ function activeOrg(tenantScope: ReturnType<typeof createTenantScope>, id: string
 function grantedAccess(tenantScope: ReturnType<typeof createTenantScope>, orgId: string, membershipId: string) {
   const organization = activeOrg(tenantScope, orgId);
   const membership = createOrganizationMembership({ membershipId, tenantScope, principalRef: `principal-${membershipId}`, role: "STAFF" });
-  const authority = createAuthorityContext({ tenantScope, permissions: ["EXECUTE"], canPerformProtectedActions: true });
+  const authority = createAuthorityContext({ tenantScope, permissions: ["WRITE", "EXECUTE"], canPerformProtectedActions: true });
   return resolveEffectiveOrganizationAccess({ organization, membership, currentPrincipalRef: membership.principalRef, authority });
 }
 
@@ -91,14 +91,16 @@ test("C2: a REQUESTED offboarding can be denied, terminally, with a recorded rea
     requestedByRef: "prospect:cust-2",
     requestedAt: "2026-10-13T00:00:00.000Z",
   });
+  const access = grantedAccess(TENANT, "org-2", "staff-2");
   const denied = denyCustomerOffboarding({
     request,
-    decidingAuthorityPrincipalRef: "staff-2",
+    currentAccess: access,
     reason: "failed verification",
     deniedAt: "2026-10-13T00:05:00.000Z",
   });
   assert.equal(denied.status, "DENIED");
   assert.equal(denied.denialReason, "failed verification");
+  assert.equal(denied.decidedByRef, "staff-2");
 });
 
 test("C3 (adversarial): completing a request with a DIFFERENT customer than it was made for is rejected fail-closed", () => {
@@ -210,7 +212,8 @@ test("C9 (adversarial): an already-DENIED request can never be completed - no re
     requestedByRef: "prospect:cust-9",
     requestedAt: "2026-10-13T00:00:00.000Z",
   });
-  const denied = denyCustomerOffboarding({ request, decidingAuthorityPrincipalRef: "staff-9", reason: "no evidence", deniedAt: "2026-10-13T00:05:00.000Z" });
+  const denyAccess9 = grantedAccess(TENANT, "org-9-deny", "staff-9");
+  const denied = denyCustomerOffboarding({ request, currentAccess: denyAccess9, reason: "no evidence", deniedAt: "2026-10-13T00:05:00.000Z" });
   const access = grantedAccess(TENANT, "org-9", "staff-9b");
   assert.throws(
     () => completeCustomerOffboarding({ request: denied, customer, currentAccess: access, completedAt: "2026-10-13T00:10:00.000Z" }),
@@ -226,9 +229,64 @@ test("C10 (adversarial): denying an already-REQUESTED-then-denied request a seco
     requestedByRef: "prospect:cust-10",
     requestedAt: "2026-10-13T00:00:00.000Z",
   });
-  const denied = denyCustomerOffboarding({ request, decidingAuthorityPrincipalRef: "staff-10", reason: "first denial", deniedAt: "2026-10-13T00:05:00.000Z" });
+  const access10 = grantedAccess(TENANT, "org-10", "staff-10");
+  const denied = denyCustomerOffboarding({ request, currentAccess: access10, reason: "first denial", deniedAt: "2026-10-13T00:05:00.000Z" });
+  const access10b = grantedAccess(TENANT, "org-10b", "staff-10b");
   assert.throws(
-    () => denyCustomerOffboarding({ request: denied, decidingAuthorityPrincipalRef: "staff-10b", reason: "second denial", deniedAt: "2026-10-13T00:06:00.000Z" }),
+    () => denyCustomerOffboarding({ request: denied, currentAccess: access10b, reason: "second denial", deniedAt: "2026-10-13T00:06:00.000Z" }),
+    CustomerOffboardingDecisionError,
+  );
+});
+
+test("D1 (adversarial, REV216 F2): denying a request with a READ-only (no WRITE) currentAccess is rejected fail-closed", () => {
+  const customer = createCustomer({ tenantScope: TENANT, customerId: "cust-d1", displayName: "Read-Only Deny Customer" });
+  const request = requestCustomerOffboarding({
+    requestId: "req-d1",
+    customer,
+    requestedByRef: "prospect:cust-d1",
+    requestedAt: "2026-10-13T00:00:00.000Z",
+  });
+  const access = readOnlyAccess(TENANT, "org-d1", "staff-d1");
+  assert.equal(access.decision, "GRANTED");
+  assert.equal(access.permissions.has("WRITE"), false);
+  assert.throws(
+    () => denyCustomerOffboarding({ request, currentAccess: access, reason: "x", deniedAt: "2026-10-13T00:05:00.000Z" }),
+    CustomerOffboardingDecisionError,
+  );
+});
+
+test("D2 (adversarial, REV216 F2): denying a request using access bound to a DIFFERENT tenant than the request is rejected fail-closed", () => {
+  const customer = createCustomer({ tenantScope: TENANT, customerId: "cust-d2", displayName: "Cross-Tenant Deny Customer" });
+  const request = requestCustomerOffboarding({
+    requestId: "req-d2",
+    customer,
+    requestedByRef: "prospect:cust-d2",
+    requestedAt: "2026-10-13T00:00:00.000Z",
+  });
+  const foreignAccess = grantedAccess(OTHER_TENANT, "org-d2-other", "staff-d2");
+  assert.throws(
+    () => denyCustomerOffboarding({ request, currentAccess: foreignAccess, reason: "x", deniedAt: "2026-10-13T00:05:00.000Z" }),
+    CustomerOffboardingDecisionError,
+  );
+});
+
+test("D3 (adversarial, REV216 F2): denying a request with a DENIED currentAccess is rejected fail-closed", () => {
+  const customer = createCustomer({ tenantScope: TENANT, customerId: "cust-d3", displayName: "Denied Access Deny Customer" });
+  const request = requestCustomerOffboarding({
+    requestId: "req-d3",
+    customer,
+    requestedByRef: "prospect:cust-d3",
+    requestedAt: "2026-10-13T00:00:00.000Z",
+  });
+  const organization = activeOrg(TENANT, "org-d3");
+  const deniedAccess = resolveEffectiveOrganizationAccess({
+    organization,
+    currentPrincipalRef: "nobody",
+    authority: createAuthorityContext({ tenantScope: TENANT, permissions: [], canPerformProtectedActions: false }),
+  });
+  assert.equal(deniedAccess.decision, "DENIED");
+  assert.throws(
+    () => denyCustomerOffboarding({ request, currentAccess: deniedAccess, reason: "x", deniedAt: "2026-10-13T00:05:00.000Z" }),
     CustomerOffboardingDecisionError,
   );
 });

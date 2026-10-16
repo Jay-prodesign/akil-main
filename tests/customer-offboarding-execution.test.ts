@@ -39,7 +39,7 @@ function grantedAccess(orgId: string, membershipId: string) {
     activatedAt: "2026-10-13T00:00:01.000Z",
   });
   const membership = createOrganizationMembership({ membershipId, tenantScope: TENANT, principalRef: `principal-${membershipId}`, role: "STAFF" });
-  const authority = createAuthorityContext({ tenantScope: TENANT, permissions: ["EXECUTE"], canPerformProtectedActions: true });
+  const authority = createAuthorityContext({ tenantScope: TENANT, permissions: ["WRITE", "EXECUTE"], canPerformProtectedActions: true });
   return resolveEffectiveOrganizationAccess({ organization, membership, currentPrincipalRef: membership.principalRef, authority });
 }
 
@@ -93,7 +93,8 @@ test("E3 (adversarial): execution cannot start from a DENIED request", () => {
     requestedByRef: "prospect:cust-e3",
     requestedAt: "2026-10-13T00:00:00.000Z",
   });
-  const denied = denyCustomerOffboarding({ request, decidingAuthorityPrincipalRef: "staff-e3", reason: "no evidence", deniedAt: "2026-10-13T00:05:00.000Z" });
+  const denyAccess = grantedAccess("org-exec-e3", "staff-e3");
+  const denied = denyCustomerOffboarding({ request, currentAccess: denyAccess, reason: "no evidence", deniedAt: "2026-10-13T00:05:00.000Z" });
   assert.throws(
     () => startCustomerOffboardingExecution({ completedRequest: denied }),
     InvalidCustomerOffboardingExecutionError,

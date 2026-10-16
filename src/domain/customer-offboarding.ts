@@ -43,6 +43,22 @@ import type { EffectiveAccessResolution } from "./effective-organization-access.
  * No real data deletion/purge across any other module is performed or
  * implied by this checkpoint - see "Explicitly deferred" in this
  * checkpoint's own exec-plan.
+ *
+ * REV216 F2 correction (Brain CHANGES_REQUIRED, PR #161 comment
+ * `6205597388`): `denyCustomerOffboarding` originally took only a bare
+ * `decidingAuthorityPrincipalRef` string and performed no authority/tenant
+ * check of its own - an authenticated web boundary whose minimum floor is
+ * READ (e.g. `requireInternalOsAccess`) could terminalize a request as
+ * DENIED, since nothing downstream re-checked mutation permission. `denyCustomerOffboarding`
+ * now takes `currentAccess: EffectiveAccessResolution`, exactly mirroring
+ * `completeCustomerOffboarding`'s own existing discipline, so a non-web
+ * caller cannot bypass this floor either: `currentAccess` must be a fresh
+ * `GRANTED` resolution bound to the SAME tenant as the request, with a real
+ * `membershipId`, and WRITE permission. Deliberately WRITE, not
+ * `canPerformProtectedActions` - that stronger protected-action bar
+ * remains reserved for `completeCustomerOffboarding` alone; denial is still
+ * the weaker of the two decisions, just no longer weak enough to be
+ * reachable by READ-only authority.
  */
 
 export class InvalidCustomerOffboardingError extends Error {
@@ -223,29 +239,50 @@ export function completeCustomerOffboarding(input: {
   return { completedRequest, snapshot };
 }
 
-/** Terminal, one-way: a denied request is never reconsidered by this module - submitting a fresh request is the only path forward. */
+/**
+ * Terminal, one-way: a denied request is never reconsidered by this module
+ * - submitting a fresh request is the only path forward. See this module's
+ * own top-level doc comment (REV216 F2) for why `currentAccess` is required
+ * here now, mirroring `completeCustomerOffboarding`'s own discipline.
+ */
 export function denyCustomerOffboarding(input: {
   request: CustomerOffboardingRequest;
-  decidingAuthorityPrincipalRef: unknown;
+  currentAccess: EffectiveAccessResolution;
   reason: unknown;
   deniedAt: unknown;
 }): CustomerOffboardingRequest {
-  const { request } = input;
+  const { request, currentAccess } = input;
   if (request.status !== "REQUESTED") {
     throw new CustomerOffboardingDecisionError(
       `request "${request.requestId}" has status "${request.status}" - only a REQUESTED request may be denied`,
     );
   }
-  const decidingAuthorityPrincipalRef = requireNonEmptyString(
-    input.decidingAuthorityPrincipalRef,
-    "decidingAuthorityPrincipalRef",
-  );
+  if (currentAccess.decision !== "GRANTED") {
+    throw new CustomerOffboardingDecisionError(
+      "currentAccess must be a GRANTED EffectiveAccessResolution to deny a customer offboarding",
+    );
+  }
+  if (currentAccess.tenantId !== request.tenantId) {
+    throw new CustomerOffboardingDecisionError(
+      "currentAccess does not belong to the request's own tenant - denial never crosses a tenant boundary",
+    );
+  }
+  if (currentAccess.membershipId === undefined) {
+    throw new CustomerOffboardingDecisionError(
+      "currentAccess must be bound to a real OrganizationMembership (a current authenticated principal) to deny an offboarding",
+    );
+  }
+  if (!currentAccess.permissions.has("WRITE")) {
+    throw new CustomerOffboardingDecisionError(
+      "denying a customer offboarding requires WRITE permission - READ-only authority cannot terminalize a request",
+    );
+  }
   const reason = requireNonEmptyString(input.reason, "reason");
   const deniedAt = requireValidTimestamp(input.deniedAt, "deniedAt");
   return {
     ...request,
     status: "DENIED",
-    decidedByRef: decidingAuthorityPrincipalRef,
+    decidedByRef: currentAccess.membershipId,
     decidedAt: deniedAt,
     denialReason: reason,
   };
