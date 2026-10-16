@@ -62,4 +62,16 @@ No modification to `audit-event.ts`, `client-project-snapshot.ts`, `delivery-tim
 - `node --test dist/tests/*.test.js`: **2964/2964 passing** (2947 pre-existing + 17 new).
 - Zero new runtime dependency.
 
+## Brain correction (F1)
+
+Brain's independent review of exact head `c2811ba6d0adafb46c219bb83de97485b261a81d` (PR #162 comment `6211081375`) found a port-semantics drift: `InMemoryAuditLog`'s own `#seenEventIds` is a SINGLE global `Set`, so `eventId` uniqueness is global across the entire log, never scoped to a tenant. The original `FileDurableAuditLog` checked duplicates only inside the current tenant's own file, so the identical `eventId` could be appended once per tenant without ever colliding — adapter-dependent behavior behind the same `AuditLog` port, with no canonical/domain evidence that tenant-scoped uniqueness was ever the intended contract.
+
+**Fix**: preserved the pre-existing global-uniqueness semantics exactly rather than widening the in-memory adapter to match the (wrong) durable one. A second, separate global index file (`__global-event-index__.json`, the full set of every `eventId` ever appended across every tenant) is read-checked-written under a single GLOBAL lock (not per-tenant) that serializes every `append` call system-wide — exactly mirroring how `InMemoryAuditLog`'s own single-threaded, single-`Set` design already serializes every append in-process. `findByTenant` is entirely unaffected: reads remain lock-free, single-tenant-file reads, so tenant read isolation is not weakened by this fix.
+
+**Test changes**: a same-`eventId`/different-tenant parity test now runs against BOTH `AuditLog` implementations (`InMemoryAuditLog` and `FileDurableAuditLog`) and asserts they reject identically. Two new corrupted-global-index-file adversarial tests. A new 5-process real-OS-process race test proves the specific hazard Brain named: concurrent writers in DIFFERENT tenants appending the SAME `eventId` — exactly one succeeds, every other fails closed with `DuplicateAuditEventError`, and exactly one tenant's file ends up holding the event (no duplicate admission, no lost write).
+
+**Guard-disable sanity**: the global-uniqueness check was disabled and the suite rebuilt. Exactly 3 tests failed: the basic duplicate-rejection test, the durable-side parity test, and the new cross-tenant race test — precisely the tests that depend on this check. No other test regressed. Restored and verified byte-identical to the pre-edit source via `diff`.
+
+Full regression after the fix: **2969/2969 passing** (2964 pre-existing + 5 new), clean strict typecheck, zero new runtime dependency. New exact head: see PR #162's latest commit.
+
 Status: `IMPLEMENTED / SELF-VALIDATED` — pending Brain/Founder independent review per `AGENTS.md` §10. `MERGE_DISPOSITION: HOLD_MERGE`.

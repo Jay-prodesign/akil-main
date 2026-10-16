@@ -8,11 +8,12 @@ import { createCustomer } from "../src/domain/customer.js";
 import { createProject } from "../src/domain/project.js";
 import { createOutcomeJob } from "../src/domain/outcome-job.js";
 import { createAuditEvent } from "../src/domain/audit-event.js";
-import { DuplicateAuditEventError } from "../src/application/in-memory-audit-log.js";
+import { InMemoryAuditLog, DuplicateAuditEventError } from "../src/application/in-memory-audit-log.js";
 import {
   FileDurableAuditLog,
   CorruptedAuditEventRecordFileError,
 } from "../src/application/durable-audit-log.js";
+import type { AuditLog } from "../src/ports/audit-log.js";
 
 /**
  * AUDIT-DURABLE-001: proves `FileDurableAuditLog` (the durable
@@ -258,6 +259,75 @@ test("adversarial (corrupted file): a whitespace-corrupted optional reason fails
     const tampered = [{ ...event, reason: " ok " }];
     writeFileSync(filePath, JSON.stringify(tampered), "utf8");
     assert.throws(() => log.findByTenant(tenantScope), CorruptedAuditEventRecordFileError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * REV216/AUDIT-DURABLE-001 F1 (Brain CHANGES_REQUIRED, PR #162 comment
+ * `6211081375`): `InMemoryAuditLog`'s own `#seenEventIds` is a single
+ * global `Set`, so `eventId` uniqueness is global, never tenant-scoped.
+ * This parity test runs the identical same-`eventId`/different-tenant
+ * scenario against BOTH `AuditLog` implementations and asserts they
+ * reject identically - proving the durable implementation no longer
+ * drifts from the in-memory one it claims to implement exactly.
+ */
+function assertGlobalEventIdUniqueness(log: AuditLog, label: string): void {
+  const a = jobIn(`tenant-audit-parity-${label}-a`);
+  const b = jobIn(`tenant-audit-parity-${label}-b`);
+  const sharedEventId = `evt-parity-${label}-shared`;
+
+  log.append(createAuditEvent({ job: a.job, eventId: sharedEventId, actorRef: "engineer:claude", eventType: "JOB_CREATED", timestamp: "2026-10-16T00:00:00.000Z" }));
+  assert.throws(
+    () => log.append(createAuditEvent({ job: b.job, eventId: sharedEventId, actorRef: "engineer:claude", eventType: "JOB_CREATED", timestamp: "2026-10-16T00:01:00.000Z" })),
+    DuplicateAuditEventError,
+  );
+  // The rejected append must not have landed in tenant B's own file either.
+  assert.equal(log.findByTenant(b.tenantScope).length, 0);
+  assert.equal(log.findByTenant(a.tenantScope).length, 1);
+}
+
+test("parity (REV216/AUDIT-DURABLE-001 F1): InMemoryAuditLog rejects the same eventId appended for a DIFFERENT tenant - uniqueness is global, not tenant-scoped", () => {
+  assertGlobalEventIdUniqueness(new InMemoryAuditLog(), "inmemory");
+});
+
+test("parity (REV216/AUDIT-DURABLE-001 F1): FileDurableAuditLog rejects the same eventId appended for a DIFFERENT tenant - uniqueness is global, not tenant-scoped, matching InMemoryAuditLog exactly", () => {
+  const dir = freshDir();
+  try {
+    assertGlobalEventIdUniqueness(new FileDurableAuditLog(dir), "durable");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("adversarial (corrupted global index file): not valid JSON fails closed on the next append", () => {
+  const dir = freshDir();
+  try {
+    const { job } = jobIn("tenant-audit-15");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "__global-event-index__.json"), "{ not valid json", "utf8");
+    const log = new FileDurableAuditLog(dir);
+    assert.throws(
+      () => log.append(createAuditEvent({ job, eventId: "evt-15", actorRef: "engineer:claude", eventType: "JOB_CREATED", timestamp: "2026-10-16T00:00:00.000Z" })),
+      CorruptedAuditEventRecordFileError,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("adversarial (corrupted global index file): a JSON object instead of an array fails closed on the next append", () => {
+  const dir = freshDir();
+  try {
+    const { job } = jobIn("tenant-audit-16");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "__global-event-index__.json"), JSON.stringify({ not: "an array" }), "utf8");
+    const log = new FileDurableAuditLog(dir);
+    assert.throws(
+      () => log.append(createAuditEvent({ job, eventId: "evt-16", actorRef: "engineer:claude", eventType: "JOB_CREATED", timestamp: "2026-10-16T00:00:00.000Z" })),
+      CorruptedAuditEventRecordFileError,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -49,6 +49,25 @@ import type { AuditLog } from "../ports/audit-log.js";
  * (a duplicate `eventId` throws rather than silently overwriting or
  * silently no-op-succeeding) - proven under real concurrent-process load
  * by this checkpoint's own multi-process race test, not merely asserted.
+ *
+ * REV216/AUDIT-DURABLE-001 F1 correction (Brain CHANGES_REQUIRED, PR #162
+ * comment `6211081375`): `InMemoryAuditLog`'s own `#seenEventIds` is a
+ * SINGLE global `Set`, not one per tenant - `eventId` uniqueness is
+ * global across the entire log, not scoped to a tenant. The original
+ * version of this module checked duplicates only inside the current
+ * tenant's own file, so the identical `eventId` could be appended once
+ * per tenant without ever colliding - adapter-dependent behavior behind
+ * the same `AuditLog` port, with no canonical/domain evidence that
+ * tenant-scoped uniqueness was ever the intended contract. Corrected to
+ * preserve the pre-existing global-uniqueness semantics exactly: a
+ * second, separate global index file (`__global-event-index__.json`,
+ * the full set of every `eventId` ever appended across every tenant) is
+ * read-checked-written under a single GLOBAL lock (not per-tenant) that
+ * serializes every `append` call system-wide, exactly mirroring how
+ * `InMemoryAuditLog`'s own single-threaded, single-`Set` design already
+ * serializes every append in-process. `findByTenant` is entirely
+ * unaffected - reads remain lock-free, single-tenant-file reads, so
+ * tenant read isolation is not weakened by this fix.
  */
 
 export class CorruptedAuditEventRecordFileError extends Error {
@@ -59,8 +78,8 @@ export class CorruptedAuditEventRecordFileError extends Error {
 }
 
 export class AuditLogLockTimeoutError extends Error {
-  constructor(tenantId: string) {
-    super(`Timed out waiting for the durable AuditLog lock for tenant "${tenantId}"`);
+  constructor(reason: string) {
+    super(`Timed out waiting for the durable AuditLog lock: ${reason}`);
     this.name = "AuditLogLockTimeoutError";
   }
 }
@@ -169,14 +188,23 @@ export class FileDurableAuditLog implements AuditLog {
     return join(this.baseDir, ".locks");
   }
 
-  private lockPathFor(tenantId: TenantScope["tenantId"]): string {
-    const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
-    return join(this.lockDir(), `${safeKey}.lock`);
+  /**
+   * One single, fixed lock path - deliberately NOT keyed by tenant.
+   * `append`'s global `eventId`-uniqueness check/write must serialize
+   * across every tenant, not just within one, to match `InMemoryAuditLog`'s
+   * own global-uniqueness contract (see this module's own F1 doc comment).
+   */
+  private globalLockPath(): string {
+    return join(this.lockDir(), "__global__.lock");
+  }
+
+  private globalIndexPath(): string {
+    return join(this.baseDir, "__global-event-index__.json");
   }
 
   /** Rev94 F1's exact `linkSync` atomic-creation primitive, cloned verbatim. */
-  private withTenantLock<T>(tenantId: TenantScope["tenantId"], criticalSection: () => T): T {
-    const lockPath = this.lockPathFor(tenantId);
+  private withGlobalLock<T>(criticalSection: () => T): T {
+    const lockPath = this.globalLockPath();
     const tmpPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
     writeFileSync(tmpPath, String(process.pid), "utf8");
     const deadline = Date.now() + FileDurableAuditLog.LOCK_TIMEOUT_MS;
@@ -199,7 +227,7 @@ export class FileDurableAuditLog implements AuditLog {
           } catch {
             // best-effort cleanup only
           }
-          throw new AuditLogLockTimeoutError(tenantId);
+          throw new AuditLogLockTimeoutError("global append lock");
         }
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, FileDurableAuditLog.LOCK_RETRY_BACKOFF_MS);
       }
@@ -220,6 +248,35 @@ export class FileDurableAuditLog implements AuditLog {
         // the caller-visible timeout above, not a permanent deadlock.
       }
     }
+  }
+
+  /**
+   * The global `eventId` index: every `eventId` ever appended, across
+   * every tenant - exists solely to prove uniqueness cheaply without
+   * reading every tenant file on every append. It is NEVER consulted by
+   * `findByTenant` (reads stay single-tenant-file, lock-free, exactly as
+   * before this correction) - only `append`'s own global lock touches it.
+   */
+  private readGlobalIndex(): string[] {
+    const filePath = this.globalIndexPath();
+    if (!existsSync(filePath)) {
+      return [];
+    }
+    const content = readFileSync(filePath, "utf8");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(content);
+    } catch (cause) {
+      throw new CorruptedAuditEventRecordFileError(filePath, `file is not valid JSON (${(cause as Error).message})`);
+    }
+    if (!Array.isArray(parsed)) {
+      throw new CorruptedAuditEventRecordFileError(filePath, "file content must be a JSON array of eventId strings");
+    }
+    return parsed.map((raw, index) => requireNonEmptyString(raw, `globalIndex[${index}]`, filePath));
+  }
+
+  private writeGlobalIndex(eventIds: ReadonlyArray<string>): void {
+    writeFileSync(this.globalIndexPath(), JSON.stringify(eventIds), "utf8");
   }
 
   private readAll(tenantId: TenantScope["tenantId"]): AuditEvent[] {
@@ -245,12 +302,14 @@ export class FileDurableAuditLog implements AuditLog {
   }
 
   append(event: AuditEvent): void {
-    this.withTenantLock(event.tenantId, () => {
-      const events = this.readAll(event.tenantId);
-      if (events.some((existing) => existing.eventId === event.eventId)) {
+    this.withGlobalLock(() => {
+      const globalIndex = this.readGlobalIndex();
+      if (globalIndex.includes(event.eventId)) {
         throw new DuplicateAuditEventError(event.eventId);
       }
+      const events = this.readAll(event.tenantId);
       this.writeAll(event.tenantId, [...events, event]);
+      this.writeGlobalIndex([...globalIndex, event.eventId]);
     });
   }
 
