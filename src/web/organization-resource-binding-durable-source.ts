@@ -5,6 +5,7 @@ import {
 } from "../domain/organization-resource-binding.js";
 import type { DurableOrganizationResourceBindingStore } from "../domain/durable-organization-resource-binding-store.js";
 import type { DurableOrganizationMembershipStore } from "../domain/durable-organization-membership-store.js";
+import type { DurableOrganizationServicePrincipalStore } from "../domain/durable-organization-service-principal-store.js";
 import type { DurableProjectStore } from "../domain/durable-project-store.js";
 import type { DurableConnectorConnectionStore } from "../domain/durable-connector-connection-store.js";
 import type { OrganizationResourceBindingSource } from "./internal-os-view-state.js";
@@ -28,26 +29,31 @@ import type { OrganizationResourceBindingSource } from "./internal-os-view-state
  * it - exactly `OrganizationResourceBindingSource`'s own pre-existing
  * contract, never fabricated.
  *
+ * ORG-SERVICE-PRINCIPAL-DURABLE-001 (Brain continuation, PR #145 comment
+ * `6223155547`): `currentServicePrincipals` now has a real durable source
+ * too (`durable-organization-service-principal-store.ts`), mirroring
+ * `currentMemberships`'s own wiring exactly.
+ *
  * Per the Brain's own explicit instruction, this adapter never manufactures
  * `READY` by inventing current evidence for a dimension that has no durable
- * "current" registry anywhere in this repository: `currentServicePrincipals`,
- * `currentEffectiveConfigRefs`, `currentEffectivePolicyRefs`,
- * `currentWorkerRouteDecisions`, and `currentKnowledgeEvidenceRefs` are each
- * passed as real, honest empty evidence (not a fabricated "all current"
- * claim). `resolveOrganizationResourceBindingStatus`'s own gates already
- * handle this correctly without any special-casing here: a binding that
- * never referenced one of these dimensions (`*Refs` is `[]`) skips that
- * gate entirely and can still reach `READY`; a binding that DID reference
- * one (bootstrap-time provenance only, per `organization-resource-
- * binding.ts`'s own Rev183 F2 doc comment) truthfully blocks on that gate
- * forever via this adapter, since no current evidence can ever be supplied
- * for it yet - exactly the Brain's own "let the existing resolver return its
- * truthful BLOCKED/ACTION_REQUIRED state" instruction, not a defect to work
- * around.
+ * "current" registry anywhere in this repository: `currentEffectiveConfigRefs`,
+ * `currentEffectivePolicyRefs`, `currentWorkerRouteDecisions`, and
+ * `currentKnowledgeEvidenceRefs` are each passed as real, honest empty
+ * evidence (not a fabricated "all current" claim). `resolveOrganizationResourceBindingStatus`'s
+ * own gates already handle this correctly without any special-casing here:
+ * a binding that never referenced one of these dimensions (`*Refs` is
+ * `[]`) skips that gate entirely and can still reach `READY`; a binding
+ * that DID reference one (bootstrap-time provenance only, per
+ * `organization-resource-binding.ts`'s own Rev183 F2 doc comment)
+ * truthfully blocks on that gate forever via this adapter, since no
+ * current evidence can ever be supplied for it yet - exactly the Brain's
+ * own "let the existing resolver return its truthful BLOCKED/ACTION_REQUIRED
+ * state" instruction, not a defect to work around.
  */
 export function createDurableOrganizationResourceBindingSource(
   bindingStore: DurableOrganizationResourceBindingStore,
   membershipStore: DurableOrganizationMembershipStore,
+  servicePrincipalStore: DurableOrganizationServicePrincipalStore,
   projectStore: DurableProjectStore,
   connectorConnectionStore: DurableConnectorConnectionStore,
 ): OrganizationResourceBindingSource {
@@ -61,6 +67,10 @@ export function createDurableOrganizationResourceBindingSource(
       const currentMemberships = membershipStore
         .listByTenant(organization.tenantId)
         .map((stored) => stored.membership);
+
+      const currentServicePrincipals = servicePrincipalStore
+        .listByTenant(organization.tenantId)
+        .map((stored) => stored.servicePrincipal);
 
       const currentConnections = connectorConnectionStore
         .list(organization.tenantId)
@@ -76,7 +86,7 @@ export function createDurableOrganizationResourceBindingSource(
         binding,
         organization,
         currentMemberships,
-        currentServicePrincipals: [],
+        currentServicePrincipals,
         currentConnections,
         currentProject,
         currentEffectiveConfigRefs: [],
