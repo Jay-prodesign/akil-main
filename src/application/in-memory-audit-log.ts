@@ -1,5 +1,6 @@
 import type { AuditEvent } from "../domain/audit-event.js";
 import type { TenantScope } from "../domain/tenant-scope.js";
+import type { AuditLog } from "../ports/audit-log.js";
 
 export class DuplicateAuditEventError extends Error {
   constructor(eventId: string) {
@@ -21,8 +22,12 @@ export class DuplicateAuditEventError extends Error {
  *
  * Every read requires a TenantScope - no bare, unscoped accessor exists
  * (same structural pattern as `CustomerRepository`, EI-4 / RG-02).
+ *
+ * AUDIT-DURABLE-001: now formally implements the `AuditLog` port
+ * (`src/ports/audit-log.ts`), named directly from this class's own
+ * pre-existing contract - no behavior change.
  */
-export class InMemoryAuditLog {
+export class InMemoryAuditLog implements AuditLog {
   #events: AuditEvent[] = [];
   #seenEventIds = new Set<string>();
 
