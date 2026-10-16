@@ -2,6 +2,7 @@ import type { ProjectOwnershipRef } from "../domain/project-ownership.js";
 import { type ClientProjectSnapshot, buildClientProjectSnapshot } from "../domain/client-project-snapshot.js";
 import type { DurableProjectStore } from "../domain/durable-project-store.js";
 import type { DurableOutcomeJobStore } from "../domain/durable-outcome-job-store.js";
+import type { AuditLog } from "../ports/audit-log.js";
 import type { ClientProjectSnapshotSource } from "./snapshot-view-state.js";
 
 /**
@@ -58,10 +59,21 @@ import type { ClientProjectSnapshotSource } from "./snapshot-view-state.js";
  * returning `undefined`), and any real read/replay-corruption exception
  * propagates uncaught to `resolveProtectedSnapshotView`'s own existing,
  * correct `ERROR` handling - never silently relabeled as `NOT_FOUND`.
+ *
+ * AUDIT-DURABLE-001 (Brain continuation, PR #145 comment `6205619559`):
+ * `auditLog.findByTenant` is tenant-scoped only (the `AuditLog` port's own
+ * existing contract, preserved exactly, not widened with a new project-
+ * scoped query method); this adapter filters the tenant-wide result down
+ * to the exact current project's own `customerId`/`projectId` before
+ * passing it to `buildClientProjectSnapshot` - `buildDeliveryTimeline`
+ * itself would otherwise fail closed on any foreign-project event, so
+ * this filter is required, not optional, for the golden path to ever
+ * reach `READY`.
  */
 export function createDurableClientProjectSnapshotSource(
   projectStore: DurableProjectStore,
   jobStore: DurableOutcomeJobStore,
+  auditLog: AuditLog,
 ): ClientProjectSnapshotSource {
   return {
     getSnapshot(ownership: ProjectOwnershipRef): ClientProjectSnapshot | undefined {
@@ -71,7 +83,10 @@ export function createDurableClientProjectSnapshotSource(
       }
       const project = stored.project;
       const jobs = jobStore.list(project.tenantId, project.customerId, project.projectId);
-      return buildClientProjectSnapshot({ ownership, project, jobs });
+      const auditEvents = auditLog
+        .findByTenant({ tenantId: project.tenantId })
+        .filter((event) => event.customerId === project.customerId && event.projectId === project.projectId);
+      return buildClientProjectSnapshot({ ownership, project, jobs, auditEvents });
     },
   };
 }
