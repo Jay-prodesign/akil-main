@@ -52,7 +52,34 @@ import type { CustomerRepository } from "../ports/customer-repository.js";
  * domain decision (`CUS-OFFBOARD-001`) - this module wires it through
  * faithfully, neither widening denial to require protected-action authority
  * nor narrowing completion's own existing protected-action requirement.
+ *
+ * REV216 F1 correction (Brain CHANGES_REQUIRED, PR #161 comment
+ * `6205583270`): `requireInternalOsAccess` only proves authority for
+ * `input.organization` - it says nothing about the SEPARATELY caller-
+ * supplied `input.tenantScope` this module used for the actual store
+ * lookup/mutation. `denyCustomerOffboarding`'s own domain contract performs
+ * no tenant check at all (unlike `completeCustomerOffboarding`, which
+ * happens to catch a tenant mismatch, but only after an already-completed
+ * cross-tenant store read), so an authenticated Organization-A principal
+ * could supply Tenant B's `tenantScope` and `requestId` and transition B's
+ * request using A's authenticated identity. Both functions now require
+ * `input.tenantScope.tenantId === context.access.tenantId` immediately
+ * after `requireInternalOsAccess` returns and BEFORE any request-store
+ * lookup - `context.access.tenantId` is `requireInternalOsAccess`'s own
+ * proven-equal-to-`input.organization.tenantId` value (enforced inside
+ * `resolveEffectiveOrganizationAccess` itself), so this is the one
+ * authoritative tenant for the whole authenticated call; `tenantScope` is
+ * never trusted as an independent dimension again once this check passes.
  */
+
+export class CustomerOffboardingTenantScopeMismatchError extends Error {
+  constructor(organizationTenantId: string, suppliedTenantId: string) {
+    super(
+      `supplied tenantScope "${suppliedTenantId}" does not match the authenticated organization's own tenant "${organizationTenantId}" - a customer offboarding decision never crosses a tenant boundary`,
+    );
+    this.name = "CustomerOffboardingTenantScopeMismatchError";
+  }
+}
 
 export class CustomerOffboardingRequestNotFoundError extends Error {
   constructor(tenantId: string, requestId: string) {
@@ -103,6 +130,9 @@ export function completeCustomerOffboardingAsAuthenticatedStaff(input: {
     grants: input.grants,
     ...(input.now !== undefined ? { now: input.now } : {}),
   });
+  if (input.tenantScope.tenantId !== context.access.tenantId) {
+    throw new CustomerOffboardingTenantScopeMismatchError(context.access.tenantId, input.tenantScope.tenantId);
+  }
   const existing = input.requestStore.get(input.tenantScope.tenantId, input.requestId);
   if (existing === undefined) {
     throw new CustomerOffboardingRequestNotFoundError(input.tenantScope.tenantId, input.requestId);
@@ -152,6 +182,9 @@ export function denyCustomerOffboardingAsAuthenticatedStaff(input: {
     grants: input.grants,
     ...(input.now !== undefined ? { now: input.now } : {}),
   });
+  if (input.tenantScope.tenantId !== context.access.tenantId) {
+    throw new CustomerOffboardingTenantScopeMismatchError(context.access.tenantId, input.tenantScope.tenantId);
+  }
   const existing = input.requestStore.get(input.tenantScope.tenantId, input.requestId);
   if (existing === undefined) {
     throw new CustomerOffboardingRequestNotFoundError(input.tenantScope.tenantId, input.requestId);

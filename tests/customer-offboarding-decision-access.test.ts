@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createTenantScope } from "../src/domain/tenant-scope.js";
+import { createTenantScope, type TenantScope } from "../src/domain/tenant-scope.js";
 import { createOrganization, activateOrganization, type Organization } from "../src/domain/organization.js";
 import { createCustomer } from "../src/domain/customer.js";
 import { requestCustomerOffboarding, CustomerOffboardingDecisionError } from "../src/domain/customer-offboarding.js";
@@ -21,6 +21,7 @@ import {
   denyCustomerOffboardingAsAuthenticatedStaff,
   CustomerOffboardingRequestNotFoundError,
   CustomerNotFoundForOffboardingDecisionError,
+  CustomerOffboardingTenantScopeMismatchError,
 } from "../src/web/customer-offboarding-decision-access.js";
 
 /**
@@ -35,6 +36,7 @@ import {
  */
 
 const TENANT = createTenantScope("tenant-offboard-decision-access");
+const TENANT_B = createTenantScope("tenant-offboard-decision-access-b");
 
 function freshRequestStoreDir(): string {
   return mkdtempSync(join(tmpdir(), "offboard-decision-access-requests-"));
@@ -70,8 +72,13 @@ function staffFixture(options?: { canPerformProtectedActions?: boolean; membersh
   return { provider, sessionToken, grants: [grant], membership };
 }
 
-function seedRequest(requestStore: FileDurableCustomerOffboardingRequestStore, requestId: string, requestedByRef = "membership-requester") {
-  const customer = createCustomer({ tenantScope: TENANT, customerId: `customer-${requestId}`, displayName: `Customer ${requestId}` });
+function seedRequest(
+  requestStore: FileDurableCustomerOffboardingRequestStore,
+  requestId: string,
+  requestedByRef = "membership-requester",
+  tenantScope: TenantScope = TENANT,
+) {
+  const customer = createCustomer({ tenantScope, customerId: `customer-${requestId}`, displayName: `Customer ${requestId}` });
   const request = requestCustomerOffboarding({ requestId, customer, requestedByRef, requestedAt: "2026-10-15T00:00:00.000Z" });
   const stored = requestStore.createRequested(request);
   return { customer, stored };
@@ -430,5 +437,69 @@ test("adversarial (deny, forged identity): a sessionToken with no matching sessi
     assert.equal(requestStore.get(TENANT.tenantId, stored.request.requestId)?.request.status, "REQUESTED");
   } finally {
     rmSync(requestDir, { recursive: true, force: true });
+  }
+});
+
+test("adversarial (cross-tenant deny, REV216 F1): an authenticated Tenant-A staff principal cannot deny Tenant B's REQUESTED request by supplying tenantScope B directly - fails on the tenant-scope binding BEFORE any store read, zero mutation", () => {
+  const requestDir = freshRequestStoreDir();
+  try {
+    const organizationA = organizationFixture();
+    const requestStore = new FileDurableCustomerOffboardingRequestStore(requestDir);
+    const { stored } = seedRequest(requestStore, "req-deny-crosstenant", "membership-requester", TENANT_B);
+    const { provider, sessionToken, grants } = staffFixture();
+
+    assert.throws(
+      () =>
+        denyCustomerOffboardingAsAuthenticatedStaff({
+          organization: organizationA,
+          provider,
+          sessionToken,
+          grants,
+          requestStore,
+          tenantScope: TENANT_B,
+          requestId: stored.request.requestId,
+          expectedVersion: stored.version,
+          reason: "x",
+          deniedAt: "2026-10-15T01:00:00.000Z",
+        }),
+      CustomerOffboardingTenantScopeMismatchError,
+    );
+    assert.equal(requestStore.get(TENANT_B.tenantId, stored.request.requestId)?.request.status, "REQUESTED");
+  } finally {
+    rmSync(requestDir, { recursive: true, force: true });
+  }
+});
+
+test("adversarial (cross-tenant complete, REV216 F1): an authenticated Tenant-A staff principal cannot complete Tenant B's REQUESTED request by supplying tenantScope B directly - fails on the tenant-scope binding BEFORE any store read, zero mutation", () => {
+  const requestDir = freshRequestStoreDir();
+  const customerDir = freshCustomerStoreDir();
+  try {
+    const organizationA = organizationFixture();
+    const requestStore = new FileDurableCustomerOffboardingRequestStore(requestDir);
+    const customerRepository = new FileDurableCustomerRepository(customerDir);
+    const { customer, stored } = seedRequest(requestStore, "req-complete-crosstenant", "membership-requester", TENANT_B);
+    customerRepository.save(customer);
+    const { provider, sessionToken, grants } = staffFixture({ canPerformProtectedActions: true });
+
+    assert.throws(
+      () =>
+        completeCustomerOffboardingAsAuthenticatedStaff({
+          organization: organizationA,
+          provider,
+          sessionToken,
+          grants,
+          requestStore,
+          customerRepository,
+          tenantScope: TENANT_B,
+          requestId: stored.request.requestId,
+          expectedVersion: stored.version,
+          completedAt: "2026-10-15T01:00:00.000Z",
+        }),
+      CustomerOffboardingTenantScopeMismatchError,
+    );
+    assert.equal(requestStore.get(TENANT_B.tenantId, stored.request.requestId)?.request.status, "REQUESTED");
+  } finally {
+    rmSync(requestDir, { recursive: true, force: true });
+    rmSync(customerDir, { recursive: true, force: true });
   }
 });

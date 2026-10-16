@@ -62,4 +62,16 @@ No modification to `src/ports/customer-repository.ts`, `src/application/in-memor
 - `node --test dist/tests/*.test.js`: **2941/2941 passing**.
 - Zero new runtime dependency.
 
+## Brain correction (F1)
+
+Brain's independent review of exact head `ed44bc2b419853dd920ab4683d68a4500481a2ce` (PR #161 comment `6205583270`) found a cross-tenant authority defect in `denyCustomerOffboardingAsAuthenticatedStaff`: `requireInternalOsAccess` only proves authority for `input.organization`, but the function then used the SEPARATELY caller-supplied `input.tenantScope` for the actual request-store lookup and mutation. `denyCustomerOffboarding`'s own domain contract performs no tenant check at all (unlike `completeCustomerOffboarding`, which happens to catch a tenant mismatch, but only after an already-completed cross-tenant store read), so an authenticated Organization-A principal could supply Tenant B's `tenantScope` plus a known B `requestId` and transition B's REQUESTED record to DENIED using A's own authenticated identity.
+
+**Fix**: both `completeCustomerOffboardingAsAuthenticatedStaff` and `denyCustomerOffboardingAsAuthenticatedStaff` now require `input.tenantScope.tenantId === context.access.tenantId` immediately after `requireInternalOsAccess` returns, BEFORE any request-store lookup. `context.access.tenantId` is `requireInternalOsAccess`'s own proven-equal-to-`input.organization.tenantId` value (enforced inside `resolveEffectiveOrganizationAccess` itself), so this is the one authoritative tenant for the whole authenticated call — `tenantScope` is never trusted as an independent dimension again once this check passes. New error: `CustomerOffboardingTenantScopeMismatchError`.
+
+**Test changes**: two new adversarial tests — cross-tenant deny and the analogous cross-tenant completion boundary (per Brain's own instruction, added even though completion was already defense-in-depth protected by the domain function's own later check) — both proving zero mutation and the correct new error type.
+
+**Guard-disable sanity**: the new check was disabled in both functions and the suite rebuilt. Exactly the 2 new tests failed: the cross-tenant *deny* case surfaced the real exploit (the mutation would have silently succeeded — no exception at all), and the cross-tenant *complete* case failed only on the expected error type (it still fails closed via the domain function's own older, later-catching tenant check, confirming that path was already defense-in-depth protected, while deny had none at all). No pre-existing test regressed. The check was then restored and verified byte-identical to the pre-edit source via `diff`.
+
+Full regression after the fix: **2943/2943 passing** (2941 pre-existing + 2 new), clean strict typecheck, zero new runtime dependency. New exact head: see PR #161's latest commit.
+
 Status: `IMPLEMENTED / SELF-VALIDATED` — pending Brain/Founder independent review per `AGENTS.md` §10. `MERGE_DISPOSITION: HOLD_MERGE`.
