@@ -53,13 +53,18 @@ function organizationFixture(): Organization {
   });
 }
 
-function staffFixture(options?: { canPerformProtectedActions?: boolean; membershipId?: string; principalId?: string }) {
+function staffFixture(options?: {
+  canPerformProtectedActions?: boolean;
+  membershipId?: string;
+  principalId?: string;
+  permissions?: ReadonlyArray<"READ" | "WRITE" | "EXECUTE">;
+}) {
   const membershipId = options?.membershipId ?? "membership-decider";
   const principalId = options?.principalId ?? "principal-decider";
   const membership = createOrganizationMembership({ membershipId, tenantScope: TENANT, principalRef: principalId, role: "STAFF" });
   const authority = createAuthorityContext({
     tenantScope: TENANT,
-    permissions: ["READ", "WRITE", "EXECUTE"],
+    permissions: options?.permissions ?? ["READ", "WRITE", "EXECUTE"],
     canPerformProtectedActions: options?.canPerformProtectedActions ?? true,
   });
   const principal = createAuthenticatedStaffPrincipal({ principalId, displayName: "Decider" });
@@ -501,5 +506,35 @@ test("adversarial (cross-tenant complete, REV216 F1): an authenticated Tenant-A 
   } finally {
     rmSync(requestDir, { recursive: true, force: true });
     rmSync(customerDir, { recursive: true, force: true });
+  }
+});
+
+test("adversarial (deny, READ-only, REV216 F2): an authenticated staff member with only READ permission (requireInternalOsAccess's own minimum floor) cannot deny a request through this boundary - zero mutation", () => {
+  const requestDir = freshRequestStoreDir();
+  try {
+    const organization = organizationFixture();
+    const requestStore = new FileDurableCustomerOffboardingRequestStore(requestDir);
+    const { stored } = seedRequest(requestStore, "req-deny-readonly");
+    const { provider, sessionToken, grants } = staffFixture({ permissions: ["READ"], canPerformProtectedActions: false });
+
+    assert.throws(
+      () =>
+        denyCustomerOffboardingAsAuthenticatedStaff({
+          organization,
+          provider,
+          sessionToken,
+          grants,
+          requestStore,
+          tenantScope: TENANT,
+          requestId: stored.request.requestId,
+          expectedVersion: stored.version,
+          reason: "x",
+          deniedAt: "2026-10-15T01:00:00.000Z",
+        }),
+      CustomerOffboardingDecisionError,
+    );
+    assert.equal(requestStore.get(TENANT.tenantId, stored.request.requestId)?.request.status, "REQUESTED");
+  } finally {
+    rmSync(requestDir, { recursive: true, force: true });
   }
 });

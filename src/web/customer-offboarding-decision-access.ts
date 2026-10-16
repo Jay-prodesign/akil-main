@@ -43,33 +43,44 @@ import type { CustomerRepository } from "../ports/customer-repository.js";
  *
  * Deliberately two separate functions, not a combined "decision" union:
  * `completeCustomerOffboarding` and `denyCustomerOffboarding` are NOT
- * symmetric in this repository's own existing, unmodified domain contract -
- * only completion requires `currentAccess.canPerformProtectedActions`
- * (`completeCustomerOffboarding`'s own doc comment: "completing a customer
- * offboarding is a protected action"); denial requires only a currently-
- * ACTIVE staff membership (any `requireInternalOsAccess`-granted caller).
- * That asymmetry is this repository's own pre-existing, already-accepted
- * domain decision (`CUS-OFFBOARD-001`) - this module wires it through
- * faithfully, neither widening denial to require protected-action authority
- * nor narrowing completion's own existing protected-action requirement.
+ * symmetric in this repository's own domain contract - only completion
+ * requires `currentAccess.canPerformProtectedActions` (`completeCustomerOffboarding`'s
+ * own doc comment: "completing a customer offboarding is a protected
+ * action"); denial requires only WRITE permission (REV216 F2 - see below),
+ * a materially lower bar than the protected-action gate. That asymmetry is
+ * this repository's own pre-existing, already-accepted domain decision
+ * (`CUS-OFFBOARD-001`) - this module wires it through faithfully, neither
+ * widening denial to require protected-action authority nor narrowing
+ * completion's own existing protected-action requirement.
  *
  * REV216 F1 correction (Brain CHANGES_REQUIRED, PR #161 comment
  * `6205583270`): `requireInternalOsAccess` only proves authority for
  * `input.organization` - it says nothing about the SEPARATELY caller-
  * supplied `input.tenantScope` this module used for the actual store
- * lookup/mutation. `denyCustomerOffboarding`'s own domain contract performs
- * no tenant check at all (unlike `completeCustomerOffboarding`, which
- * happens to catch a tenant mismatch, but only after an already-completed
- * cross-tenant store read), so an authenticated Organization-A principal
- * could supply Tenant B's `tenantScope` and `requestId` and transition B's
- * request using A's authenticated identity. Both functions now require
- * `input.tenantScope.tenantId === context.access.tenantId` immediately
- * after `requireInternalOsAccess` returns and BEFORE any request-store
- * lookup - `context.access.tenantId` is `requireInternalOsAccess`'s own
- * proven-equal-to-`input.organization.tenantId` value (enforced inside
+ * lookup/mutation. `denyCustomerOffboarding`'s own domain contract
+ * originally performed no tenant check at all (unlike `completeCustomerOffboarding`,
+ * which happens to catch a tenant mismatch, but only after an already-
+ * completed cross-tenant store read), so an authenticated Organization-A
+ * principal could supply Tenant B's `tenantScope` and `requestId` and
+ * transition B's request using A's authenticated identity. Both functions
+ * now require `input.tenantScope.tenantId === context.access.tenantId`
+ * immediately after `requireInternalOsAccess` returns and BEFORE any
+ * request-store lookup - `context.access.tenantId` is `requireInternalOsAccess`'s
+ * own proven-equal-to-`input.organization.tenantId` value (enforced inside
  * `resolveEffectiveOrganizationAccess` itself), so this is the one
  * authoritative tenant for the whole authenticated call; `tenantScope` is
  * never trusted as an independent dimension again once this check passes.
+ *
+ * REV216 F2 correction (Brain CHANGES_REQUIRED, PR #161 comment
+ * `6205597388`): `denyCustomerOffboarding` originally took only a bare
+ * `decidingAuthorityPrincipalRef` string, so an authenticated staff member
+ * with only READ permission (`requireInternalOsAccess`'s own minimum floor)
+ * could terminalize a request as DENIED - nothing downstream re-checked
+ * mutation permission. `denyCustomerOffboarding` now takes `currentAccess`
+ * (the same `EffectiveAccessResolution` already threaded into
+ * `completeCustomerOffboarding`) and requires GRANTED + same tenant + a
+ * real membership + WRITE permission before denying - closing the gap for
+ * every caller, not merely this web boundary.
  */
 
 export class CustomerOffboardingTenantScopeMismatchError extends Error {
@@ -157,9 +168,12 @@ export function completeCustomerOffboardingAsAuthenticatedStaff(input: {
 }
 
 /**
- * `denyCustomerOffboarding` takes no `customer`/`currentAccess` at all (its
- * own existing contract) - only the authenticated `context.membership.membershipId`
- * is threaded through, as `decidingAuthorityPrincipalRef`.
+ * REV216 F2 correction: `denyCustomerOffboarding` now takes `currentAccess`
+ * (the same proven-fresh `context.access` this module already threads into
+ * `completeCustomerOffboarding`), which self-validates GRANTED + same
+ * tenant + a real membership + WRITE permission before denial - a
+ * READ-only staff member (`requireInternalOsAccess`'s own minimum floor)
+ * can no longer terminalize a request through this boundary.
  */
 export function denyCustomerOffboardingAsAuthenticatedStaff(input: {
   readonly organization: Organization;
@@ -191,7 +205,7 @@ export function denyCustomerOffboardingAsAuthenticatedStaff(input: {
   }
   const deniedRequest = denyCustomerOffboarding({
     request: existing.request,
-    decidingAuthorityPrincipalRef: context.membership.membershipId,
+    currentAccess: context.access,
     reason: input.reason,
     deniedAt: input.deniedAt,
   });
