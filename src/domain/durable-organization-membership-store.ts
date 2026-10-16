@@ -31,14 +31,16 @@ import {
  *
  * Mirrors `durable-project-store.ts`'s exact established discipline: one
  * JSON file per tenant under `baseDir`, keyed by the single opaque
- * `membershipId` (a plain key, not compound - `membershipId` is already
- * globally-unique-by-contract identity, the same reasoning
+ * `membershipId` (a plain key, not compound - the per-tenant file itself
+ * already provides exact tenant isolation, the same reasoning
  * `FileDurableCustomerRepository` already documented for its own plain
- * `customerId` key), a real cross-process `linkSync` mutual-exclusion lock
- * for the read-check-write critical section (Rev94 F1's own primitive,
- * cloned verbatim - this repository's own established per-module
- * convention), and full structural revalidation of persisted JSON on every
- * read.
+ * `customerId` key; this store is tenant-file SCOPED, not a claim that
+ * `membershipId` is globally unique across tenants - the same `membershipId`
+ * in two different tenants' files is two independent records, never a
+ * collision), a real cross-process `linkSync` mutual-exclusion lock for the
+ * read-check-write critical section (Rev94 F1's own primitive, cloned
+ * verbatim - this repository's own established per-module convention), and
+ * full structural revalidation of persisted JSON on every read.
  *
  * Per the Brain's own explicit instruction, this module does NOT invent an
  * invitation/suspension/role-change lifecycle - `create` and `revoke` are
@@ -52,6 +54,18 @@ import {
  * guard that closes the one genuine concurrency hazard a bare in-memory
  * caller cannot: two processes racing to revoke the SAME membership at the
  * same time.
+ *
+ * ORG-MEMBERSHIP-DURABLE-001 F1 (Brain CHANGES_REQUIRED, PR #163 comment
+ * `6223152039`): `create` originally persisted the caller-supplied
+ * `OrganizationMembership` without revalidating it first - since the type
+ * is an exported structural interface, a hand-built malformed value (stale
+ * revocation metadata on an `ACTIVE` record, an unrecognized `role`, a
+ * non-canonical identity string) could be written successfully and only
+ * surface as `CorruptedOrganizationMembershipFileError` on a later read.
+ * Fixed by extracting the shared `coherenceViolation` check - the SAME
+ * structural/lifecycle invariants `validatePersistedOrganizationMembership`
+ * already enforced on replay - and running it in `create` BEFORE the lock
+ * is even acquired, so a rejected call commits zero bytes and zero state.
  */
 
 export class InvalidOrganizationMembershipStoreError extends Error {
@@ -150,34 +164,102 @@ const RECOGNIZED_ORGANIZATION_ROLES: ReadonlySet<string> = new Set<OrganizationR
   "CLIENT_ASSOCIATE",
 ]);
 
-function requireNonEmptyStringField(value: unknown, field: string, filePath: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    fail(filePath, `${field} must be a non-empty string`);
-  }
-  if (value.trim() !== value) {
-    fail(filePath, `${field} must not contain leading or trailing whitespace`);
-  }
-  return value as string;
-}
-
 function membershipsIdentical(a: OrganizationMembership, b: OrganizationMembership): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+function isCanonicallyTrimmedNonEmpty(value: string): boolean {
+  return value.length > 0 && value.trim().length > 0 && value.trim() === value;
+}
+
+/**
+ * ORG-MEMBERSHIP-DURABLE-001 F1 (Brain CHANGES_REQUIRED, PR #163 comment
+ * `6223152039`): the ONE structural+lifecycle coherence check shared by
+ * BOTH the write boundary (`create`, before any persistence is attempted)
+ * and replay validation (`validatePersistedOrganizationMembership`) - so a
+ * malformed value can never be accepted at either boundary, and the two
+ * paths can never semantically diverge into a second rule set.
+ * `OrganizationMembership` is an exported structural interface
+ * (`organization-membership.ts`'s own documented factory-bypass concern),
+ * so a caller can hand `create` an object that never went through
+ * `createOrganizationMembership`/`revokeOrganizationMembership` at all -
+ * this re-derives every invariant those two functions themselves enforce:
+ * non-empty canonically-trimmed `membershipId`/`tenantId`/`principalRef`, a
+ * `role` among the four values construction can legitimately produce, and
+ * `ACTIVE`/`REVOKED` lifecycle coherence (an `ACTIVE` record carrying stale
+ * `revokedAt`/`revokedReason`, or a `REVOKED` record missing either, is
+ * incoherent). Returns a human-readable violation reason, or `undefined`
+ * when the given shape is exactly what construction could have produced.
+ */
+function coherenceViolation(membership: {
+  readonly membershipId: string;
+  readonly tenantId: string;
+  readonly principalRef: string;
+  readonly role: string;
+  readonly state: string;
+  readonly revokedAt?: string | undefined;
+  readonly revokedReason?: string | undefined;
+}): string | undefined {
+  if (!isCanonicallyTrimmedNonEmpty(membership.membershipId)) {
+    return "membershipId must be a non-empty string with no leading or trailing whitespace";
+  }
+  if (!isCanonicallyTrimmedNonEmpty(membership.tenantId)) {
+    return "tenantId must be a non-empty string with no leading or trailing whitespace";
+  }
+  if (!isCanonicallyTrimmedNonEmpty(membership.principalRef)) {
+    return "principalRef must be a non-empty string with no leading or trailing whitespace";
+  }
+  if (!RECOGNIZED_ORGANIZATION_ROLES.has(membership.role)) {
+    return "role is not a value createOrganizationMembership can legitimately produce";
+  }
+  if (membership.state !== "ACTIVE" && membership.state !== "REVOKED") {
+    return 'state must be "ACTIVE" or "REVOKED"';
+  }
+  if (membership.state === "ACTIVE") {
+    if (membership.revokedAt !== undefined || membership.revokedReason !== undefined) {
+      return "is ACTIVE but carries revocation metadata - incoherent lifecycle state";
+    }
+    return undefined;
+  }
+  if (membership.revokedAt === undefined || !isCanonicallyTrimmedNonEmpty(membership.revokedAt)) {
+    return "revokedAt must be a non-empty, canonically-trimmed string when REVOKED";
+  }
+  if (Number.isNaN(Date.parse(membership.revokedAt))) {
+    return "revokedAt must be a valid ISO timestamp";
+  }
+  if (membership.revokedReason === undefined || !isCanonicallyTrimmedNonEmpty(membership.revokedReason)) {
+    return "revokedReason must be a non-empty, canonically-trimmed string when REVOKED";
+  }
+  return undefined;
+}
+
+function requireStringTypeField(value: unknown, field: string, filePath: string): string {
+  if (typeof value !== "string") {
+    fail(filePath, `${field} must be a string`);
+  }
+  return value as string;
+}
+
+function optionalStringTypeField(value: unknown, field: string, filePath: string): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  return requireStringTypeField(value, field, filePath);
+}
+
 /**
  * Persisted state is an external/untrusted boundary on replay, exactly like
- * every other durable store in this repository. Every structural invariant
- * `organization-membership.ts`'s own `createOrganizationMembership`/
- * `revokeOrganizationMembership`/`isOrganizationMembershipActive` already
- * enforce is re-checked here: non-empty canonically-trimmed `membershipId`/
- * `tenantId`/`principalRef`, a `role` among the four values construction can
- * legitimately produce, cross-tenant contamination (stored tenant file vs.
- * embedded `tenantId`), key-to-identity consistency (stored key vs. embedded
- * `membershipId`), and `ACTIVE`/`REVOKED` lifecycle coherence - an `ACTIVE`
- * record carrying stale `revokedAt`/`revokedReason`, or a `REVOKED` record
- * missing either, is corruption, never silently coerced. Every failure
- * throws `CorruptedOrganizationMembershipFileError` (fail-closed) rather
- * than silently dropping or guessing a bad field.
+ * every other durable store in this repository. Field TYPE shape is
+ * checked here directly (JSON can hand back anything); every structural
+ * and lifecycle INVARIANT - non-empty canonical trim, recognized `role`,
+ * `ACTIVE`/`REVOKED` coherence - is delegated to the single shared
+ * `coherenceViolation` check above, so replay validation can never silently
+ * drift from what the write boundary enforces. Cross-tenant contamination
+ * (stored tenant file vs. embedded `tenantId`) and key-to-identity
+ * consistency (stored key vs. embedded `membershipId`) remain checked here,
+ * since `coherenceViolation` has no access to the expected tenant/key
+ * context. Every failure throws `CorruptedOrganizationMembershipFileError`
+ * (fail-closed) rather than silently dropping or guessing a bad field.
  */
 function validatePersistedOrganizationMembership(
   raw: unknown,
@@ -201,70 +283,43 @@ function validatePersistedOrganizationMembership(
   }
   const record = rawMembership as Record<string, unknown>;
 
-  const membershipId = requireNonEmptyStringField(
-    record["membershipId"],
-    `record "${expectedKey}".membership.membershipId`,
-    filePath,
-  );
+  const membershipId = requireStringTypeField(record["membershipId"], `record "${expectedKey}".membership.membershipId`, filePath);
   if (membershipId !== expectedKey) {
     fail(
       filePath,
       `stored key "${expectedKey}" does not match embedded membershipId "${membershipId}" - key-identity substitution`,
     );
   }
-  const tenantId = requireNonEmptyStringField(record["tenantId"], `record "${expectedKey}".membership.tenantId`, filePath);
+  const tenantId = requireStringTypeField(record["tenantId"], `record "${expectedKey}".membership.tenantId`, filePath);
   if (tenantId !== expectedTenantId) {
     fail(
       filePath,
       `record "${expectedKey}" is stored under tenant file "${expectedTenantId}" but its own tenantId is "${tenantId}" - cross-tenant record contamination`,
     );
   }
-  const principalRef = requireNonEmptyStringField(
-    record["principalRef"],
-    `record "${expectedKey}".membership.principalRef`,
-    filePath,
-  );
-  if (typeof record["role"] !== "string" || !RECOGNIZED_ORGANIZATION_ROLES.has(record["role"])) {
-    fail(
-      filePath,
-      `record "${expectedKey}".membership.role is not a value createOrganizationMembership can legitimately produce`,
-    );
-  }
-  const role = record["role"] as OrganizationRole;
+  const principalRef = requireStringTypeField(record["principalRef"], `record "${expectedKey}".membership.principalRef`, filePath);
+  const role = requireStringTypeField(record["role"], `record "${expectedKey}".membership.role`, filePath);
+  const state = requireStringTypeField(record["state"], `record "${expectedKey}".membership.state`, filePath);
+  const revokedAt = optionalStringTypeField(record["revokedAt"], `record "${expectedKey}".membership.revokedAt`, filePath);
+  const revokedReason = optionalStringTypeField(record["revokedReason"], `record "${expectedKey}".membership.revokedReason`, filePath);
 
-  const state = record["state"];
-  if (state !== "ACTIVE" && state !== "REVOKED") {
-    fail(filePath, `record "${expectedKey}".membership.state must be "ACTIVE" or "REVOKED"`);
+  const violation = coherenceViolation({ membershipId, tenantId, principalRef, role, state, revokedAt, revokedReason });
+  if (violation !== undefined) {
+    fail(filePath, `record "${expectedKey}".membership ${violation}`);
   }
 
   if (state === "ACTIVE") {
-    if (record["revokedAt"] !== undefined || record["revokedReason"] !== undefined) {
-      fail(
-        filePath,
-        `record "${expectedKey}".membership is ACTIVE but carries revocation metadata - incoherent persisted lifecycle state`,
-      );
-    }
     return {
       version,
       membership: {
         membershipId: membershipId as OrganizationMembership["membershipId"],
         tenantId: tenantId as TenantScope["tenantId"],
         principalRef,
-        role,
+        role: role as OrganizationRole,
         state: "ACTIVE",
       },
     };
   }
-
-  const revokedAt = requireNonEmptyStringField(record["revokedAt"], `record "${expectedKey}".membership.revokedAt`, filePath);
-  if (Number.isNaN(Date.parse(revokedAt))) {
-    fail(filePath, `record "${expectedKey}".membership.revokedAt must be a valid ISO timestamp`);
-  }
-  const revokedReason = requireNonEmptyStringField(
-    record["revokedReason"],
-    `record "${expectedKey}".membership.revokedReason`,
-    filePath,
-  );
 
   return {
     version,
@@ -272,10 +327,10 @@ function validatePersistedOrganizationMembership(
       membershipId: membershipId as OrganizationMembership["membershipId"],
       tenantId: tenantId as TenantScope["tenantId"],
       principalRef,
-      role,
+      role: role as OrganizationRole,
       state: "REVOKED",
-      revokedAt,
-      revokedReason,
+      revokedAt: revokedAt as string,
+      revokedReason: revokedReason as string,
     },
   };
 }
@@ -402,6 +457,20 @@ export class FileDurableOrganizationMembershipStore implements DurableOrganizati
   }
 
   create(membership: OrganizationMembership): StoredOrganizationMembership {
+    // ORG-MEMBERSHIP-DURABLE-001 F1 (Brain CHANGES_REQUIRED, PR #163 comment
+    // `6223152039`): `OrganizationMembership` is an exported structural
+    // interface, so a caller can hand this a hand-built value that never
+    // went through `createOrganizationMembership`/`revokeOrganizationMembership`
+    // at all. Validate BEFORE acquiring the lock or touching disk - a
+    // rejected call commits zero bytes and zero state, never a corrupted
+    // record that only surfaces as `CorruptedOrganizationMembershipFileError`
+    // on the next read/restart.
+    const violation = coherenceViolation(membership);
+    if (violation !== undefined) {
+      throw new InvalidOrganizationMembershipStoreError(
+        `cannot create membership "${membership.membershipId}": ${violation}`,
+      );
+    }
     return this.withTenantLock(membership.tenantId, () => {
       const records = this.readAll(membership.tenantId);
       const existing = records[membership.membershipId];

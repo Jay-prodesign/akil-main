@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTenantScope, type TenantScope } from "../src/domain/tenant-scope.js";
@@ -14,6 +14,7 @@ import {
   OrganizationMembershipConflictError,
   OrganizationMembershipVersionConflictError,
   CorruptedOrganizationMembershipFileError,
+  InvalidOrganizationMembershipStoreError,
 } from "../src/domain/durable-organization-membership-store.js";
 
 /**
@@ -455,6 +456,92 @@ test("corrupted file: canonical-trim violation on principalRef fails closed", ()
     );
     const store = new FileDurableOrganizationMembershipStore(dir);
     assert.throws(() => store.listByTenant(tenantScope.tenantId), CorruptedOrganizationMembershipFileError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- F1 (Brain CHANGES_REQUIRED, PR #163 comment 6223152039): write-boundary
+// validation. `OrganizationMembership` is an exported structural interface,
+// so a caller can hand `create` a value that never went through
+// `createOrganizationMembership` at all. Each case below proves `create`
+// rejects it BEFORE any persistence - zero bytes written (no tenant file
+// created at all) and zero state committed (a subsequent `get` still finds
+// nothing).
+
+test("F1 write-boundary: create rejects an ACTIVE record carrying revocation metadata, zero bytes/state committed", () => {
+  const dir = freshDir();
+  try {
+    const tenantScope = createTenantScope("tenant-mem-f1-active-revoked");
+    const store = new FileDurableOrganizationMembershipStore(dir);
+    const malformed = {
+      membershipId: "mem-1",
+      tenantId: tenantScope.tenantId,
+      principalRef: "principal-1",
+      role: "STAFF",
+      state: "ACTIVE",
+      revokedAt: "2026-10-16T12:00:00.000Z",
+      revokedReason: "should never be reachable through createOrganizationMembership",
+    } as unknown as OrganizationMembership;
+
+    assert.throws(() => store.create(malformed), InvalidOrganizationMembershipStoreError);
+    assert.equal(store.get(tenantScope.tenantId, "mem-1" as OrganizationMembership["membershipId"]), undefined);
+    assert.equal(existsSync(tenantFilePath(dir, tenantScope.tenantId)), false, "no tenant file should have been written");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("F1 write-boundary: create rejects an unrecognized role, zero bytes/state committed", () => {
+  const dir = freshDir();
+  try {
+    const tenantScope = createTenantScope("tenant-mem-f1-bad-role");
+    const store = new FileDurableOrganizationMembershipStore(dir);
+    const malformed = {
+      membershipId: "mem-1",
+      tenantId: tenantScope.tenantId,
+      principalRef: "principal-1",
+      role: "OWNER",
+      state: "ACTIVE",
+    } as unknown as OrganizationMembership;
+
+    assert.throws(() => store.create(malformed), InvalidOrganizationMembershipStoreError);
+    assert.equal(store.get(tenantScope.tenantId, "mem-1" as OrganizationMembership["membershipId"]), undefined);
+    assert.equal(existsSync(tenantFilePath(dir, tenantScope.tenantId)), false, "no tenant file should have been written");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("F1 write-boundary: create rejects a canonical-trim violation on principalRef, zero bytes/state committed", () => {
+  const dir = freshDir();
+  try {
+    const tenantScope = createTenantScope("tenant-mem-f1-trim");
+    const store = new FileDurableOrganizationMembershipStore(dir);
+    const malformed = {
+      membershipId: "mem-1",
+      tenantId: tenantScope.tenantId,
+      principalRef: " principal-1 ",
+      role: "STAFF",
+      state: "ACTIVE",
+    } as unknown as OrganizationMembership;
+
+    assert.throws(() => store.create(malformed), InvalidOrganizationMembershipStoreError);
+    assert.equal(store.get(tenantScope.tenantId, "mem-1" as OrganizationMembership["membershipId"]), undefined);
+    assert.equal(existsSync(tenantFilePath(dir, tenantScope.tenantId)), false, "no tenant file should have been written");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("F1 write-boundary: create still accepts a genuinely well-formed membership after the new check (no regression on the golden path)", () => {
+  const dir = freshDir();
+  try {
+    const tenantScope = createTenantScope("tenant-mem-f1-golden");
+    const store = new FileDurableOrganizationMembershipStore(dir);
+    const membership = membershipIn(tenantScope);
+    const stored = store.create(membership);
+    assert.deepEqual(stored, { membership, version: 1 });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

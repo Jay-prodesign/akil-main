@@ -58,4 +58,16 @@ No modification to `organization-membership.ts`, `organization-resource-binding.
 - `node --test dist/tests/*.test.js`: **2997/2997 passing** (2969 pre-existing + 28 new: 19 unit + 2 concurrency + 7 adapter).
 - Zero new runtime dependency.
 
+## Brain correction (F1)
+
+Brain's independent review of exact head `6b24cbecd153eebea106575a9f44a14f6110d333` (PR #163 comment `6223152039`) found a write-boundary validation gap: `FileDurableOrganizationMembershipStore.create()` persisted the caller-supplied `OrganizationMembership` without revalidating it first. `OrganizationMembership` is an exported structural interface (`organization-membership.ts`'s own documented factory-bypass concern), so a hand-built malformed value — an `ACTIVE` record carrying stale revocation metadata, an unrecognized `role`, a non-canonically-trimmed identity string — could be accepted by `create()`, written to disk, and only surface as `CorruptedOrganizationMembershipFileError` on a later read/restart. Brain also correctly flagged the module's own doc comment as misleading: it claimed `membershipId` is "globally-unique-by-contract," when the implementation is actually tenant-file SCOPED (the same `membershipId` in two different tenants' files is two independent, non-colliding records).
+
+**Fix**: extracted a single shared `coherenceViolation` check — the exact same structural/lifecycle invariants (`membershipId`/`tenantId`/`principalRef` non-empty canonically-trimmed, recognized `role`, `ACTIVE`/`REVOKED` coherence) `validatePersistedOrganizationMembership` already enforced on replay — and now run it in `create()` BEFORE the lock is even acquired, so a rejected call commits zero bytes and zero state. `validatePersistedOrganizationMembership` itself was refactored to delegate to the same shared check rather than duplicating the invariant logic inline, so write-boundary and replay validation can never semantically diverge. The misleading "globally-unique-by-contract" doc-comment claim was corrected to the accurate tenant-file-scoped framing (matching `FileDurableCustomerRepository`'s own correct reasoning for its plain-key choice).
+
+**Test changes**: 4 new write-boundary tests — 3 adversarial (ACTIVE+revocation-metadata, unrecognized role, canonical-trim violation on `principalRef`), each asserting `InvalidOrganizationMembershipStoreError` is thrown AND zero state is committed (`get` still returns `undefined`, no tenant file was ever written to disk) — plus 1 golden-path regression check confirming a genuinely well-formed `create()` call still succeeds after the new check.
+
+**Guard-disable sanity**: the new write-boundary check was disabled and the suite rebuilt. Exactly the 3 new adversarial tests failed, precisely the tests depending on it. No other test regressed. Restored and verified byte-identical to the pre-edit source via `diff`.
+
+Full regression after the fix: **3001/3001 passing** (2997 pre-existing + 4 new), clean strict typecheck, zero new runtime dependency.
+
 Status: `IMPLEMENTED / SELF-VALIDATED` — pending Brain/Founder independent review per `AGENTS.md` §10. `MERGE_DISPOSITION: HOLD_MERGE`.
