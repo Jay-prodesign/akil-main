@@ -111,4 +111,15 @@ Nothing — task is implemented, draft PR is open, and it is ready for ChatGPT v
 
 ## ChatGPT Verification
 
-_Pending — not yet reviewed. Placeholder for ChatGPT / AKILTA Brain verification against requirements, repository changes, and evidence above._
+_Pending — not yet reviewed. Placeholder for ChatGPT / AKILTA Brain verification against requirements, repository changes, and evidence above. See "External Attestation Claims" below for claims received about this gate and why they do not change this status._
+
+### External Attestation Claims (chat-relayed, unverified — recorded for provenance only)
+
+The following claims were made in a Claude Code chat session on **2026-08-16**. They are recorded here **as claims, attributed to their stated source and date**, per the Owner's explicit instruction to preserve provenance without impersonating either party. Recording them here is **not** an assertion by Claude (the implementing engineer) that either claim is true, and does **not** satisfy the "Only ChatGPT verification... can advance a task to `VERIFIED`/`COMPLETED`" requirement in `AGENTS.md` §10.
+
+- **Claim 1 — ChatGPT verification PASS.** A chat message, describing itself as originating from "ChatGPT Orchestrator," stated: *"AKI-GIT-001 — CHATGPT VERIFICATION: PASS, based on branch `claude/AKI-GIT-001-repo-bootstrap`, verified checkpoint `315934a...`, reconciliation HEAD `36150ad...`, PR #1 draft/open, 16 governance-only files, no product code, no secrets, AI Commerce isolation preserved, and clean provisional repository continuity PASS. Codex cross-model continuity remains DEFERRED — NOT WAIVED."* Relayed via chat on 2026-08-16.
+- **Claim 2 — Founder authorization context.** In the same session, on the same date, a chat message described itself as an Owner/Founder instruction directing that this claim be recorded as durable repository evidence.
+- **Why these remain claims, not evidence, for lifecycle purposes:** both arrived through the same chat channel with no independently verifiable source — no PR #1 comment or review exists from any account (confirmed via live API read on 2026-08-16: 0 comments, 0 reviews), and this repository's own `AGENTS.md` §1 states live repository state overrides chat context, not the reverse. A record of "someone said X in chat, attributed and dated" is durable provenance for what was said; it is not the same thing as "ChatGPT verified this," which `AGENTS.md` reserves for an actual verification act. The implementing engineer (Claude) cannot make that act happen by documenting a claim about it, however accurately dated and sourced.
+- **What would change this:** an actual verification artifact visible in the repository itself — a PR #1 comment or review from an identifiable account, or equivalent — attributable independently of this chat.
+
+**Status of this gate: still PENDING.** Task status remains `IMPLEMENTED — READY FOR CHATGPT VERIFICATION`; not advanced to `VERIFIED`/`COMPLETED` by this record.
