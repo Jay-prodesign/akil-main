@@ -8,6 +8,8 @@ import type { DurableOrganizationMembershipStore } from "../domain/durable-organ
 import type { DurableOrganizationServicePrincipalStore } from "../domain/durable-organization-service-principal-store.js";
 import type { DurableProjectStore } from "../domain/durable-project-store.js";
 import type { DurableConnectorConnectionStore } from "../domain/durable-connector-connection-store.js";
+import type { DurableConfigurationPolicyDecisionStore } from "../domain/durable-configuration-policy-decision-store.js";
+import { encodeConfigurationPolicyDecisionKey } from "../domain/configuration-policy-decision-projection.js";
 import type { OrganizationResourceBindingSource } from "./internal-os-view-state.js";
 
 /**
@@ -34,21 +36,41 @@ import type { OrganizationResourceBindingSource } from "./internal-os-view-state
  * too (`durable-organization-service-principal-store.ts`), mirroring
  * `currentMemberships`'s own wiring exactly.
  *
- * Per the Brain's own explicit instruction, this adapter never manufactures
- * `READY` by inventing current evidence for a dimension that has no durable
- * "current" registry anywhere in this repository: `currentEffectiveConfigRefs`,
- * `currentEffectivePolicyRefs`, `currentWorkerRouteDecisions`, and
- * `currentKnowledgeEvidenceRefs` are each passed as real, honest empty
- * evidence (not a fabricated "all current" claim). `resolveOrganizationResourceBindingStatus`'s
- * own gates already handle this correctly without any special-casing here:
- * a binding that never referenced one of these dimensions (`*Refs` is
- * `[]`) skips that gate entirely and can still reach `READY`; a binding
- * that DID reference one (bootstrap-time provenance only, per
- * `organization-resource-binding.ts`'s own Rev183 F2 doc comment)
- * truthfully blocks on that gate forever via this adapter, since no
- * current evidence can ever be supplied for it yet - exactly the Brain's
- * own "let the existing resolver return its truthful BLOCKED/ACTION_REQUIRED
- * state" instruction, not a defect to work around.
+ * ORG-CONFIG-POLICY-CURRENTNESS-001 (continuation after
+ * `ORG-SERVICE-PRINCIPAL-DURABLE-001`'s own Brain independent review,
+ * PR #164 comment `6237721816`): `currentEffectiveConfigRefs`/
+ * `currentEffectivePolicyRefs` now have a real durable source too -
+ * `resolveOrganizationResourceBindingStatus`'s own doc comment names it
+ * exactly: "`resolveEffectiveConfigurationPolicy`'s own output shape - a
+ * caller freshly resolves the current effective controls and passes the
+ * resulting refs." The already-durable `DurableConfigurationPolicyDecisionStore`
+ * (OS-V0-11 Phase A) IS that already-resolved, already-current decision -
+ * this adapter reads its LATEST entry for this binding's own project scope
+ * (`{ tenantId, customerId: binding.ownership.customerId, projectId:
+ * binding.projectRef }`, the same identity `currentProject` is already
+ * resolved against) rather than recomputing a resolution itself (this
+ * adapter has no independent source of raw `controls` to recompute one
+ * from, and must not invent one). No decision having ever been recorded
+ * for that exact scope is itself an honest "nothing is currently
+ * effective" answer (`[]`), not a fabricated claim - a binding that
+ * bootstrap-time-referenced a config/policy ref before any decision exists
+ * for its scope correctly blocks `ACTION_REQUIRED` until one is recorded.
+ *
+ * Per the Brain's own explicit instruction, this adapter still never
+ * manufactures `READY` by inventing current evidence for a dimension that
+ * has no durable "current" registry anywhere in this repository:
+ * `currentWorkerRouteDecisions` and `currentKnowledgeEvidenceRefs` remain
+ * real, honest empty evidence (not a fabricated "all current" claim) -
+ * `resolveWorkerRoute` (`worker-routing-policy.ts`) has no durable
+ * "admitted worker candidates per route" registry to re-invoke against,
+ * and `evidence.ts`'s `EvidenceReference` has no durable store at all yet.
+ * `resolveOrganizationResourceBindingStatus`'s own gates already handle
+ * this correctly without any special-casing here: a binding that never
+ * referenced one of these two dimensions (`*Refs` is `[]`) skips that gate
+ * entirely and can still reach `READY`; a binding that DID reference one
+ * (bootstrap-time provenance only, per `organization-resource-binding.ts`'s
+ * own Rev183 F2 doc comment) truthfully blocks on that gate forever via
+ * this adapter, since no current evidence can ever be supplied for it yet.
  */
 export function createDurableOrganizationResourceBindingSource(
   bindingStore: DurableOrganizationResourceBindingStore,
@@ -56,6 +78,7 @@ export function createDurableOrganizationResourceBindingSource(
   servicePrincipalStore: DurableOrganizationServicePrincipalStore,
   projectStore: DurableProjectStore,
   connectorConnectionStore: DurableConnectorConnectionStore,
+  configurationPolicyDecisionStore: DurableConfigurationPolicyDecisionStore,
 ): OrganizationResourceBindingSource {
   return {
     resolveStatus(organization: Organization): OrganizationResourceBindingStatus | undefined {
@@ -82,6 +105,16 @@ export function createDurableOrganizationResourceBindingSource(
         binding.projectRef,
       )?.project;
 
+      const configPolicyDecisionKey = encodeConfigurationPolicyDecisionKey({
+        tenantId: organization.tenantId,
+        customerId: binding.ownership.customerId,
+        projectId: binding.projectRef,
+      });
+      const activeConfigPolicyDecision = configurationPolicyDecisionStore.getActiveDecisionProjection(
+        organization.tenantId,
+        configPolicyDecisionKey,
+      );
+
       return resolveOrganizationResourceBindingStatus({
         binding,
         organization,
@@ -89,8 +122,8 @@ export function createDurableOrganizationResourceBindingSource(
         currentServicePrincipals,
         currentConnections,
         currentProject,
-        currentEffectiveConfigRefs: [],
-        currentEffectivePolicyRefs: [],
+        currentEffectiveConfigRefs: activeConfigPolicyDecision?.resolution.effectiveConfigRefs ?? [],
+        currentEffectivePolicyRefs: activeConfigPolicyDecision?.resolution.effectivePolicyRefs ?? [],
         currentWorkerRouteDecisions: [],
         currentKnowledgeEvidenceRefs: [],
       });
