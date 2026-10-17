@@ -22,13 +22,13 @@ Do not read the entire repository or all documentation by default. Minimum suffi
 
 ## 3. "continue" / "devam"
 
-A bare `continue` or `devam` resumes only the current authorized `Next Exact Action` recorded in the active execution record. It never:
+By default, a bare `continue` or `devam` resumes only the current authorized `Next Exact Action` recorded in the active execution record. It never bypasses an Owner approval gate or expands product/business scope.
 
-- starts a new task,
-- expands the scope of the current task,
-- or bypasses an Owner approval gate.
+**Canonical corridor exception:** when a higher-authority Owner / ChatGPT canonical directive explicitly authorizes autonomous next-task selection inside a bounded engineering corridor (for example AA-005 REV216 Continuous Software Finish Mode), `continue` resumes that authorized corridor, not merely the current task packet. In that mode the Primary Engineer may finish the current packet, fresh-read canonical + repo truth, select the next dependency-safe reversible work unit, create its bounded execution record, implement/self-validate it, and repeat without waiting for routine Brain review between packets.
 
-If the recorded `Next Exact Action` is ambiguous, blocked, or missing, stop and report — do not infer intent.
+A task reaching `IMPLEMENTED`, a Draft/HOLD_MERGE PR, a missing internal adapter/store/lookup, or a routine verification wait is not by itself a stop condition inside such an explicitly authorized corridor. Stop only for the protected/escalation conditions named by the controlling canonical directive.
+
+If no such higher-authority corridor authorization exists and the recorded `Next Exact Action` is ambiguous, blocked, or missing, stop and report — do not infer intent.
 
 ## 4. Handoff and continuity
 
@@ -62,4 +62,6 @@ Owner → ChatGPT / canonical AKILTA task → repository policy (this file and `
 
 ## 10. Task lifecycle
 
-`BACKLOG → READY → IN_PROGRESS → IMPLEMENTED → VERIFYING → VERIFIED → COMPLETED`, with `VERIFYING → CHANGES_REQUIRED → IN_PROGRESS` on failed verification. An implementing engineer's authority ends at `IMPLEMENTED`. Only ChatGPT verification against requirements, repository changes, and evidence can advance a task to `VERIFIED` / `COMPLETED`. See `docs/engineering/PERMISSION_POLICY.md` for full role authority.
+`BACKLOG → READY → IN_PROGRESS → IMPLEMENTED → VERIFYING → VERIFIED → COMPLETED`, with `VERIFYING → CHANGES_REQUIRED → IN_PROGRESS` on failed verification. An implementing engineer may never self-promote its own task beyond `IMPLEMENTED`; only ChatGPT verification against requirements, repository changes, and evidence can advance that task to `VERIFIED` / `COMPLETED`.
+
+**Progression is separate from certification.** When a controlling Owner / ChatGPT canonical corridor explicitly delegates autonomous dependency-safe next-task selection, reaching `IMPLEMENTED` ends the engineer's authority to certify that task, but does **not** end its authority to start and implement the next authorized corridor task. Verification may follow independently and may send an earlier task back through `CHANGES_REQUIRED → IN_PROGRESS` without requiring the whole corridor to idle. Protected merge/deploy/production gates remain separate. See `docs/engineering/PERMISSION_POLICY.md` for full role authority.
