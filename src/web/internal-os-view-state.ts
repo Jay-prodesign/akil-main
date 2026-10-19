@@ -498,16 +498,19 @@ export function resolveOperationalObservabilityView(
  * on. Canonical OS blueprint §33.13 V1-04 names "approvals and pending
  * attention" as a required admin/control-plane concern; this closes the
  * visibility half of it. Mirrors `OrganizationResourceBindingSource`'s own
- * established optional-source pattern exactly: no durable
- * `CustomerOffboardingRequest` store exists anywhere in this repository
- * today (confirmed by repo-wide inspection), so this module invents no
- * persistence of its own - an absent source renders `NOT_ACTIVE`, never
- * fabricated content. This checkpoint is deliberately READ-ONLY: completing
- * or denying a request requires an authenticated admin-mutation boundary
- * exactly like `connector-connection-admin-access.ts`'s own, which in turn
- * requires a durable store this checkpoint does not invent - exposing a
- * decide/complete/deny control here without one would be exactly the kind
- * of non-functional CTA V2-CUST-SURFACE-001 itself refused to render.
+ * established optional-source pattern exactly: at the time this port was
+ * introduced, no durable `CustomerOffboardingRequest` store existed
+ * anywhere in this repository (confirmed by repo-wide inspection), so this
+ * module invented no persistence of its own - an absent source renders
+ * `NOT_ACTIVE`, never fabricated content. `CUS-OFFBOARD-DURABLE-001` later
+ * supplied that durable store and wired it in
+ * (`customer-offboarding-admin-source.ts`'s `createDurableCustomerOffboardingAdminSource`),
+ * reusing this port unmodified - the `undefined`-source `NOT_ACTIVE`
+ * fallback above remains correct for any future caller that does not wire
+ * a source. This checkpoint is deliberately READ-ONLY: completing or
+ * denying a request requires an authenticated admin-mutation boundary,
+ * which `customer-offboarding-decision-access.ts` (`CUSTOMER-REPO-DURABLE-001`)
+ * later supplied separately from this read-only listing port.
  */
 export interface CustomerOffboardingAdminSource {
   listPendingRequests(organization: Organization): ReadonlyArray<CustomerOffboardingRequest>;
