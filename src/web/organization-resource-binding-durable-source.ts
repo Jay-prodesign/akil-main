@@ -10,6 +10,7 @@ import type { DurableProjectStore } from "../domain/durable-project-store.js";
 import type { DurableConnectorConnectionStore } from "../domain/durable-connector-connection-store.js";
 import type { DurableConfigurationPolicyDecisionStore } from "../domain/durable-configuration-policy-decision-store.js";
 import { encodeConfigurationPolicyDecisionKey } from "../domain/configuration-policy-decision-projection.js";
+import type { DurableEvidenceReferenceStore } from "../domain/durable-evidence-reference-store.js";
 import type { OrganizationResourceBindingSource } from "./internal-os-view-state.js";
 
 /**
@@ -56,17 +57,33 @@ import type { OrganizationResourceBindingSource } from "./internal-os-view-state
  * bootstrap-time-referenced a config/policy ref before any decision exists
  * for its scope correctly blocks `ACTION_REQUIRED` until one is recorded.
  *
+ * KNOWLEDGE-EVIDENCE-DURABLE-001 (REV216-CONTINUOUS-COMPLETION parent loop,
+ * continuation after `ORG-CONFIG-POLICY-CURRENTNESS-001`): `currentKnowledge
+ * EvidenceRefs` now has a real durable source too -
+ * `durable-evidence-reference-store.ts`'s `DurableEvidenceReferenceStore`
+ * supplies the "current" `EvidenceReference` registry
+ * `resolveOrganizationResourceBindingStatus`'s own doc comment names
+ * (`evidence.ts`'s `EvidenceReference` - "plain evidence-id presence").
+ * This adapter lists every evidence reference currently recorded for this
+ * binding's own tenant (the same tenant-scoped-list convention
+ * `currentServicePrincipals`/`currentConnections` already use - the domain
+ * gate itself only checks flat `evidenceId` membership, not a further
+ * customer/project scope) and supplies their `evidenceId`s. This adapter
+ * does not itself call `createEvidenceReference` or record anything -
+ * recording evidence remains whatever other, already-authorized caller's
+ * own responsibility it already was; it only reads what has already been
+ * durably recorded.
+ *
  * Per the Brain's own explicit instruction, this adapter still never
  * manufactures `READY` by inventing current evidence for a dimension that
  * has no durable "current" registry anywhere in this repository:
- * `currentWorkerRouteDecisions` and `currentKnowledgeEvidenceRefs` remain
- * real, honest empty evidence (not a fabricated "all current" claim) -
- * `resolveWorkerRoute` (`worker-routing-policy.ts`) has no durable
- * "admitted worker candidates per route" registry to re-invoke against,
- * and `evidence.ts`'s `EvidenceReference` has no durable store at all yet.
+ * `currentWorkerRouteDecisions` remains real, honest empty evidence (not a
+ * fabricated "all current" claim) - `resolveWorkerRoute`
+ * (`worker-routing-policy.ts`) has no durable "admitted worker candidates
+ * per route" registry to re-invoke against yet.
  * `resolveOrganizationResourceBindingStatus`'s own gates already handle
  * this correctly without any special-casing here: a binding that never
- * referenced one of these two dimensions (`*Refs` is `[]`) skips that gate
+ * referenced a worker route (`workerRouteRefs` is `[]`) skips that gate
  * entirely and can still reach `READY`; a binding that DID reference one
  * (bootstrap-time provenance only, per `organization-resource-binding.ts`'s
  * own Rev183 F2 doc comment) truthfully blocks on that gate forever via
@@ -79,6 +96,7 @@ export function createDurableOrganizationResourceBindingSource(
   projectStore: DurableProjectStore,
   connectorConnectionStore: DurableConnectorConnectionStore,
   configurationPolicyDecisionStore: DurableConfigurationPolicyDecisionStore,
+  evidenceReferenceStore: DurableEvidenceReferenceStore,
 ): OrganizationResourceBindingSource {
   return {
     resolveStatus(organization: Organization): OrganizationResourceBindingStatus | undefined {
@@ -115,6 +133,10 @@ export function createDurableOrganizationResourceBindingSource(
         configPolicyDecisionKey,
       );
 
+      const currentKnowledgeEvidenceRefs = evidenceReferenceStore
+        .listByTenant(organization.tenantId)
+        .map((stored) => stored.evidence.evidenceId);
+
       return resolveOrganizationResourceBindingStatus({
         binding,
         organization,
@@ -125,7 +147,7 @@ export function createDurableOrganizationResourceBindingSource(
         currentEffectiveConfigRefs: activeConfigPolicyDecision?.resolution.effectiveConfigRefs ?? [],
         currentEffectivePolicyRefs: activeConfigPolicyDecision?.resolution.effectivePolicyRefs ?? [],
         currentWorkerRouteDecisions: [],
-        currentKnowledgeEvidenceRefs: [],
+        currentKnowledgeEvidenceRefs,
       });
     },
   };

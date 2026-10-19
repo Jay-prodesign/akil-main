@@ -27,6 +27,9 @@ import { FileDurableProjectStore } from "../src/domain/durable-project-store.js"
 import { FileDurableConnectorConnectionStore } from "../src/domain/durable-connector-connection-store.js";
 import { FileDurableConfigurationPolicyDecisionStore } from "../src/domain/durable-configuration-policy-decision-store.js";
 import { resolveAndProjectConfigurationPolicyDecision } from "../src/domain/resolve-and-project-configuration-policy-decision.js";
+import { FileDurableEvidenceReferenceStore } from "../src/domain/durable-evidence-reference-store.js";
+import { createEvidenceReference } from "../src/domain/evidence.js";
+import { createOutcomeJob } from "../src/domain/outcome-job.js";
 import { createDurableOrganizationResourceBindingSource } from "../src/web/organization-resource-binding-durable-source.js";
 
 /**
@@ -37,8 +40,11 @@ import { createDurableOrganizationResourceBindingSource } from "../src/web/organ
  * `undefined` (never bootstrapped) when no binding exists, and
  * BLOCKED/ACTION_REQUIRED exactly where `resolveOrganizationResourceBindingStatus`'s
  * own gates say so, including dimensions (effective config/policy, worker
- * routes, knowledge evidence, service principals) this adapter deliberately
- * never fabricates current evidence for.
+ * routes, service principals) this adapter deliberately never fabricates
+ * current evidence for, and knowledge evidence - which KNOWLEDGE-EVIDENCE-
+ * DURABLE-001 gave a real durable source, mirroring config/policy's own
+ * "never fabricates READY" + READY-once-recorded + cross-scope-isolation
+ * witness triad.
  */
 
 function freshDir(prefix: string): string {
@@ -100,15 +106,16 @@ function stores(dir: string) {
     projectStore: new FileDurableProjectStore(join(dir, "projects")),
     connectorConnectionStore: new FileDurableConnectorConnectionStore(join(dir, "connectors")),
     configurationPolicyDecisionStore: new FileDurableConfigurationPolicyDecisionStore(join(dir, "config-policy-decisions")),
+    evidenceReferenceStore: new FileDurableEvidenceReferenceStore(join(dir, "evidence-references")),
   };
 }
 
 test("resolveStatus returns undefined when the organization has never been bootstrapped (no binding exists)", () => {
   const dir = freshDir("orbds-undefined-");
   try {
-    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore } = stores(dir);
+    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore } = stores(dir);
     const { organization } = fixture("1");
-    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore);
+    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore);
     assert.equal(source.resolveStatus(organization), undefined);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -118,7 +125,7 @@ test("resolveStatus returns undefined when the organization has never been boots
 test("resolveStatus returns READY end-to-end once binding + current membership + current project are all durably wired", () => {
   const dir = freshDir("orbds-ready-");
   try {
-    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore } = stores(dir);
+    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore } = stores(dir);
     const { tenantScope, organization, membership, project, ownership } = fixture("2");
 
     membershipStore.create(membership);
@@ -132,7 +139,7 @@ test("resolveStatus returns READY end-to-end once binding + current membership +
     });
     bindingStore.putIfAbsent(tenantScope.tenantId, organization.organizationId, binding);
 
-    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore);
+    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore);
     const status = source.resolveStatus(organization);
     assert.equal(status?.state, "READY");
     assert.equal(status?.nextRequiredActor, "NONE");
@@ -145,7 +152,7 @@ test("resolveStatus returns READY end-to-end once binding + current membership +
 test("resolveStatus returns BLOCKED (NO_ACTIVE_BOUND_MEMBERSHIP) once the only bound membership is revoked in the durable membership store", () => {
   const dir = freshDir("orbds-revoked-membership-");
   try {
-    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore } = stores(dir);
+    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore } = stores(dir);
     const { tenantScope, organization, membership, project, ownership } = fixture("3");
 
     membershipStore.create(membership);
@@ -169,7 +176,7 @@ test("resolveStatus returns BLOCKED (NO_ACTIVE_BOUND_MEMBERSHIP) once the only b
       revokedReason: "role ended",
     });
 
-    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore);
+    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore);
     const status = source.resolveStatus(organization);
     assert.equal(status?.state, "BLOCKED");
     assert.deepEqual(status?.unresolvedGates, ["NO_ACTIVE_BOUND_MEMBERSHIP"]);
@@ -181,7 +188,7 @@ test("resolveStatus returns BLOCKED (NO_ACTIVE_BOUND_MEMBERSHIP) once the only b
 test("resolveStatus returns BLOCKED (PROJECT_NOT_CURRENT) when the bound project was never created in the durable project store", () => {
   const dir = freshDir("orbds-missing-project-");
   try {
-    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore } = stores(dir);
+    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore } = stores(dir);
     const { tenantScope, organization, membership, project, ownership } = fixture("4");
 
     membershipStore.create(membership);
@@ -195,7 +202,7 @@ test("resolveStatus returns BLOCKED (PROJECT_NOT_CURRENT) when the bound project
     });
     bindingStore.putIfAbsent(tenantScope.tenantId, organization.organizationId, binding);
 
-    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore);
+    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore);
     const status = source.resolveStatus(organization);
     assert.equal(status?.state, "BLOCKED");
     assert.deepEqual(status?.unresolvedGates, ["PROJECT_NOT_CURRENT"]);
@@ -207,7 +214,7 @@ test("resolveStatus returns BLOCKED (PROJECT_NOT_CURRENT) when the bound project
 test("resolveStatus returns ACTION_REQUIRED (CONNECTION_MISSING) when a bound connectionBindingRef has no corresponding durable record", () => {
   const dir = freshDir("orbds-missing-connection-");
   try {
-    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore } = stores(dir);
+    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore } = stores(dir);
     const { tenantScope, organization, membership, project, ownership } = fixture("5");
 
     membershipStore.create(membership);
@@ -223,7 +230,7 @@ test("resolveStatus returns ACTION_REQUIRED (CONNECTION_MISSING) when a bound co
     bindingStore.putIfAbsent(tenantScope.tenantId, organization.organizationId, binding);
     // Deliberately NOT saved into the durable connector connection store.
 
-    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore);
+    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore);
     const status = source.resolveStatus(organization);
     assert.equal(status?.state, "ACTION_REQUIRED");
     assert.deepEqual(status?.unresolvedGates, ["CONNECTION_MISSING"]);
@@ -235,7 +242,7 @@ test("resolveStatus returns ACTION_REQUIRED (CONNECTION_MISSING) when a bound co
 test("resolveStatus returns READY once the bound connection is durably saved and not revoked/degraded", () => {
   const dir = freshDir("orbds-connection-ready-");
   try {
-    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore } = stores(dir);
+    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore } = stores(dir);
     const { tenantScope, organization, membership, project, ownership } = fixture("6");
 
     membershipStore.create(membership);
@@ -264,7 +271,7 @@ test("resolveStatus returns READY once the bound connection is durably saved and
     });
     bindingStore.putIfAbsent(tenantScope.tenantId, organization.organizationId, binding);
 
-    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore);
+    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore);
     const status = source.resolveStatus(organization);
     assert.equal(status?.state, "READY");
   } finally {
@@ -275,7 +282,7 @@ test("resolveStatus returns READY once the bound connection is durably saved and
 test("never fabricates READY: a binding bootstrapped with non-empty effectiveConfigRefs provenance blocks ACTION_REQUIRED (CONFIG_NOT_CURRENT) until a matching durable decision is recorded for its own scope", () => {
   const dir = freshDir("orbds-config-never-ready-");
   try {
-    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore } = stores(dir);
+    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore } = stores(dir);
     const { tenantScope, organization, membership, project, ownership } = fixture("7");
 
     membershipStore.create(membership);
@@ -291,7 +298,7 @@ test("never fabricates READY: a binding bootstrapped with non-empty effectiveCon
     bindingStore.putIfAbsent(tenantScope.tenantId, organization.organizationId, binding);
     // Deliberately no decision ever recorded in the durable config/policy store.
 
-    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore);
+    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore);
     const status = source.resolveStatus(organization);
     assert.equal(status?.state, "ACTION_REQUIRED");
     assert.deepEqual(status?.unresolvedGates, ["CONFIG_NOT_CURRENT"]);
@@ -303,7 +310,7 @@ test("never fabricates READY: a binding bootstrapped with non-empty effectiveCon
 test("resolveStatus returns READY once a durable config/policy decision for the binding's own project scope resolves the bound effectiveConfigRefs/effectivePolicyRefs", () => {
   const dir = freshDir("orbds-config-ready-");
   try {
-    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore } = stores(dir);
+    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore } = stores(dir);
     const { tenantScope, organization, membership, project, ownership } = fixture("11");
 
     membershipStore.create(membership);
@@ -348,7 +355,7 @@ test("resolveStatus returns READY once a durable config/policy decision for the 
     });
     bindingStore.putIfAbsent(tenantScope.tenantId, organization.organizationId, binding);
 
-    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore);
+    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore);
     const status = source.resolveStatus(organization);
     assert.equal(status?.state, "READY");
     assert.deepEqual(status?.unresolvedGates, []);
@@ -360,7 +367,7 @@ test("resolveStatus returns READY once a durable config/policy decision for the 
 test("resolveStatus returns ACTION_REQUIRED (POLICY_NOT_CURRENT) when the durably-decided policy no longer includes the bound effectivePolicyRef", () => {
   const dir = freshDir("orbds-policy-drifted-");
   try {
-    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore } = stores(dir);
+    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore } = stores(dir);
     const { tenantScope, organization, membership, project, ownership } = fixture("12");
 
     membershipStore.create(membership);
@@ -396,7 +403,7 @@ test("resolveStatus returns ACTION_REQUIRED (POLICY_NOT_CURRENT) when the durabl
     });
     bindingStore.putIfAbsent(tenantScope.tenantId, organization.organizationId, binding);
 
-    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore);
+    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore);
     const status = source.resolveStatus(organization);
     assert.equal(status?.state, "ACTION_REQUIRED");
     assert.deepEqual(status?.unresolvedGates, ["POLICY_NOT_CURRENT"]);
@@ -408,7 +415,7 @@ test("resolveStatus returns ACTION_REQUIRED (POLICY_NOT_CURRENT) when the durabl
 test("a config/policy decision recorded for a DIFFERENT organization's project scope does not satisfy this binding's own bound effectiveConfigRefs (cross-scope isolation)", () => {
   const dir = freshDir("orbds-config-cross-scope-");
   try {
-    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore } = stores(dir);
+    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore } = stores(dir);
     const { tenantScope, organization, membership, project, ownership } = fixture("13");
     const other = fixture("13-other");
 
@@ -446,7 +453,7 @@ test("a config/policy decision recorded for a DIFFERENT organization's project s
     });
     bindingStore.putIfAbsent(tenantScope.tenantId, organization.organizationId, binding);
 
-    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore);
+    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore);
     const status = source.resolveStatus(organization);
     assert.equal(status?.state, "ACTION_REQUIRED");
     assert.deepEqual(status?.unresolvedGates, ["CONFIG_NOT_CURRENT"]);
@@ -458,7 +465,7 @@ test("a config/policy decision recorded for a DIFFERENT organization's project s
 test("resolveStatus returns ACTION_REQUIRED (SERVICE_PRINCIPAL_MISSING) when a bound servicePrincipalRef has no corresponding durable record", () => {
   const dir = freshDir("orbds-missing-service-principal-");
   try {
-    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore } = stores(dir);
+    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore } = stores(dir);
     const { tenantScope, organization, membership, project, ownership } = fixture("8");
 
     membershipStore.create(membership);
@@ -479,7 +486,7 @@ test("resolveStatus returns ACTION_REQUIRED (SERVICE_PRINCIPAL_MISSING) when a b
     bindingStore.putIfAbsent(tenantScope.tenantId, organization.organizationId, binding);
     // Deliberately NOT saved into the durable service-principal store.
 
-    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore);
+    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore);
     const status = source.resolveStatus(organization);
     assert.equal(status?.state, "ACTION_REQUIRED");
     assert.deepEqual(status?.unresolvedGates, ["SERVICE_PRINCIPAL_MISSING"]);
@@ -491,7 +498,7 @@ test("resolveStatus returns ACTION_REQUIRED (SERVICE_PRINCIPAL_MISSING) when a b
 test("resolveStatus returns READY once the bound service principal is durably saved and active", () => {
   const dir = freshDir("orbds-service-principal-ready-");
   try {
-    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore } = stores(dir);
+    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore } = stores(dir);
     const { tenantScope, organization, membership, project, ownership } = fixture("9");
 
     membershipStore.create(membership);
@@ -512,7 +519,7 @@ test("resolveStatus returns READY once the bound service principal is durably sa
     });
     bindingStore.putIfAbsent(tenantScope.tenantId, organization.organizationId, binding);
 
-    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore);
+    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore);
     const status = source.resolveStatus(organization);
     assert.equal(status?.state, "READY");
   } finally {
@@ -523,7 +530,7 @@ test("resolveStatus returns READY once the bound service principal is durably sa
 test("resolveStatus returns ACTION_REQUIRED (SERVICE_PRINCIPAL_REVOKED) once the bound service principal is revoked in the durable store", () => {
   const dir = freshDir("orbds-revoked-service-principal-");
   try {
-    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore } = stores(dir);
+    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore } = stores(dir);
     const { tenantScope, organization, membership, project, ownership } = fixture("10");
 
     membershipStore.create(membership);
@@ -552,10 +559,131 @@ test("resolveStatus returns ACTION_REQUIRED (SERVICE_PRINCIPAL_REVOKED) once the
       revokedReason: "worker decommissioned",
     });
 
-    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore);
+    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore);
     const status = source.resolveStatus(organization);
     assert.equal(status?.state, "ACTION_REQUIRED");
     assert.deepEqual(status?.unresolvedGates, ["SERVICE_PRINCIPAL_REVOKED"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("never fabricates READY: a binding bootstrapped with non-empty knowledgeEvidenceRefs provenance blocks ACTION_REQUIRED (KNOWLEDGE_EVIDENCE_MISSING) until matching evidence is durably recorded", () => {
+  const dir = freshDir("orbds-evidence-never-ready-");
+  try {
+    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore } = stores(dir);
+    const { tenantScope, organization, membership, project, ownership } = fixture("14");
+
+    membershipStore.create(membership);
+    projectStore.create(project);
+    const binding = createOrganizationResourceBinding({
+      organization,
+      memberships: [membership],
+      project,
+      ownership,
+      knowledgeEvidenceRefs: ["ev-bootstrap-provenance-only"],
+      boundAt: "2026-01-02T00:00:00.000Z",
+    });
+    bindingStore.putIfAbsent(tenantScope.tenantId, organization.organizationId, binding);
+    // Deliberately no evidence ever recorded in the durable evidence store.
+
+    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore);
+    const status = source.resolveStatus(organization);
+    assert.equal(status?.state, "ACTION_REQUIRED");
+    assert.deepEqual(status?.unresolvedGates, ["KNOWLEDGE_EVIDENCE_MISSING"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveStatus returns READY once the bound knowledgeEvidenceRefs are durably recorded as evidence references for this binding's own tenant", () => {
+  const dir = freshDir("orbds-evidence-ready-");
+  try {
+    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore } = stores(dir);
+    const { tenantScope, customer, organization, membership, project, ownership } = fixture("15");
+
+    membershipStore.create(membership);
+    projectStore.create(project);
+
+    const job = createOutcomeJob({
+      tenantScope,
+      customer,
+      project,
+      jobId: "job-orbds-15",
+      jobFamily: "family-x",
+      businessObjective: "prove evidence currentness",
+    });
+    const evidence = createEvidenceReference({
+      job,
+      evidenceId: "ev-orbds-15",
+      evidenceType: "VERIFICATION_ARTIFACT",
+      sourceLocator: "https://example.invalid/evidence/15",
+      capturedAt: "2026-01-02T00:00:00.000Z",
+    });
+    evidenceReferenceStore.record(evidence);
+
+    const binding = createOrganizationResourceBinding({
+      organization,
+      memberships: [membership],
+      project,
+      ownership,
+      knowledgeEvidenceRefs: [evidence.evidenceId],
+      boundAt: "2026-01-02T00:00:00.000Z",
+    });
+    bindingStore.putIfAbsent(tenantScope.tenantId, organization.organizationId, binding);
+
+    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore);
+    const status = source.resolveStatus(organization);
+    assert.equal(status?.state, "READY");
+    assert.deepEqual(status?.unresolvedGates, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an evidence reference recorded for a DIFFERENT tenant does not satisfy this binding's own bound knowledgeEvidenceRefs (cross-tenant isolation)", () => {
+  const dir = freshDir("orbds-evidence-cross-tenant-");
+  try {
+    const { bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore } = stores(dir);
+    const { tenantScope, organization, membership, project, ownership } = fixture("16");
+    const other = fixture("16-other");
+
+    membershipStore.create(membership);
+    projectStore.create(project);
+
+    // Recorded under a DIFFERENT tenant's own evidence file, coincidentally
+    // reusing the same evidenceId string this binding references.
+    const otherJob = createOutcomeJob({
+      tenantScope: other.tenantScope,
+      customer: other.customer,
+      project: other.project,
+      jobId: "job-orbds-16-other",
+      jobFamily: "family-x",
+      businessObjective: "prove cross-tenant evidence isolation",
+    });
+    const foreignEvidence = createEvidenceReference({
+      job: otherJob,
+      evidenceId: "ev-orbds-16-shared-id",
+      evidenceType: "VERIFICATION_ARTIFACT",
+      sourceLocator: "https://example.invalid/evidence/16-other",
+      capturedAt: "2026-01-02T00:00:00.000Z",
+    });
+    evidenceReferenceStore.record(foreignEvidence);
+
+    const binding = createOrganizationResourceBinding({
+      organization,
+      memberships: [membership],
+      project,
+      ownership,
+      knowledgeEvidenceRefs: ["ev-orbds-16-shared-id"],
+      boundAt: "2026-01-02T00:00:00.000Z",
+    });
+    bindingStore.putIfAbsent(tenantScope.tenantId, organization.organizationId, binding);
+
+    const source = createDurableOrganizationResourceBindingSource(bindingStore, membershipStore, servicePrincipalStore, projectStore, connectorConnectionStore, configurationPolicyDecisionStore, evidenceReferenceStore);
+    const status = source.resolveStatus(organization);
+    assert.equal(status?.state, "ACTION_REQUIRED");
+    assert.deepEqual(status?.unresolvedGates, ["KNOWLEDGE_EVIDENCE_MISSING"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
