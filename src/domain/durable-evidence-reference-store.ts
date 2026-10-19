@@ -41,6 +41,13 @@ import type { EvidenceReference } from "./evidence.js";
  * and ONE shared `coherenceViolation` check run at BOTH the write boundary
  * (`record`, before any persistence) and on replay, so the two paths can
  * never semantically diverge.
+ *
+ * CI correction (same real-world hazard a multi-process race test exposed
+ * in `durable-project-store.ts`): `get`/`listByTenant` acquire the same
+ * per-tenant `withTenantLock` as `record` - an unlocked reader could
+ * otherwise observe a torn file mid-write from a concurrent writer
+ * (`writeFileSync`'s truncate-then-write is not atomic). Readers and
+ * writers share one mutual exclusion, not just writer-vs-writer.
  */
 
 export class InvalidEvidenceReferenceStoreError extends Error {
@@ -384,10 +391,10 @@ export class FileDurableEvidenceReferenceStore implements DurableEvidenceReferen
     tenantId: TenantScope["tenantId"],
     evidenceId: EvidenceReference["evidenceId"],
   ): StoredEvidenceReference | undefined {
-    return this.readAll(tenantId)[evidenceId];
+    return this.withTenantLock(tenantId, () => this.readAll(tenantId)[evidenceId]);
   }
 
   listByTenant(tenantId: TenantScope["tenantId"]): ReadonlyArray<StoredEvidenceReference> {
-    return Object.values(this.readAll(tenantId));
+    return this.withTenantLock(tenantId, () => Object.values(this.readAll(tenantId)));
   }
 }

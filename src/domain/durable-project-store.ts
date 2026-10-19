@@ -50,6 +50,16 @@ import type { Project } from "./project.js";
  * produce the same encoded array, so two different projects can never
  * collide onto the same storage key regardless of what characters either
  * field contains.
+ *
+ * CI correction (real multi-process race, `durable-project-store-
+ * concurrency.test.ts`): `get`/`listByCustomer`/`listByTenant` previously
+ * read the tenant file WITHOUT acquiring `withTenantLock` - only `create`/
+ * `update` did. `writeFileSync`'s truncate-then-write is not atomic, so an
+ * unlocked reader could observe a torn file mid-write from a concurrent
+ * locked writer (`CorruptedProjectFileError`, "file is not valid JSON").
+ * Local single-process test runs never hit this window; a real OS-level
+ * five-process CI run did. All four methods now share the same per-tenant
+ * mutual exclusion - readers and writers, not just writer-vs-writer.
  */
 
 export class InvalidProjectStoreError extends Error {
@@ -439,17 +449,19 @@ export class FileDurableProjectStore implements DurableProjectStore {
     customerId: Customer["customerId"],
     projectId: Project["projectId"],
   ): StoredProject | undefined {
-    return this.readAll(tenantId)[compoundKeyFor(customerId, projectId)];
+    return this.withTenantLock(tenantId, () => this.readAll(tenantId)[compoundKeyFor(customerId, projectId)]);
   }
 
   listByCustomer(
     tenantId: TenantScope["tenantId"],
     customerId: Customer["customerId"],
   ): ReadonlyArray<StoredProject> {
-    return Object.values(this.readAll(tenantId)).filter((stored) => stored.project.customerId === customerId);
+    return this.withTenantLock(tenantId, () =>
+      Object.values(this.readAll(tenantId)).filter((stored) => stored.project.customerId === customerId),
+    );
   }
 
   listByTenant(tenantId: TenantScope["tenantId"]): ReadonlyArray<StoredProject> {
-    return Object.values(this.readAll(tenantId));
+    return this.withTenantLock(tenantId, () => Object.values(this.readAll(tenantId)));
   }
 }
