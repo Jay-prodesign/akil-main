@@ -1,12 +1,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FileDurableEngineeringStore } from "../src/domain/durable-engineering-store.js";
+import {
+  FileDurableEngineeringStore,
+  CorruptedEngineeringEventLineError,
+} from "../src/domain/durable-engineering-store.js";
 import type { TaskId, RunId } from "../src/domain/engineering-event-envelope.js";
 import { invokeSafely, type WorkerInvoker } from "../src/domain/worker-invoker.js";
-import { makeEvent } from "./helpers/engineering-event-helpers.js";
+import { makeEvent, testProvenance } from "./helpers/engineering-event-helpers.js";
+
+function runFilePath(dir: string, projectRef: string, taskId: string, runId: string): string {
+  const safeKey = Buffer.from(JSON.stringify([projectRef, taskId, runId]), "utf8").toString("base64url");
+  return join(dir, `${safeKey}.jsonl`);
+}
 
 const branch = "claude/ENG-ORCH-001-task-packet";
 const baseSha = "base-sha-1";
@@ -255,6 +263,97 @@ test("CXP-001U: distinct (projectRef, taskId, runId) tuples whose components str
     assert.equal(stateB?.checkpointSha, "checkpoint-sha-tuple-b");
     assert.equal(store.getEvents(projectRefA, taskIdA, sharedRunId).length, 1);
     assert.equal(store.getEvents(projectRefB, taskIdB, sharedRunId).length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- AUD-DURABILITY-GAP-V2 (re-derived): fail-closed replay validation ---
+
+test("corrupted: a non-JSON line throws CorruptedEngineeringEventLineError", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableEngineeringStore(dir);
+    store.appendEvent(makeEvent({ fencingToken: 1 }));
+    writeFileSync(runFilePath(dir, "AKILTA", TASK_ID, RUN_1), "{ not valid json\n", "utf8");
+    assert.throws(() => store.getEvents("AKILTA", TASK_ID, RUN_1), CorruptedEngineeringEventLineError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("corrupted: a JSON array instead of an object line throws", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableEngineeringStore(dir);
+    store.appendEvent(makeEvent({ fencingToken: 1 }));
+    writeFileSync(runFilePath(dir, "AKILTA", TASK_ID, RUN_1), "[]\n", "utf8");
+    assert.throws(() => store.getEvents("AKILTA", TASK_ID, RUN_1), CorruptedEngineeringEventLineError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("corrupted: a missing provenance object throws", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableEngineeringStore(dir);
+    const event = makeEvent({ fencingToken: 1 });
+    const tampered = { ...event, provenance: "not-an-object" };
+    writeFileSync(runFilePath(dir, "AKILTA", TASK_ID, RUN_1), `${JSON.stringify(tampered)}\n`, "utf8");
+    assert.throws(() => store.getEvents("AKILTA", TASK_ID, RUN_1), CorruptedEngineeringEventLineError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("corrupted: an envelope field violating createEngineeringEventEnvelope's own invariants (whitespace-padded correlationId) throws", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableEngineeringStore(dir);
+    const event = makeEvent({ fencingToken: 1 });
+    const tampered = { ...event, correlationId: "  padded  " };
+    writeFileSync(runFilePath(dir, "AKILTA", TASK_ID, RUN_1), `${JSON.stringify(tampered)}\n`, "utf8");
+    assert.throws(() => store.getEvents("AKILTA", TASK_ID, RUN_1), CorruptedEngineeringEventLineError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("corrupted: a provenance field violating createDec138Provenance's own invariants (empty repository) throws", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableEngineeringStore(dir);
+    const event = makeEvent({ fencingToken: 1 });
+    const tampered = { ...event, provenance: { ...testProvenance(), repository: "" } };
+    writeFileSync(runFilePath(dir, "AKILTA", TASK_ID, RUN_1), `${JSON.stringify(tampered)}\n`, "utf8");
+    assert.throws(() => store.getEvents("AKILTA", TASK_ID, RUN_1), CorruptedEngineeringEventLineError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("corrupted: cross-run contamination (embedded runId does not match the file's own run identity) throws", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableEngineeringStore(dir);
+    const event = makeEvent({ fencingToken: 1 });
+    const tampered = { ...event, runId: "a-different-run" };
+    writeFileSync(runFilePath(dir, "AKILTA", TASK_ID, RUN_1), `${JSON.stringify(tampered)}\n`, "utf8");
+    assert.throws(() => store.getEvents("AKILTA", TASK_ID, RUN_1), CorruptedEngineeringEventLineError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("positive control: a well-formed persisted event still passes replay revalidation and round-trips exactly", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableEngineeringStore(dir);
+    store.appendEvent(makeEvent({ eventId: "evt-good", fencingToken: 1 }));
+    const events = store.getEvents("AKILTA", TASK_ID, RUN_1);
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.eventId, "evt-good");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
