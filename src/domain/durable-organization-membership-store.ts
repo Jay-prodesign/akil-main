@@ -66,6 +66,13 @@ import {
  * structural/lifecycle invariants `validatePersistedOrganizationMembership`
  * already enforced on replay - and running it in `create` BEFORE the lock
  * is even acquired, so a rejected call commits zero bytes and zero state.
+ *
+ * CI/Brain correction (PR #167 batch-merge-review, systemic torn-read
+ * finding): `get`/`listByTenant` now acquire the same per-tenant
+ * `withTenantLock` as `create`/`revoke`. `writeAll`'s `writeFileSync` is a
+ * whole-file truncate-then-write, not atomic - an unlocked reader could
+ * observe a torn file mid-write from a concurrent locked writer. Readers
+ * and writers now share one mutual exclusion, not just writer-vs-writer.
  */
 
 export class InvalidOrganizationMembershipStoreError extends Error {
@@ -536,10 +543,10 @@ export class FileDurableOrganizationMembershipStore implements DurableOrganizati
     tenantId: TenantScope["tenantId"],
     membershipId: OrganizationMembership["membershipId"],
   ): StoredOrganizationMembership | undefined {
-    return this.readAll(tenantId)[membershipId];
+    return this.withTenantLock(tenantId, () => this.readAll(tenantId)[membershipId]);
   }
 
   listByTenant(tenantId: TenantScope["tenantId"]): ReadonlyArray<StoredOrganizationMembership> {
-    return Object.values(this.readAll(tenantId));
+    return this.withTenantLock(tenantId, () => Object.values(this.readAll(tenantId)));
   }
 }

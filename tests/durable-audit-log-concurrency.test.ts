@@ -135,6 +135,66 @@ test(
 );
 
 test(
+  "KNOWLEDGE-EVIDENCE-DURABLE-001 CI correction: findByTenant() reads interleaved WHILE real OS-level writer processes are still mid-append never observe a torn file (the 'global-index+tenant-file' pattern, per Brain's own named class)",
+  { timeout: 30_000 },
+  async () => {
+    const storeDir = freshDir("audit-log-durable-readrace-");
+    const readyDir = freshDir("audit-log-durable-readrace-ready-");
+    const goFile = join(freshDir("audit-log-durable-readrace-go-"), "go");
+    try {
+      const tenantScope = createTenantScope("tenant-audit-log-readrace");
+      const WORKER_LABELS = ["A", "B", "C", "D", "E"];
+      const workerPromises = WORKER_LABELS.map((label) => {
+        const readyFile = join(readyDir, `${label}.ready`);
+        return runWorker([storeDir, readyFile, goFile, tenantScope.tenantId, `evt-readrace-${label}`, label]);
+      });
+
+      const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
+      const readyDeadline = Date.now() + 10_000;
+      for (const label of WORKER_LABELS) {
+        const readyFile = join(readyDir, `${label}.ready`);
+        while (!existsSync(readyFile)) {
+          if (Date.now() > readyDeadline) {
+            throw new Error(`worker ${label} never announced readiness`);
+          }
+          Atomics.wait(sleepBuffer, 0, 0, 1);
+        }
+      }
+      mkdirSync(dirname(goFile), { recursive: true });
+      writeFileSync(goFile, "go", "utf8");
+
+      // Race a real reader (this process) against the five real writer
+      // processes - reads here happen WHILE appends may be mid-flight in
+      // another OS process, not only after they all complete.
+      const readerLog = new FileDurableAuditLog(storeDir);
+      let readCount = 0;
+      const readerDeadline = Date.now() + 5_000;
+      while (Date.now() < readerDeadline) {
+        readerLog.findByTenant(tenantScope);
+        readCount += 1;
+        Atomics.wait(sleepBuffer, 0, 0, 1);
+      }
+      assert.ok(readCount > 0, "the reader loop never actually ran");
+
+      const results = await Promise.all(workerPromises);
+      assert.equal(results.length, WORKER_LABELS.length);
+
+      const finalEvents = readerLog.findByTenant(tenantScope);
+      for (const label of WORKER_LABELS) {
+        assert.ok(
+          finalEvents.some((event) => event.eventId === `evt-readrace-${label}`),
+          `worker ${label}'s audit event was lost`,
+        );
+      }
+    } finally {
+      rmSync(storeDir, { recursive: true, force: true });
+      rmSync(readyDir, { recursive: true, force: true });
+      rmSync(dirname(goFile), { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   "REV216/AUDIT-DURABLE-001 F1: real OS-level concurrent writer processes in DIFFERENT tenants appending the SAME eventId - exactly one succeeds, every other fails closed with DuplicateAuditEventError, proving the global cross-tenant lock closes the race Brain named",
   { timeout: 30_000 },
   async () => {

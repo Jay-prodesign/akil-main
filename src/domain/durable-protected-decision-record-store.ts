@@ -130,12 +130,15 @@ export interface DurableProtectedDecisionRecordStore {
 
 export class FileDurableProtectedDecisionRecordStore implements DurableProtectedDecisionRecordStore {
   private readonly baseDir: string;
+  private static readonly LOCK_RETRY_BACKOFF_MS = 5;
+  private static readonly MAX_LOCK_ATTEMPTS = 1000;
 
   constructor(baseDir: string) {
     this.baseDir = baseDir;
     mkdirSync(this.baseDir, { recursive: true });
     mkdirSync(this.creationLockDir(), { recursive: true });
     mkdirSync(this.revisionLockDir(), { recursive: true });
+    mkdirSync(this.fileLockDir(), { recursive: true });
   }
 
   private filePathFor(tenantId: TenantScope["tenantId"]): string {
@@ -161,6 +164,94 @@ export class FileDurableProtectedDecisionRecordStore implements DurableProtected
     const tenantKey = Buffer.from(tenantId, "utf8").toString("base64url");
     const decisionKey = Buffer.from(decisionRef, "utf8").toString("base64url");
     return join(this.revisionLockDir(), `${tenantKey}.${decisionKey}.lock`);
+  }
+
+  private fileLockDir(): string {
+    return join(this.baseDir, ".decision-file-locks");
+  }
+
+  private fileLockPathFor(tenantId: TenantScope["tenantId"]): string {
+    const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
+    return join(this.fileLockDir(), `${safeKey}.lock`);
+  }
+
+  /**
+   * CI/Brain correction (PR #167 batch-merge-review, systemic torn-read
+   * finding): the per-decisionRef creation/revision locks correctly
+   * arbitrate "exactly one winner," but do not coordinate access to the
+   * shared per-tenant `.jsonl` file itself, which every winner's
+   * `appendFileSync` call writes to, and `getDecisionRecord`/`readAll`
+   * read lock-free. This second, coarser `linkSync` lock - Rev94 F1's
+   * exact primitive, cloned verbatim - is keyed by `tenantId` alone (the
+   * shared file's own identity) and is acquired by every read
+   * (`getDecisionRecord`) and by each individual `appendFileSync` call (not
+   * the per-decisionRef creation/revision lock dances, which need no
+   * tenant-file coordination of their own and must not be nested inside
+   * this lock). Readers and every tenant-file writer now share one mutual
+   * exclusion.
+   *
+   * Epistemic note: this store shares the exact same append-log primitive
+   * as `durable-organization-resource-binding-store.ts`, whose own
+   * dedicated multi-process witness
+   * (`durable-organization-resource-binding-store-concurrency.test.ts`)
+   * did not force a reproducible corruption locally even without this
+   * lock - the same evidentiary position the Project-store defect was in
+   * before a real CI run (never a local one) exposed it. The lock is kept
+   * rather than removed on an unproven atomicity assumption.
+   */
+  private withTenantFileLock<T>(tenantId: TenantScope["tenantId"], criticalSection: () => T): T {
+    const lockPath = this.fileLockPathFor(tenantId);
+    const tmpPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(tmpPath, String(process.pid), "utf8");
+    let attempts = 0;
+    for (;;) {
+      try {
+        linkSync(tmpPath, lockPath);
+        break;
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "EEXIST") {
+          try {
+            unlinkSync(tmpPath);
+          } catch {
+            // best-effort cleanup only
+          }
+          throw cause;
+        }
+        attempts += 1;
+        if (attempts >= FileDurableProtectedDecisionRecordStore.MAX_LOCK_ATTEMPTS) {
+          try {
+            unlinkSync(tmpPath);
+          } catch {
+            // best-effort cleanup only
+          }
+          throw new InvalidDurableProtectedDecisionRecordStoreError(
+            `timed out waiting for the durable protected-decision-record file lock for tenant "${tenantId}"`,
+          );
+        }
+        Atomics.wait(
+          new Int32Array(new SharedArrayBuffer(4)),
+          0,
+          0,
+          FileDurableProtectedDecisionRecordStore.LOCK_RETRY_BACKOFF_MS,
+        );
+      }
+    }
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // best-effort cleanup only - lockPath (the hard-linked copy) is what
+      // actually arbitrates ownership from here on.
+    }
+    try {
+      return criticalSection();
+    } finally {
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // best-effort: a stuck lock is bounded for the next acquirer by
+        // the caller-visible timeout above, not a permanent deadlock.
+      }
+    }
   }
 
   private readAll(tenantId: TenantScope["tenantId"]): Array<{ decisionRef: string; record: ProtectedDecisionRecord }> {
@@ -251,12 +342,12 @@ export class FileDurableProtectedDecisionRecordStore implements DurableProtected
         );
       }
       if (this.getDecisionRecord(tenantId, decisionRef) === undefined) {
-        appendFileSync(this.filePathFor(tenantId), `${winnerRaw}\n`, "utf8");
+        this.withTenantFileLock(tenantId, () => appendFileSync(this.filePathFor(tenantId), `${winnerRaw}\n`, "utf8"));
       }
       return { value: winner.record, created: false };
     }
 
-    appendFileSync(this.filePathFor(tenantId), `${payload}\n`, "utf8");
+    this.withTenantFileLock(tenantId, () => appendFileSync(this.filePathFor(tenantId), `${payload}\n`, "utf8"));
     return { value: record, created: true };
   }
 
@@ -336,16 +427,16 @@ export class FileDurableProtectedDecisionRecordStore implements DurableProtected
       }
       const latestNow = this.getDecisionRecord(tenantId, decisionRef);
       if (latestNow === undefined || latestNow.outcome !== "REVOKED") {
-        appendFileSync(this.filePathFor(tenantId), `${winnerRaw}\n`, "utf8");
+        this.withTenantFileLock(tenantId, () => appendFileSync(this.filePathFor(tenantId), `${winnerRaw}\n`, "utf8"));
       }
       return { value: winner.record, created: false };
     }
 
-    appendFileSync(this.filePathFor(tenantId), `${payload}\n`, "utf8");
+    this.withTenantFileLock(tenantId, () => appendFileSync(this.filePathFor(tenantId), `${payload}\n`, "utf8"));
     return { value: revision, created: true };
   }
 
   getDecisionRecord(tenantId: TenantScope["tenantId"], decisionRef: string): ProtectedDecisionRecord | undefined {
-    return this.dedupedByDecisionRef(this.readAll(tenantId)).get(decisionRef);
+    return this.withTenantFileLock(tenantId, () => this.dedupedByDecisionRef(this.readAll(tenantId)).get(decisionRef));
   }
 }

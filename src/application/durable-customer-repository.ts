@@ -49,6 +49,13 @@ import type { CustomerRepository } from "../ports/customer-repository.js";
  * `customer.ts`'s own `createCustomer` already enforces at construction
  * time (`value.trim() !== value` fails closed on replay too), not merely
  * "non-empty."
+ *
+ * CI/Brain correction (PR #167 batch-merge-review, systemic torn-read
+ * finding): `findByTenantAndId` now acquires the same per-tenant
+ * `withTenantLock` as `save`. `writeAll`'s `writeFileSync` is a whole-file
+ * truncate-then-write, not atomic - an unlocked reader could observe a
+ * torn file mid-write from a concurrent locked writer. Readers and
+ * writers now share one mutual exclusion, not just writer-vs-writer.
  */
 
 export class CorruptedCustomerRecordFileError extends Error {
@@ -280,6 +287,6 @@ export class FileDurableCustomerRepository implements CustomerRepository {
     tenantScope: TenantScope,
     customerId: Customer["customerId"],
   ): Customer | undefined {
-    return this.readAll(tenantScope.tenantId)[customerId];
+    return this.withTenantLock(tenantScope.tenantId, () => this.readAll(tenantScope.tenantId)[customerId]);
   }
 }

@@ -68,6 +68,20 @@ import type { AuditLog } from "../ports/audit-log.js";
  * serializes every append in-process. `findByTenant` is entirely
  * unaffected - reads remain lock-free, single-tenant-file reads, so
  * tenant read isolation is not weakened by this fix.
+ *
+ * CI/Brain correction (PR #167 batch-merge-review, systemic torn-read
+ * finding): the claim directly above - that `findByTenant` reads stay
+ * lock-free with no correctness cost - was itself the gap. `writeAll`'s
+ * `writeFileSync` inside `append`'s global lock is a whole-file truncate-
+ * then-write, not atomic, so a lock-free `findByTenant` could observe a
+ * torn tenant file mid-write from a concurrent locked `append`.
+ * `findByTenant` now acquires the same `withGlobalLock` `append` already
+ * uses (this store has no per-tenant lock to reuse instead - uniqueness is
+ * global, so the one lock already serializes every write). This does mean
+ * a read briefly serializes behind writes from OTHER tenants too, exactly
+ * as appends already did; it does not weaken tenant read ISOLATION, which
+ * was never about lock scope - only read SAFETY under concurrency, which
+ * this closes.
  */
 
 export class CorruptedAuditEventRecordFileError extends Error {
@@ -314,6 +328,6 @@ export class FileDurableAuditLog implements AuditLog {
   }
 
   findByTenant(tenantScope: TenantScope): ReadonlyArray<AuditEvent> {
-    return this.readAll(tenantScope.tenantId);
+    return this.withGlobalLock(() => this.readAll(tenantScope.tenantId));
   }
 }

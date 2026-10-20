@@ -109,6 +109,13 @@ export class ConnectorConnectionLockTimeoutError extends Error {
  * observe a half-acquired lock. Only one process can ever be inside the
  * critical section for a given tenant at a time, so the version check and
  * the write it gates can never be split across two racing processes.
+ *
+ * CI/Brain correction (PR #167 batch-merge-review, systemic torn-read
+ * finding): `get`/`list` now acquire that same `withTenantLock` too -
+ * previously only `save` did. `writeAll`'s `writeFileSync` is a whole-file
+ * truncate-then-write, not atomic, so an unlocked reader could still
+ * observe a torn file mid-write from a concurrent locked `save`. Readers
+ * and writers now share one mutual exclusion, not just writer-vs-writer.
  */
 function ownershipEquals(a: ProjectOwnershipRef, b: ProjectOwnershipRef): boolean {
   return (
@@ -551,10 +558,10 @@ export class FileDurableConnectorConnectionStore implements DurableConnectorConn
     tenantId: TenantScope["tenantId"],
     connectionBindingId: ConnectionBinding["connectionBindingId"],
   ): StoredConnectorConnection | undefined {
-    return this.readAll(tenantId)[connectionBindingId];
+    return this.withTenantLock(tenantId, () => this.readAll(tenantId)[connectionBindingId]);
   }
 
   list(tenantId: TenantScope["tenantId"]): ReadonlyArray<StoredConnectorConnection> {
-    return Object.values(this.readAll(tenantId));
+    return this.withTenantLock(tenantId, () => Object.values(this.readAll(tenantId)));
   }
 }

@@ -47,6 +47,14 @@ import type {
  * tenant/customer/request identity - so an accidental `requestId`
  * collision between two different customers' requests can never let one
  * silently co-opt or clobber the other.
+ *
+ * CI/Brain correction (PR #167 batch-merge-review, systemic torn-read
+ * finding): `get`/`list`/`listPending` now acquire the same per-tenant
+ * `withTenantLock` as `create`/`transitionToTerminal`. `writeAll`'s
+ * `writeFileSync` is a whole-file truncate-then-write, not atomic - an
+ * unlocked reader could observe a torn file mid-write from a concurrent
+ * locked writer. Readers and writers now share one mutual exclusion, not
+ * just writer-vs-writer.
  */
 
 export class InvalidCustomerOffboardingRequestStoreError extends Error {
@@ -500,11 +508,11 @@ export class FileDurableCustomerOffboardingRequestStore implements DurableCustom
     tenantId: TenantScope["tenantId"],
     requestId: CustomerOffboardingRequestId,
   ): StoredCustomerOffboardingRequest | undefined {
-    return this.readAll(tenantId)[requestId];
+    return this.withTenantLock(tenantId, () => this.readAll(tenantId)[requestId]);
   }
 
   list(tenantId: TenantScope["tenantId"]): ReadonlyArray<StoredCustomerOffboardingRequest> {
-    return Object.values(this.readAll(tenantId));
+    return this.withTenantLock(tenantId, () => Object.values(this.readAll(tenantId)));
   }
 
   listPending(tenantId: TenantScope["tenantId"]): ReadonlyArray<StoredCustomerOffboardingRequest> {

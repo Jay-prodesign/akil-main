@@ -44,6 +44,13 @@ import {
  * version guard that closes the one genuine concurrency hazard a bare
  * in-memory caller cannot - two processes racing to revoke the SAME
  * service principal at the same time.
+ *
+ * CI/Brain correction (PR #167 batch-merge-review, systemic torn-read
+ * finding): `get`/`listByTenant` now acquire the same per-tenant
+ * `withTenantLock` as `create`/`revoke`. `writeAll`'s `writeFileSync` is a
+ * whole-file truncate-then-write, not atomic - an unlocked reader could
+ * observe a torn file mid-write from a concurrent locked writer. Readers
+ * and writers now share one mutual exclusion, not just writer-vs-writer.
  */
 
 export class InvalidOrganizationServicePrincipalStoreError extends Error {
@@ -480,10 +487,10 @@ export class FileDurableOrganizationServicePrincipalStore implements DurableOrga
     tenantId: TenantScope["tenantId"],
     servicePrincipalId: OrganizationServicePrincipal["servicePrincipalId"],
   ): StoredOrganizationServicePrincipal | undefined {
-    return this.readAll(tenantId)[servicePrincipalId];
+    return this.withTenantLock(tenantId, () => this.readAll(tenantId)[servicePrincipalId]);
   }
 
   listByTenant(tenantId: TenantScope["tenantId"]): ReadonlyArray<StoredOrganizationServicePrincipal> {
-    return Object.values(this.readAll(tenantId));
+    return this.withTenantLock(tenantId, () => Object.values(this.readAll(tenantId)));
   }
 }
