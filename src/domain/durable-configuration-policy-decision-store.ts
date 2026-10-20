@@ -144,11 +144,14 @@ export interface DurableConfigurationPolicyDecisionStore {
 
 export class FileDurableConfigurationPolicyDecisionStore implements DurableConfigurationPolicyDecisionStore {
   private readonly baseDir: string;
+  private static readonly LOCK_RETRY_BACKOFF_MS = 5;
+  private static readonly MAX_LOCK_ATTEMPTS = 1000;
 
   constructor(baseDir: string) {
     this.baseDir = baseDir;
     mkdirSync(this.baseDir, { recursive: true });
     mkdirSync(this.appendLockDir(), { recursive: true });
+    mkdirSync(this.fileLockDir(), { recursive: true });
   }
 
   private filePathFor(tenantId: TenantScope["tenantId"], decisionKey: string): string {
@@ -168,7 +171,132 @@ export class FileDurableConfigurationPolicyDecisionStore implements DurableConfi
     return join(this.appendLockDir(), `${tenantKey}.${decisionKeyEncoded}.${decisionIdKey}.lock`);
   }
 
+  private fileLockDir(): string {
+    return join(this.baseDir, ".decision-log-file-locks");
+  }
+
+  /**
+   * CI/Brain correction (PR #167 batch-merge-review, systemic torn-read
+   * finding, flagged by name for this store specifically - "the current
+   * append lock is keyed by decisionId rather than the shared decision-log
+   * file/decisionKey"): the pre-existing `appendLockPathFor` lock is keyed
+   * by `(tenantId, decisionKey, decisionId)` - it proves exactly one
+   * durable winner's content for a given `decisionId` (an idempotency
+   * guard), but does NOT serialize access to the shared decision-log FILE
+   * itself, which is keyed only by `(tenantId, decisionKey)` and can have
+   * many different `decisionId`s appended to it over its lifetime. Two
+   * different `decisionId`s' winning writers, or a writer and a reader,
+   * could therefore still race on the same file. This second, coarser
+   * `linkSync` lock is keyed by `(tenantId, decisionKey)` - the shared
+   * file's own identity - and is acquired by BOTH every read method (via
+   * `readAll`) and the entirety of `appendDecisionProjection` (wrapping its
+   * existing per-decisionId arbitration, not replacing it), so readers and
+   * every writer - regardless of which decisionId they're appending -
+   * share one mutual exclusion over the one file they actually touch.
+   *
+   * Epistemic note (dedicated witness:
+   * `durable-configuration-policy-decision-store-concurrency.test.ts`): a
+   * real five-process race test proving this exact pattern did NOT force
+   * a reproducible corruption locally even WITHOUT this lock -
+   * `appendFileSync`'s small, single-syscall writes appear to be safe in
+   * practice. That is the same evidentiary position the original Project-
+   * store defect was in before a real CI run (not any local run) exposed
+   * it, so "did not reproduce locally" is deliberately NOT treated as
+   * proof of safety here - the lock is kept rather than removed on an
+   * unproven atomicity assumption.
+   */
+  private fileLockPathFor(tenantId: TenantScope["tenantId"], decisionKey: string): string {
+    const tenantKey = Buffer.from(tenantId, "utf8").toString("base64url");
+    const decisionKeyEncoded = Buffer.from(decisionKey, "utf8").toString("base64url");
+    return join(this.fileLockDir(), `${tenantKey}.${decisionKeyEncoded}.lock`);
+  }
+
+  /** Rev94 F1's exact `linkSync` atomic-creation primitive, cloned verbatim. */
+  private withDecisionLogFileLock<T>(tenantId: TenantScope["tenantId"], decisionKey: string, criticalSection: () => T): T {
+    const lockPath = this.fileLockPathFor(tenantId, decisionKey);
+    const tmpPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(tmpPath, String(process.pid), "utf8");
+    let attempts = 0;
+    for (;;) {
+      try {
+        linkSync(tmpPath, lockPath);
+        break;
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "EEXIST") {
+          try {
+            unlinkSync(tmpPath);
+          } catch {
+            // best-effort cleanup only
+          }
+          throw cause;
+        }
+        attempts += 1;
+        if (attempts >= FileDurableConfigurationPolicyDecisionStore.MAX_LOCK_ATTEMPTS) {
+          try {
+            unlinkSync(tmpPath);
+          } catch {
+            // best-effort cleanup only
+          }
+          throw new InvalidDurableConfigurationPolicyDecisionStoreError(
+            `timed out waiting for the durable decision-log file lock for tenant "${tenantId}" / decisionKey "${decisionKey}"`,
+          );
+        }
+        Atomics.wait(
+          new Int32Array(new SharedArrayBuffer(4)),
+          0,
+          0,
+          FileDurableConfigurationPolicyDecisionStore.LOCK_RETRY_BACKOFF_MS,
+        );
+      }
+    }
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // best-effort cleanup only - lockPath (the hard-linked copy) is what
+      // actually arbitrates ownership from here on.
+    }
+    try {
+      return criticalSection();
+    } finally {
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // best-effort: a stuck lock is bounded for the next acquirer by
+        // the caller-visible timeout above, not a permanent deadlock.
+      }
+    }
+  }
+
   private readAll(
+    tenantId: TenantScope["tenantId"],
+    decisionKey: string,
+  ): ReadonlyArray<ConfigurationPolicyDecisionProjectionEntry> {
+    return this.withDecisionLogFileLock(tenantId, decisionKey, () => {
+      const filePath = this.filePathFor(tenantId, decisionKey);
+      if (!existsSync(filePath)) {
+        return [];
+      }
+      const content = readFileSync(filePath, "utf8");
+      const lines = content.split("\n").filter((line) => line.trim().length > 0);
+      return lines.map((line) => {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line);
+        } catch (cause) {
+          throw new CorruptedConfigurationPolicyDecisionLineError(filePath, `line is not valid JSON (${(cause as Error).message})`);
+        }
+        return validatePersistedEntry(parsed, tenantId, decisionKey, filePath);
+      });
+    });
+  }
+
+  /**
+   * Read helper used ONLY from inside an already-held
+   * `withDecisionLogFileLock` critical section (`appendDecisionProjection`
+   * itself) - calling the public, self-locking `readAll` there would
+   * deadlock against the lock this method's own caller already holds.
+   */
+  private readAllUnlocked(
     tenantId: TenantScope["tenantId"],
     decisionKey: string,
   ): ReadonlyArray<ConfigurationPolicyDecisionProjectionEntry> {
@@ -205,53 +333,55 @@ export class FileDurableConfigurationPolicyDecisionStore implements DurableConfi
       );
     }
 
-    const existing = this.getDecisionProjectionById(tenantId, entry.decisionKey, entry.decisionId);
-    if (existing !== undefined) {
-      if (!entryCoreIdentityEquals(existing, entry)) {
-        throw new InvalidDurableConfigurationPolicyDecisionStoreError(
-          `decisionId "${entry.decisionId}" is already recorded with different content`,
-        );
+    return this.withDecisionLogFileLock(tenantId, entry.decisionKey, () => {
+      const existing = this.readAllUnlocked(tenantId, entry.decisionKey).find((e) => e.decisionId === entry.decisionId);
+      if (existing !== undefined) {
+        if (!entryCoreIdentityEquals(existing, entry)) {
+          throw new InvalidDurableConfigurationPolicyDecisionStoreError(
+            `decisionId "${entry.decisionId}" is already recorded with different content`,
+          );
+        }
+        return { value: existing, created: false };
       }
-      return { value: existing, created: false };
-    }
 
-    const lockPath = this.appendLockPathFor(tenantId, entry.decisionKey, entry.decisionId);
-    const tmpPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
-    const payload = JSON.stringify(entry);
-    writeFileSync(tmpPath, payload, "utf8");
-    let wonAppend: boolean;
-    try {
-      linkSync(tmpPath, lockPath);
-      wonAppend = true;
-    } catch (cause) {
-      if ((cause as NodeJS.ErrnoException).code !== "EEXIST") {
-        throw cause;
-      }
-      wonAppend = false;
-    } finally {
+      const lockPath = this.appendLockPathFor(tenantId, entry.decisionKey, entry.decisionId);
+      const tmpPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
+      const payload = JSON.stringify(entry);
+      writeFileSync(tmpPath, payload, "utf8");
+      let wonAppend: boolean;
       try {
-        unlinkSync(tmpPath);
-      } catch {
-        // best-effort cleanup only.
+        linkSync(tmpPath, lockPath);
+        wonAppend = true;
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "EEXIST") {
+          throw cause;
+        }
+        wonAppend = false;
+      } finally {
+        try {
+          unlinkSync(tmpPath);
+        } catch {
+          // best-effort cleanup only.
+        }
       }
-    }
 
-    if (!wonAppend) {
-      const winnerRaw = readFileSync(lockPath, "utf8");
-      const winner = validatePersistedEntry(JSON.parse(winnerRaw), tenantId, entry.decisionKey, lockPath);
-      if (!entryCoreIdentityEquals(winner, entry)) {
-        throw new InvalidDurableConfigurationPolicyDecisionStoreError(
-          `decisionId "${entry.decisionId}" was already appended with different content by a concurrent caller`,
-        );
+      if (!wonAppend) {
+        const winnerRaw = readFileSync(lockPath, "utf8");
+        const winner = validatePersistedEntry(JSON.parse(winnerRaw), tenantId, entry.decisionKey, lockPath);
+        if (!entryCoreIdentityEquals(winner, entry)) {
+          throw new InvalidDurableConfigurationPolicyDecisionStoreError(
+            `decisionId "${entry.decisionId}" was already appended with different content by a concurrent caller`,
+          );
+        }
+        if (this.readAllUnlocked(tenantId, entry.decisionKey).find((e) => e.decisionId === entry.decisionId) === undefined) {
+          appendFileSync(this.filePathFor(tenantId, entry.decisionKey), `${winnerRaw}\n`, "utf8");
+        }
+        return { value: winner, created: false };
       }
-      if (this.getDecisionProjectionById(tenantId, entry.decisionKey, entry.decisionId) === undefined) {
-        appendFileSync(this.filePathFor(tenantId, entry.decisionKey), `${winnerRaw}\n`, "utf8");
-      }
-      return { value: winner, created: false };
-    }
 
-    appendFileSync(this.filePathFor(tenantId, entry.decisionKey), `${payload}\n`, "utf8");
-    return { value: entry, created: true };
+      appendFileSync(this.filePathFor(tenantId, entry.decisionKey), `${payload}\n`, "utf8");
+      return { value: entry, created: true };
+    });
   }
 
   getActiveDecisionProjection(

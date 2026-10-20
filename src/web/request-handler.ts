@@ -3,6 +3,18 @@ import type { SessionProvider } from "./session-provider.js";
 import { requireSession, UnauthenticatedError } from "./route-guard.js";
 import { resolveProtectedSnapshotView, type ClientProjectSnapshotSource } from "./snapshot-view-state.js";
 import { resolveProtectedTeamAttentionView, type TeamAttentionSource } from "./team-attention-view-state.js";
+import {
+  resolveProtectedCustomerCommercialStatusView,
+  type CustomerCommercialStatusSource,
+} from "./customer-commercial-view-state.js";
+import {
+  resolveProtectedBillingReferenceStatusView,
+  type BillingReferenceStatusSource,
+} from "./billing-reference-view-state.js";
+import {
+  resolveProtectedCustomerLifecycleReadinessView,
+  type CustomerLifecycleReadinessSource,
+} from "./customer-lifecycle-readiness-view-state.js";
 import { renderShellPage, type ShellPageContent, type RenderedShellPage } from "./shell-render.js";
 
 const SESSION_TOKEN_HEADER = "x-akilta-session-token";
@@ -65,6 +77,9 @@ export function createRequestHandler(deps: {
   sessionProvider: SessionProvider;
   snapshotSource: ClientProjectSnapshotSource;
   teamAttentionSource?: TeamAttentionSource;
+  commercialStatusSource?: CustomerCommercialStatusSource;
+  billingReferenceStatusSource?: BillingReferenceStatusSource;
+  lifecycleReadinessSource?: CustomerLifecycleReadinessSource;
 }): RequestHandler {
   return (request: IncomingRequestLike): OutgoingResponseLike => {
     if (request.method !== "GET") {
@@ -115,10 +130,31 @@ export function createRequestHandler(deps: {
           requestedOwnership,
           source: deps.teamAttentionSource,
         });
+        const commercialStatusView = resolveProtectedCustomerCommercialStatusView({
+          session,
+          requestedOwnership,
+          source: deps.commercialStatusSource,
+        });
+        const billingReferenceStatusView = resolveProtectedBillingReferenceStatusView({
+          session,
+          requestedOwnership,
+          source: deps.billingReferenceStatusSource,
+        });
+        const lifecycleReadinessView = resolveProtectedCustomerLifecycleReadinessView({
+          session,
+          requestedOwnership,
+          source: deps.lifecycleReadinessSource,
+        });
+        const sections = {
+          teamAttention: teamAttentionView,
+          commercialStatus: commercialStatusView,
+          billingReferenceStatus: billingReferenceStatusView,
+          lifecycleReadiness: lifecycleReadinessView,
+        };
         if (view.snapshot.deliveryStatus.overallStatus === "BLOCKED") {
-          content = { kind: "BLOCKED", snapshot: view.snapshot, teamAttention: teamAttentionView };
+          content = { kind: "BLOCKED", snapshot: view.snapshot, ...sections };
         } else {
-          content = { kind: "READY", snapshot: view.snapshot, teamAttention: teamAttentionView };
+          content = { kind: "READY", snapshot: view.snapshot, ...sections };
         }
         break;
       }

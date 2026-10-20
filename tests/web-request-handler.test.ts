@@ -8,6 +8,9 @@ import {
   WEB_SHELL_DEV_SESSION_FIXTURES,
   createWebShellFixtureSnapshotSource,
   createWebShellFixtureTeamAttentionSource,
+  createWebShellFixtureCommercialStatusSource,
+  createWebShellFixtureBillingReferenceStatusSource,
+  createWebShellFixtureLifecycleReadinessSource,
 } from "../src/fixtures/web-shell.js";
 import { WEBSITE_BUILD_V1_OWNERSHIP } from "../src/fixtures/website-build-v1-communication.js";
 import { buildWebsiteBuildV1Fixture } from "../src/fixtures/website-build-v1.js";
@@ -176,6 +179,94 @@ test("V3-F-001: with a teamAttentionSource wired, READY renders the resolved own
   assert.match(response.body, /Your role: STAFF/);
   assert.match(response.body, /Lead Owner: /);
   assert.doesNotMatch(response.body, /Lead Owner: not assigned/);
+});
+
+test("V2-CUST-SURFACE-001: without a commercialStatusSource wired, READY still renders 200 with an honest subscription-status Unavailable section - no crash, no fabricated data", () => {
+  const handler = devHandler();
+  const response = handler(request({ headers: { [SESSION_TOKEN_HEADER]: WEB_SHELL_DEV_SESSION_TOKEN } }));
+  assert.equal(response.status, 200);
+  assert.match(response.body, /subscription-status-heading/);
+  assert.match(response.body, />Unavailable</);
+});
+
+test("V2-CUST-SURFACE-001: with a commercialStatusSource wired, READY renders the resolved subscription status fields", () => {
+  const handler = createRequestHandler({
+    sessionProvider: createDevFixtureSessionProvider({
+      fixtures: WEB_SHELL_DEV_SESSION_FIXTURES,
+      isProduction: false,
+    }),
+    snapshotSource: createWebShellFixtureSnapshotSource(),
+    commercialStatusSource: createWebShellFixtureCommercialStatusSource(),
+  });
+  const response = handler(request({ headers: { [SESSION_TOKEN_HEADER]: WEB_SHELL_DEV_SESSION_TOKEN } }));
+  assert.equal(response.status, 200);
+  assert.match(response.body, /Subscription status: <strong>ACTIVE<\/strong>/);
+  assert.match(response.body, /Usage: NOT_CONFIGURED/);
+});
+
+test("V2-CUST-SURFACE-001: without a billingReferenceStatusSource wired, READY still renders 200 with an honest billing-reference Unavailable section", () => {
+  const handler = devHandler();
+  const response = handler(request({ headers: { [SESSION_TOKEN_HEADER]: WEB_SHELL_DEV_SESSION_TOKEN } }));
+  assert.equal(response.status, 200);
+  assert.match(response.body, /billing-reference-heading/);
+});
+
+test("V2-CUST-SURFACE-001: with a billingReferenceStatusSource wired, READY renders the resolved billing reference status", () => {
+  const handler = createRequestHandler({
+    sessionProvider: createDevFixtureSessionProvider({
+      fixtures: WEB_SHELL_DEV_SESSION_FIXTURES,
+      isProduction: false,
+    }),
+    snapshotSource: createWebShellFixtureSnapshotSource(),
+    billingReferenceStatusSource: createWebShellFixtureBillingReferenceStatusSource(),
+  });
+  const response = handler(request({ headers: { [SESSION_TOKEN_HEADER]: WEB_SHELL_DEV_SESSION_TOKEN } }));
+  assert.equal(response.status, 200);
+  assert.match(response.body, /Reference status: <strong>ISSUED<\/strong>/);
+});
+
+test("V2-CUST-SURFACE-001: without a lifecycleReadinessSource wired, READY still renders 200 with an honest account-lifecycle Unavailable section", () => {
+  const handler = devHandler();
+  const response = handler(request({ headers: { [SESSION_TOKEN_HEADER]: WEB_SHELL_DEV_SESSION_TOKEN } }));
+  assert.equal(response.status, 200);
+  assert.match(response.body, /lifecycle-readiness-heading/);
+});
+
+test("V2-CUST-SURFACE-001: with a lifecycleReadinessSource wired, READY renders the resolved offboarding/backup readiness fields", () => {
+  const handler = createRequestHandler({
+    sessionProvider: createDevFixtureSessionProvider({
+      fixtures: WEB_SHELL_DEV_SESSION_FIXTURES,
+      isProduction: false,
+    }),
+    snapshotSource: createWebShellFixtureSnapshotSource(),
+    lifecycleReadinessSource: createWebShellFixtureLifecycleReadinessSource(),
+  });
+  const response = handler(request({ headers: { [SESSION_TOKEN_HEADER]: WEB_SHELL_DEV_SESSION_TOKEN } }));
+  assert.equal(response.status, 200);
+  assert.match(response.body, /Offboarding status: <strong>NOT_REQUESTED<\/strong>/);
+  assert.match(response.body, /Backup\/export readiness: AVAILABLE/);
+});
+
+test("V2-CUST-SURFACE-001 (adversarial): a valid session for a different tenant/project still resolves 403 FORBIDDEN_TENANT_SCOPE even with all three new sources wired, never leaking commercial/billing/lifecycle data", () => {
+  const handler = createRequestHandler({
+    sessionProvider: createDevFixtureSessionProvider({
+      fixtures: WEB_SHELL_DEV_SESSION_FIXTURES,
+      isProduction: false,
+    }),
+    snapshotSource: createWebShellFixtureSnapshotSource(),
+    commercialStatusSource: createWebShellFixtureCommercialStatusSource(),
+    billingReferenceStatusSource: createWebShellFixtureBillingReferenceStatusSource(),
+    lifecycleReadinessSource: createWebShellFixtureLifecycleReadinessSource(),
+  });
+  const response = handler(
+    request({
+      path: "/portal/some-other-tenant/some-other-customer/some-other-project",
+      headers: { [SESSION_TOKEN_HEADER]: WEB_SHELL_DEV_SESSION_TOKEN },
+    }),
+  );
+  assert.equal(response.status, 403);
+  assert.doesNotMatch(response.body, /ACTIVE/);
+  assert.doesNotMatch(response.body, /ISSUED/);
 });
 
 test("A7: the exact dev-fixture token that authenticates a dev-mode handler is rejected (401) by a production-mode handler", () => {

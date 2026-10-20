@@ -8,6 +8,12 @@ import { createOutcomeJob, enterExceptionState } from "../src/domain/outcome-job
 import { buildClientProjectSnapshot } from "../src/domain/client-project-snapshot.js";
 import type { TeamAttentionViewState } from "../src/web/team-attention-view-state.js";
 import { WEBSITE_BUILD_V1_TEAM_ATTENTION_PROJECTION } from "../src/fixtures/website-build-v1-team-attention.js";
+import type { CustomerCommercialStatusViewState } from "../src/web/customer-commercial-view-state.js";
+import type { BillingReferenceStatusViewState } from "../src/web/billing-reference-view-state.js";
+import type { CustomerLifecycleReadinessViewState } from "../src/web/customer-lifecycle-readiness-view-state.js";
+import type { SubscriptionUsageStatus } from "../src/domain/subscription-usage-status.js";
+import type { BillingReferenceRecord } from "../src/domain/billing-reference.js";
+import type { CustomerLifecycleReadinessProjection } from "../src/domain/customer-lifecycle-readiness.js";
 
 const READY_SNAPSHOT = WEBSITE_BUILD_V1_CLIENT_PROJECT_SNAPSHOT;
 
@@ -233,4 +239,145 @@ test("V3-F-001: a READY teamAttention view with no owner assigned for a role ren
   assert.match(rendered.html, /Deal Owner: not assigned/);
   assert.match(rendered.html, /Account Owner: not assigned/);
   assert.match(rendered.html, /Delivery Owner: not assigned/);
+});
+
+const FIXTURE_COMMERCIAL_STATUS: SubscriptionUsageStatus = {
+  tenantId: WEBSITE_BUILD_V1_OWNERSHIP.tenantId,
+  customerId: WEBSITE_BUILD_V1_OWNERSHIP.customerId,
+  subscriptionStatus: "ACTIVE",
+  isEntitled: true,
+  entitlementRefs: ["feature:advisor"],
+  commercialUsage: "NOT_CONFIGURED",
+};
+
+test("V2-CUST-SURFACE-001: only READY and BLOCKED render the subscription-status section - it is exactly as scoped as the rest of the customer-safe body", () => {
+  for (const { content } of ALL_CONTENTS) {
+    const rendered = renderShellPage(content);
+    if (content.kind === "READY" || content.kind === "BLOCKED") {
+      assert.match(rendered.html, /<h2 id="subscription-status-heading">Subscription &amp; entitlement<\/h2>/);
+    } else {
+      assert.doesNotMatch(rendered.html, /subscription-status-heading/);
+    }
+  }
+});
+
+test("V2-CUST-SURFACE-001: with no commercialStatus supplied at all, the section renders the honest Unavailable state, never a fabricated default", () => {
+  const rendered = renderShellPage({ kind: "READY", snapshot: READY_SNAPSHOT });
+  const sectionStart = rendered.html.indexOf("subscription-status-heading");
+  const sectionHtml = rendered.html.slice(sectionStart, sectionStart + 400);
+  assert.match(sectionHtml, />Unavailable</);
+});
+
+test("V2-CUST-SURFACE-001: a FORBIDDEN_TENANT_SCOPE commercialStatus view never distinguishes itself from Unavailable (no boundary detail leaked into the page)", () => {
+  const forbidden: CustomerCommercialStatusViewState = { kind: "FORBIDDEN_TENANT_SCOPE" };
+  const rendered = renderShellPage({ kind: "READY", snapshot: READY_SNAPSHOT, commercialStatus: forbidden });
+  const sectionStart = rendered.html.indexOf("subscription-status-heading");
+  const sectionHtml = rendered.html.slice(sectionStart, sectionStart + 400);
+  assert.match(sectionHtml, />Unavailable</);
+});
+
+test("V2-CUST-SURFACE-001: a READY commercialStatus view renders subscription status, entitlement, and the truthful commercialUsage literal verbatim", () => {
+  const ready: CustomerCommercialStatusViewState = { kind: "READY", status: FIXTURE_COMMERCIAL_STATUS };
+  const rendered = renderShellPage({ kind: "READY", snapshot: READY_SNAPSHOT, commercialStatus: ready });
+  assert.match(rendered.html, /Subscription status: <strong>ACTIVE<\/strong>/);
+  assert.match(rendered.html, /Entitled: Yes/);
+  assert.match(rendered.html, /Usage: NOT_CONFIGURED/);
+});
+
+const FIXTURE_BILLING_REFERENCE_RECORD: BillingReferenceRecord = {
+  tenantId: WEBSITE_BUILD_V1_OWNERSHIP.tenantId,
+  customerId: WEBSITE_BUILD_V1_OWNERSHIP.customerId,
+  subscriptionId: "sub-render-fixture" as BillingReferenceRecord["subscriptionId"],
+  externalInvoiceRef: "inv-render-fixture",
+  status: "PAID",
+  recordedAt: "2026-10-13T00:00:00.000Z",
+  evidenceRef: "internal://tests/web-shell-render/billing-reference",
+};
+
+test("V2-CUST-SURFACE-001: only READY and BLOCKED render the billing-reference section", () => {
+  for (const { content } of ALL_CONTENTS) {
+    const rendered = renderShellPage(content);
+    if (content.kind === "READY" || content.kind === "BLOCKED") {
+      assert.match(rendered.html, /<h2 id="billing-reference-heading">Billing reference<\/h2>/);
+    } else {
+      assert.doesNotMatch(rendered.html, /billing-reference-heading/);
+    }
+  }
+});
+
+test("V2-CUST-SURFACE-001: with no billingReferenceStatus supplied at all, the section renders the honest Unavailable state", () => {
+  const rendered = renderShellPage({ kind: "READY", snapshot: READY_SNAPSHOT });
+  const sectionStart = rendered.html.indexOf("billing-reference-heading");
+  const sectionHtml = rendered.html.slice(sectionStart, sectionStart + 400);
+  assert.match(sectionHtml, />Unavailable</);
+});
+
+test("V2-CUST-SURFACE-001: a READY billingReferenceStatus view renders the reference status, never a monetary amount (the underlying record has no amount field)", () => {
+  const ready: BillingReferenceStatusViewState = { kind: "READY", record: FIXTURE_BILLING_REFERENCE_RECORD };
+  const rendered = renderShellPage({ kind: "READY", snapshot: READY_SNAPSHOT, billingReferenceStatus: ready });
+  assert.match(rendered.html, /Reference status: <strong>PAID<\/strong>/);
+});
+
+const FIXTURE_LIFECYCLE_READINESS: CustomerLifecycleReadinessProjection = {
+  tenantId: WEBSITE_BUILD_V1_OWNERSHIP.tenantId,
+  customerId: WEBSITE_BUILD_V1_OWNERSHIP.customerId,
+  offboardingStatus: "COMPLETED",
+  offboardingExecutionStatus: "COMPLETED",
+  backupReadiness: "AVAILABLE",
+};
+
+test("V2-CUST-SURFACE-001: only READY and BLOCKED render the account-lifecycle section", () => {
+  for (const { content } of ALL_CONTENTS) {
+    const rendered = renderShellPage(content);
+    if (content.kind === "READY" || content.kind === "BLOCKED") {
+      assert.match(rendered.html, /<h2 id="lifecycle-readiness-heading">Account lifecycle<\/h2>/);
+    } else {
+      assert.doesNotMatch(rendered.html, /lifecycle-readiness-heading/);
+    }
+  }
+});
+
+test("V2-CUST-SURFACE-001: with no lifecycleReadiness supplied at all, the section renders the honest Unavailable state", () => {
+  const rendered = renderShellPage({ kind: "READY", snapshot: READY_SNAPSHOT });
+  const sectionStart = rendered.html.indexOf("lifecycle-readiness-heading");
+  const sectionHtml = rendered.html.slice(sectionStart, sectionStart + 400);
+  assert.match(sectionHtml, />Unavailable</);
+});
+
+test("V2-CUST-SURFACE-001: a READY lifecycleReadiness view renders offboarding status, execution status when present, and backup readiness", () => {
+  const ready: CustomerLifecycleReadinessViewState = { kind: "READY", projection: FIXTURE_LIFECYCLE_READINESS };
+  const rendered = renderShellPage({ kind: "READY", snapshot: READY_SNAPSHOT, lifecycleReadiness: ready });
+  assert.match(rendered.html, /Offboarding status: <strong>COMPLETED<\/strong>/);
+  assert.match(rendered.html, /Offboarding execution: COMPLETED/);
+  assert.match(rendered.html, /Backup\/export readiness: AVAILABLE/);
+});
+
+test("V2-CUST-SURFACE-001: a READY lifecycleReadiness view with NOT_REQUESTED offboarding renders no offboarding-execution line at all, never a fabricated one", () => {
+  const notRequested: CustomerLifecycleReadinessProjection = {
+    tenantId: WEBSITE_BUILD_V1_OWNERSHIP.tenantId,
+    customerId: WEBSITE_BUILD_V1_OWNERSHIP.customerId,
+    offboardingStatus: "NOT_REQUESTED",
+    backupReadiness: "AVAILABLE",
+  };
+  const ready: CustomerLifecycleReadinessViewState = { kind: "READY", projection: notRequested };
+  const rendered = renderShellPage({ kind: "READY", snapshot: READY_SNAPSHOT, lifecycleReadiness: ready });
+  assert.doesNotMatch(rendered.html, /Offboarding execution:/);
+});
+
+test("V2-CUST-SURFACE-001: no mutating upgrade/cancel/offboard control (button, form, or link) is ever rendered by this checkpoint's own new sections", () => {
+  const ready: CustomerCommercialStatusViewState = { kind: "READY", status: FIXTURE_COMMERCIAL_STATUS };
+  const readyLifecycle: CustomerLifecycleReadinessViewState = { kind: "READY", projection: FIXTURE_LIFECYCLE_READINESS };
+  const rendered = renderShellPage({
+    kind: "READY",
+    snapshot: READY_SNAPSHOT,
+    commercialStatus: ready,
+    lifecycleReadiness: readyLifecycle,
+  });
+  const sectionStart = rendered.html.indexOf("subscription-status-heading");
+  const sectionEnd = rendered.html.indexOf("verified-work-heading");
+  const newSectionsHtml = rendered.html.slice(sectionStart, sectionEnd);
+  assert.doesNotMatch(newSectionsHtml, /<button/);
+  assert.doesNotMatch(newSectionsHtml, /<form/);
+  assert.doesNotMatch(newSectionsHtml, /<input/);
+  assert.doesNotMatch(newSectionsHtml, /href="[^"]*(upgrade|downgrade|cancel|offboard)/i);
 });

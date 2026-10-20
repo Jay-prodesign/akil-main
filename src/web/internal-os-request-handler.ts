@@ -21,6 +21,7 @@ import {
   type WorkJobSource,
   type OrganizationResourceBindingSource,
   type OperationalObservabilitySource,
+  type CustomerOffboardingAdminSource,
 } from "./internal-os-view-state.js";
 import {
   renderInternalOsPage,
@@ -68,6 +69,15 @@ export interface InternalOsRequestHandlerDeps {
    * fabricated content.
    */
   readonly operationalObservabilitySource?: OperationalObservabilitySource;
+  /**
+   * V2-ADMIN-SURFACE-001: caller-injected read source for the Organization's
+   * pending `CustomerOffboardingRequest` queue, threaded into the real
+   * `/os/admin` route - mirrors `resourceBindingSource`'s own established
+   * optional-source pattern exactly. Absent (the honest production default
+   * until a durable offboarding-request store is separately wired) renders
+   * `NOT_ACTIVE`, never fabricated content.
+   */
+  readonly customerOffboardingAdminSource?: CustomerOffboardingAdminSource;
 }
 
 function toResponse(rendered: RenderedInternalOsPage): OutgoingResponseLike {
@@ -268,6 +278,9 @@ export function createInternalOsRequestHandler(deps: InternalOsRequestHandlerDep
             ...(deps.resourceBindingSource !== undefined ? { resourceBindingSource: deps.resourceBindingSource } : {}),
             ...(deps.operationalObservabilitySource !== undefined
               ? { operationalObservabilitySource: deps.operationalObservabilitySource }
+              : {}),
+            ...(deps.customerOffboardingAdminSource !== undefined
+              ? { customerOffboardingAdminSource: deps.customerOffboardingAdminSource }
               : {}),
           }),
         );

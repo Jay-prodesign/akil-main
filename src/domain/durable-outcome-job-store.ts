@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, linkSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { TenantScope } from "./tenant-scope.js";
 import type { OutcomeJob, OutcomeJobState } from "./outcome-job.js";
@@ -7,6 +7,13 @@ export class InvalidDurableOutcomeJobStoreError extends Error {
   constructor(reason: string) {
     super(`Invalid DurableOutcomeJobStore operation: ${reason}`);
     this.name = "InvalidDurableOutcomeJobStoreError";
+  }
+}
+
+export class OutcomeJobStoreLockTimeoutError extends Error {
+  constructor(tenantId: string) {
+    super(`Timed out waiting for the durable OutcomeJob lock for tenant "${tenantId}"`);
+    this.name = "OutcomeJobStoreLockTimeoutError";
   }
 }
 
@@ -127,13 +134,27 @@ export interface DurableOutcomeJobStore {
  * reconstruction (a fresh store instance over the same `baseDir` sees the
  * exact same de-duplicated job set) rather than relying on a separate
  * in-memory index that could diverge from disk.
+ *
+ * CI/Brain correction (PR #167 batch-merge-review, systemic torn-read
+ * finding): unlike every sibling durable store in this repository, this
+ * store had NO lock at all - `putIfAbsent` performed an unguarded read-
+ * modify-`writeFileSync` (whole-file truncate-then-rewrite). Two
+ * concurrent writers for DIFFERENT jobIds could each read the same prior
+ * content and the second writer's `writeFileSync` could silently discard
+ * the first writer's newly-appended line entirely (a lost write), not
+ * merely a torn read. Added the same `linkSync`-based per-tenant
+ * `withTenantLock` every other store already uses, now guarding the whole
+ * `putIfAbsent` critical section and every read method.
  */
 export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
   private readonly baseDir: string;
+  private static readonly LOCK_TIMEOUT_MS = 5000;
+  private static readonly LOCK_RETRY_BACKOFF_MS = 5;
 
   constructor(baseDir: string) {
     this.baseDir = baseDir;
     mkdirSync(this.baseDir, { recursive: true });
+    mkdirSync(this.lockDir(), { recursive: true });
   }
 
   private filePathFor(tenantId: TenantScope["tenantId"]): string {
@@ -141,7 +162,79 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
     return join(this.baseDir, `${safeKey}.jsonl`);
   }
 
-  private readAll(tenantId: TenantScope["tenantId"]): OutcomeJob[] {
+  private lockDir(): string {
+    return join(this.baseDir, ".locks");
+  }
+
+  private lockPathFor(tenantId: TenantScope["tenantId"]): string {
+    const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
+    return join(this.lockDir(), `${safeKey}.lock`);
+  }
+
+  /**
+   * CI/Brain correction (PR #167 batch-merge-review, systemic torn-read
+   * finding): this store previously had NO lock at all - `putIfAbsent` did
+   * an unguarded read-modify-`writeFileSync` (whole-file truncate-then-
+   * rewrite), so two concurrent writers for DIFFERENT jobIds could each
+   * read the same prior content and one's write could silently clobber the
+   * other's (a lost write, not merely a torn read). Rev94 F1's exact
+   * `linkSync` atomic-creation primitive, cloned verbatim, now guards the
+   * entire read-modify-write critical section in `putIfAbsent`, and every
+   * read method shares the same per-tenant lock.
+   */
+  private withTenantLock<T>(tenantId: TenantScope["tenantId"], criticalSection: () => T): T {
+    const lockPath = this.lockPathFor(tenantId);
+    const tmpPath = `${lockPath}.${process.pid}.${process.hrtime.bigint()}.tmp`;
+    writeFileSync(tmpPath, String(process.pid), "utf8");
+    const deadline = Date.now() + FileDurableOutcomeJobStore.LOCK_TIMEOUT_MS;
+    for (;;) {
+      try {
+        linkSync(tmpPath, lockPath);
+        break;
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "EEXIST") {
+          try {
+            unlinkSync(tmpPath);
+          } catch {
+            // best-effort cleanup only
+          }
+          throw cause;
+        }
+        if (Date.now() > deadline) {
+          try {
+            unlinkSync(tmpPath);
+          } catch {
+            // best-effort cleanup only
+          }
+          throw new OutcomeJobStoreLockTimeoutError(tenantId);
+        }
+        Atomics.wait(
+          new Int32Array(new SharedArrayBuffer(4)),
+          0,
+          0,
+          FileDurableOutcomeJobStore.LOCK_RETRY_BACKOFF_MS,
+        );
+      }
+    }
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // best-effort cleanup only - lockPath (the hard-linked copy) is what
+      // actually arbitrates ownership from here on.
+    }
+    try {
+      return criticalSection();
+    } finally {
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // best-effort: a stuck lock is bounded for the next acquirer by
+        // the caller-visible timeout above, not a permanent deadlock.
+      }
+    }
+  }
+
+  private readAllUnlocked(tenantId: TenantScope["tenantId"]): OutcomeJob[] {
     const filePath = this.filePathFor(tenantId);
     if (!existsSync(filePath)) {
       return [];
@@ -174,32 +267,34 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
   }
 
   putIfAbsent(job: OutcomeJob): PersistJobResult {
-    const existing = this.get(job.tenantId, job.jobId);
-    if (existing !== undefined) {
-      if (
-        existing.tenantId !== job.tenantId ||
-        existing.customerId !== job.customerId ||
-        existing.projectId !== job.projectId
-      ) {
-        throw new InvalidDurableOutcomeJobStoreError(
-          `jobId "${job.jobId}" is already persisted under a different tenant/customer/project`,
-        );
+    return this.withTenantLock(job.tenantId, () => {
+      const existing = this.dedupedByJobId(this.readAllUnlocked(job.tenantId)).get(job.jobId);
+      if (existing !== undefined) {
+        if (
+          existing.tenantId !== job.tenantId ||
+          existing.customerId !== job.customerId ||
+          existing.projectId !== job.projectId
+        ) {
+          throw new InvalidDurableOutcomeJobStoreError(
+            `jobId "${job.jobId}" is already persisted under a different tenant/customer/project`,
+          );
+        }
+        return { job: existing, created: false };
       }
-      return { job: existing, created: false };
-    }
-    const filePath = this.filePathFor(job.tenantId);
-    const line = `${JSON.stringify(job)}\n`;
-    if (existsSync(filePath)) {
-      const existingContent = readFileSync(filePath, "utf8");
-      writeFileSync(filePath, existingContent + line, "utf8");
-    } else {
-      writeFileSync(filePath, line, "utf8");
-    }
-    return { job, created: true };
+      const filePath = this.filePathFor(job.tenantId);
+      const line = `${JSON.stringify(job)}\n`;
+      if (existsSync(filePath)) {
+        const existingContent = readFileSync(filePath, "utf8");
+        writeFileSync(filePath, existingContent + line, "utf8");
+      } else {
+        writeFileSync(filePath, line, "utf8");
+      }
+      return { job, created: true };
+    });
   }
 
   get(tenantId: TenantScope["tenantId"], jobId: OutcomeJob["jobId"]): OutcomeJob | undefined {
-    return this.dedupedByJobId(this.readAll(tenantId)).get(jobId);
+    return this.withTenantLock(tenantId, () => this.dedupedByJobId(this.readAllUnlocked(tenantId)).get(jobId));
   }
 
   list(
@@ -207,8 +302,10 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
     customerId: OutcomeJob["customerId"],
     projectId: OutcomeJob["projectId"],
   ): ReadonlyArray<OutcomeJob> {
-    return [...this.dedupedByJobId(this.readAll(tenantId)).values()].filter(
-      (job) => job.customerId === customerId && job.projectId === projectId,
+    return this.withTenantLock(tenantId, () =>
+      [...this.dedupedByJobId(this.readAllUnlocked(tenantId)).values()].filter(
+        (job) => job.customerId === customerId && job.projectId === projectId,
+      ),
     );
   }
 }

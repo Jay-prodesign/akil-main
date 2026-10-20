@@ -88,4 +88,4 @@ while (!existsSync(goFile)) {
 const store = new FileDurableExternalSaleBootstrapStore(storeDir);
 const result = store.putIfAbsent(tenantScope.tenantId, saleId, bootstrapped);
 process.stdout.write(JSON.stringify({ label: workerLabel, created: result.created, jobId: result.result.job.jobId }));
-process.exit(0);
+process.exitCode = 0;

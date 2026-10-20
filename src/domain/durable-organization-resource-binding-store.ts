@@ -272,11 +272,14 @@ export interface DurableOrganizationResourceBindingStore {
  */
 export class FileDurableOrganizationResourceBindingStore implements DurableOrganizationResourceBindingStore {
   private readonly baseDir: string;
+  private static readonly LOCK_RETRY_BACKOFF_MS = 5;
+  private static readonly MAX_LOCK_ATTEMPTS = 1000;
 
   constructor(baseDir: string) {
     this.baseDir = baseDir;
     mkdirSync(this.baseDir, { recursive: true });
     mkdirSync(this.creationLockDir(), { recursive: true });
+    mkdirSync(this.fileLockDir(), { recursive: true });
   }
 
   private filePathFor(tenantId: TenantScope["tenantId"]): string {
@@ -292,6 +295,97 @@ export class FileDurableOrganizationResourceBindingStore implements DurableOrgan
     const tenantKey = Buffer.from(tenantId, "utf8").toString("base64url");
     const orgKey = Buffer.from(organizationId, "utf8").toString("base64url");
     return join(this.creationLockDir(), `${tenantKey}.${orgKey}.lock`);
+  }
+
+  private fileLockDir(): string {
+    return join(this.baseDir, ".file-locks");
+  }
+
+  private fileLockPathFor(tenantId: TenantScope["tenantId"]): string {
+    const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
+    return join(this.fileLockDir(), `${safeKey}.lock`);
+  }
+
+  /**
+   * CI/Brain correction (PR #167 batch-merge-review, systemic torn-read
+   * finding): the per-organizationId `creationLockPathFor` lock correctly
+   * arbitrates "exactly one winner per organizationId," but does not
+   * coordinate access to the shared per-tenant `.jsonl` file itself, which
+   * every winning organizationId's `appendFileSync` call writes to, and
+   * `get`/`readAll` read lock-free. This second, coarser `linkSync` lock -
+   * Rev94 F1's exact primitive, cloned verbatim - is keyed by `tenantId`
+   * alone (the shared file's own identity) and is acquired by every read
+   * (`get`) and by each individual `appendFileSync` call in `putIfAbsent`
+   * (not the whole per-organizationId creation-lock dance, which needs no
+   * tenant-file coordination of its own and must not be nested inside this
+   * lock to avoid re-acquiring it from within itself). Readers and every
+   * tenant-file writer now share one mutual exclusion.
+   *
+   * Epistemic note (dedicated witness:
+   * `durable-organization-resource-binding-store-concurrency.test.ts`): a
+   * real five-process race test proving this exact "append-log" pattern
+   * did NOT force a reproducible corruption locally even WITHOUT this
+   * lock - `appendFileSync`'s small, single-syscall writes appear to be
+   * safe against a concurrent unlocked reader in practice. That is the
+   * same evidentiary position the original Project-store defect was in
+   * before a real CI run (not any local run) exposed it, so "did not
+   * reproduce locally" is deliberately NOT treated as proof of safety
+   * here - the lock is kept rather than removed on an unproven atomicity
+   * assumption.
+   */
+  private withTenantFileLock<T>(tenantId: TenantScope["tenantId"], criticalSection: () => T): T {
+    const lockPath = this.fileLockPathFor(tenantId);
+    const tmpPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(tmpPath, String(process.pid), "utf8");
+    let attempts = 0;
+    for (;;) {
+      try {
+        linkSync(tmpPath, lockPath);
+        break;
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "EEXIST") {
+          try {
+            unlinkSync(tmpPath);
+          } catch {
+            // best-effort cleanup only
+          }
+          throw cause;
+        }
+        attempts += 1;
+        if (attempts >= FileDurableOrganizationResourceBindingStore.MAX_LOCK_ATTEMPTS) {
+          try {
+            unlinkSync(tmpPath);
+          } catch {
+            // best-effort cleanup only
+          }
+          throw new InvalidDurableOrganizationResourceBindingStoreError(
+            `timed out waiting for the durable organization-resource-binding file lock for tenant "${tenantId}"`,
+          );
+        }
+        Atomics.wait(
+          new Int32Array(new SharedArrayBuffer(4)),
+          0,
+          0,
+          FileDurableOrganizationResourceBindingStore.LOCK_RETRY_BACKOFF_MS,
+        );
+      }
+    }
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // best-effort cleanup only - lockPath (the hard-linked copy) is what
+      // actually arbitrates ownership from here on.
+    }
+    try {
+      return criticalSection();
+    } finally {
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // best-effort: a stuck lock is bounded for the next acquirer by
+        // the caller-visible timeout above, not a permanent deadlock.
+      }
+    }
   }
 
   private readAll(tenantId: TenantScope["tenantId"]): Array<{ organizationId: string; binding: OrganizationResourceBinding }> {
@@ -398,18 +492,18 @@ export class FileDurableOrganizationResourceBindingStore implements DurableOrgan
       // `get()`'s own dedup-by-organizationId keeps only the first matching
       // line and the content is byte-identical either way.
       if (this.get(tenantId, organizationId) === undefined) {
-        appendFileSync(this.filePathFor(tenantId), `${winnerRaw}\n`, "utf8");
+        this.withTenantFileLock(tenantId, () => appendFileSync(this.filePathFor(tenantId), `${winnerRaw}\n`, "utf8"));
       }
       return { binding: winner.binding, created: false };
     }
 
     const filePath = this.filePathFor(tenantId);
-    appendFileSync(filePath, `${payload}\n`, "utf8");
+    this.withTenantFileLock(tenantId, () => appendFileSync(filePath, `${payload}\n`, "utf8"));
     return { binding, created: true };
   }
 
   get(tenantId: TenantScope["tenantId"], organizationId: string): OrganizationResourceBinding | undefined {
-    return this.dedupedByOrganizationId(this.readAll(tenantId)).get(organizationId);
+    return this.withTenantFileLock(tenantId, () => this.dedupedByOrganizationId(this.readAll(tenantId)).get(organizationId));
   }
 }
 

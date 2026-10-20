@@ -42,6 +42,9 @@ export function createInternalOsHttpServer(
     ...(deps.operationalObservabilitySource !== undefined
       ? { operationalObservabilitySource: deps.operationalObservabilitySource }
       : {}),
+    ...(deps.customerOffboardingAdminSource !== undefined
+      ? { customerOffboardingAdminSource: deps.customerOffboardingAdminSource }
+      : {}),
   });
 
   return createServer((req, res) => {
