@@ -318,3 +318,16 @@ This repository operates inside the DEC-160 V2→V5 Autonomous Engineering Corri
 ## Known conflicts / blockers
 
 - None found. `git status` is clean at every checkpoint above; the full history is one linear chain from bootstrap through the current checkpoint (`AKI-GIT-001` → `AKI-BE-001` → `ENG-ORCH-001` first slice → `DEL-003` first slice → `ENG-ORCH-001` round-3 correction → `DEL-003` second slice round-1 correction (`3253439`) → V1 Fast Lane Stage B documentation pass (`ff832ce`) → `DEL-003` second slice round-2 correction (`72e2d61`), current HEAD `72e2d61`), verifiable via `git log --oneline` on this branch.
+
+
+## REV218 — independent-review auto-merge authority (2026-10-20)
+
+Canonical AA-005 REV218 now controls routine internal merge progression. Claude may implement/self-review and recommend `MERGE_READY`, but may not independently certify its own exact head. A distinct independent reviewer (ChatGPT / AKILTA Brain, Codex, or another separately-contexted reviewer) must issue exact-head PASS / VERIFIED.
+
+After independent PASS, an eligible internal/reversible candidate may be merged to `main` by an available merge executor without a separate Founder merge prompt, provided CI/tests are reconciled, no unresolved security/authority/tenant/data-integrity finding exists, branch ancestry is understood, and the merge itself does not trigger a protected live/production effect. Any post-PASS candidate change requires re-review.
+
+Production deployment/release, DNS, live credentials/providers, billing/spend, legal/commercial commitments, public signup/customer-live/GA, destructive production-data actions, and genuine product/business/material-architecture decisions remain Founder-protected.
+
+See `docs/engineering/REV218_INDEPENDENT_REVIEW_AUTOMERGE.md` for the repo-native projection.
+
+Current PR #167 head `3cca9d034752cdfffd9574294f8fb4f77f367664` remains CHANGES_REQUIRED under Brain comment `6280195112`; REV218 does not override unresolved review findings.
