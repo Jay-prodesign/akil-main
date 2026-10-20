@@ -1158,3 +1158,246 @@ test("OS-V0-03 P14: boundary - durable-plan-admission-store.ts introduces no new
     assert.equal(content.includes(forbidden), false, `must not import "${forbidden}"`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// AUD-DURABILITY-GAP-V2 (re-derived against current main): strengthened
+// replay validation - eventId recomputation and full result field-shape/
+// cross-field invariant checks that admitPlan() itself always guarantees.
+// ---------------------------------------------------------------------------
+
+test("AUD-GAP-V2 P15: EVALUATION_RECORDED.eventId not matching the deterministic recompute from its own planId/planVersion is rejected", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const plan = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: fixture.project,
+      planId: "plan-aud-gap-v2-p15",
+      version: 1,
+      blueprint: fixture.blueprint,
+      soldScope: fixture.soldScope,
+      evidence: fixture.evidence,
+      now: "2026-10-20T00:00:00.000Z",
+    });
+    const result = admitPlan({
+      plan,
+      blueprint: fixture.blueprint,
+      readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, plan),
+    });
+    const store = new FileDurablePlanAdmissionStore(dir);
+    recordEvaluation({ store, result, recordedAt: "2026-10-20T00:00:00.000Z" });
+    const filePath = singleFilePathIn(dir);
+    const legitEvent = JSON.parse(readFileSync(filePath, "utf8").trim());
+    const getState = () =>
+      store.getState(
+        fixture.tenantScope.tenantId,
+        fixture.customer.customerId,
+        fixture.project.projectId,
+        plan.planId,
+      );
+
+    overwriteFileWithSingleLine(filePath, { ...legitEvent, eventId: "forged-eventid-not-matching-recompute" });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "eventId not matching the deterministic recompute must be rejected");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AUD-GAP-V2 P16: every result field-shape/cross-field invariant admitPlan() itself always guarantees is enforced on replay", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const plan = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: fixture.project,
+      planId: "plan-aud-gap-v2-p16",
+      version: 1,
+      blueprint: fixture.blueprint,
+      soldScope: fixture.soldScope,
+      evidence: fixture.evidence,
+      now: "2026-10-20T00:00:00.000Z",
+    });
+    const result = admitPlan({
+      plan,
+      blueprint: fixture.blueprint,
+      readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, plan),
+    });
+    assert.equal(result.status, "WAITING");
+    const store = new FileDurablePlanAdmissionStore(dir);
+    recordEvaluation({ store, result, recordedAt: "2026-10-20T00:00:00.000Z" });
+    const filePath = singleFilePathIn(dir);
+    const legitEvent = JSON.parse(readFileSync(filePath, "utf8").trim());
+    const getState = () =>
+      store.getState(
+        fixture.tenantScope.tenantId,
+        fixture.customer.customerId,
+        fixture.project.projectId,
+        plan.planId,
+      );
+
+    // blockedReasons must be an array.
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      result: { ...legitEvent.result, blockedReasons: "not-an-array" },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "non-array blockedReasons must be rejected");
+
+    // blockedReasons elements must be non-empty strings.
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      result: { ...legitEvent.result, blockedReasons: [""] },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "blockedReasons containing an empty string must be rejected");
+
+    // awaiting must be an object (not a bare string) when present.
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      result: { ...legitEvent.result, awaiting: "not-an-object" },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "non-object awaiting must be rejected");
+
+    // awaiting.entity/reason must be non-empty strings.
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      result: { ...legitEvent.result, awaiting: { entity: "", reason: "x" } },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "awaiting.entity empty must be rejected");
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      result: { ...legitEvent.result, awaiting: { entity: "x", reason: "" } },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "awaiting.reason empty must be rejected");
+
+    // evaluatedApprovalId must be a non-empty string when present.
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      result: { ...legitEvent.result, awaiting: undefined, evaluatedApprovalId: "" },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "empty evaluatedApprovalId must be rejected");
+
+    // Cross-field: WAITING must not carry evaluatedApprovalId.
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      result: { ...legitEvent.result, evaluatedApprovalId: "approval-should-not-be-here" },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "WAITING with evaluatedApprovalId must be rejected - admitPlan() never produces this");
+
+    // Cross-field: WAITING must carry a non-empty blockedReasons never (must be []).
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      result: { ...legitEvent.result, blockedReasons: ["should not be here for WAITING"] },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "WAITING with non-empty blockedReasons must be rejected - admitPlan() never produces this");
+
+    // Cross-field: status BLOCKED but blockedReasons empty.
+    const blockedEventId = `${plan.planId}:v1:evaluation`;
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      eventId: blockedEventId,
+      result: { ...legitEvent.result, status: "BLOCKED", awaiting: undefined, blockedReasons: [] },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "BLOCKED with empty blockedReasons must be rejected - admitPlan() never produces this");
+
+    // Cross-field: status BLOCKED but awaiting populated.
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      eventId: blockedEventId,
+      result: { ...legitEvent.result, status: "BLOCKED", blockedReasons: ["real reason"], awaiting: { entity: "x", reason: "y" } },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "BLOCKED with awaiting populated must be rejected - admitPlan() never produces this");
+
+    // Cross-field: status BLOCKED but evaluatedApprovalId populated.
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      eventId: blockedEventId,
+      result: {
+        ...legitEvent.result,
+        status: "BLOCKED",
+        blockedReasons: ["real reason"],
+        awaiting: undefined,
+        evaluatedApprovalId: "should-not-be-here",
+      },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "BLOCKED with evaluatedApprovalId populated must be rejected - admitPlan() never produces this");
+
+    // Cross-field: status ADMITTED but evaluatedApprovalId missing.
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      eventId: blockedEventId,
+      result: { ...legitEvent.result, status: "ADMITTED", blockedReasons: [], awaiting: undefined, evaluatedApprovalId: undefined },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "ADMITTED with no evaluatedApprovalId must be rejected - admitPlan() never produces this");
+
+    // Cross-field: status ADMITTED but awaiting populated.
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      eventId: blockedEventId,
+      result: {
+        ...legitEvent.result,
+        status: "ADMITTED",
+        blockedReasons: [],
+        awaiting: { entity: "x", reason: "y" },
+        evaluatedApprovalId: "approval-1",
+      },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "ADMITTED with awaiting populated must be rejected - admitPlan() never produces this");
+
+    // Cross-field: status ADMITTED but blockedReasons non-empty.
+    overwriteFileWithSingleLine(filePath, {
+      ...legitEvent,
+      eventId: blockedEventId,
+      result: {
+        ...legitEvent.result,
+        status: "ADMITTED",
+        blockedReasons: ["should not be here"],
+        awaiting: undefined,
+        evaluatedApprovalId: "approval-1",
+      },
+    });
+    assert.throws(getState, CorruptedPlanAdmissionEventError, "ADMITTED with non-empty blockedReasons must be rejected - admitPlan() never produces this");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("AUD-GAP-V2 positive control: a well-formed ADMITTED result (real evaluatedApprovalId, no awaiting, no blockedReasons) still passes replay revalidation and round-trips exactly", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const plan = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: fixture.project,
+      planId: "plan-aud-gap-v2-admitted",
+      version: 1,
+      blueprint: fixture.blueprint,
+      soldScope: fixture.soldScope,
+      evidence: fixture.evidence,
+      now: "2026-10-20T00:00:00.000Z",
+    });
+    const approval = createApprovalReference({
+      plan,
+      approvalId: "approval-aud-gap-v2-admitted",
+      approvedAt: "2026-10-20T00:00:00.000Z",
+      approverRef: "owner:founder",
+    });
+    const result = admitPlan({
+      plan,
+      blueprint: fixture.blueprint,
+      readinessAssertions: buildFullReadinessAssertions(fixture.tenantScope, fixture.project, plan),
+      approval,
+    });
+    assert.equal(result.status, "ADMITTED");
+    const store = new FileDurablePlanAdmissionStore(dir);
+    recordEvaluation({ store, result, recordedAt: "2026-10-20T00:00:00.000Z" });
+    const state = store.getState(
+      fixture.tenantScope.tenantId,
+      fixture.customer.customerId,
+      fixture.project.projectId,
+      plan.planId,
+    );
+    assert.equal(state?.latestResult?.status, "ADMITTED");
+    assert.equal(state?.latestResult?.evaluatedApprovalId, "approval-aud-gap-v2-admitted");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, linkSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { TenantScope } from "./tenant-scope.js";
 import type { Customer } from "./customer.js";
@@ -8,6 +8,7 @@ import type { PlanAdmissionResult } from "./plan-admission.js";
 import {
   createAnswerRecordedEvent,
   createEvaluationRecordedEvent,
+  evaluationEventId,
   type PlanAdmissionEvent,
 } from "./plan-admission-event.js";
 import {
@@ -26,6 +27,13 @@ export class CorruptedPlanAdmissionEventError extends Error {
   constructor(reason: string) {
     super(`Corrupted persisted PlanAdmissionEvent: ${reason}`);
     this.name = "CorruptedPlanAdmissionEventError";
+  }
+}
+
+export class PlanAdmissionStoreLockTimeoutError extends Error {
+  constructor(planKey: string) {
+    super(`Timed out waiting for the durable plan-admission lock for plan "${planKey}"`);
+    this.name = "PlanAdmissionStoreLockTimeoutError";
   }
 }
 
@@ -50,6 +58,77 @@ function requirePositiveIntegerField(value: unknown, field: string): number {
 }
 
 /**
+ * AUD-DURABILITY-GAP-V2 (re-derived against current `main`): validates
+ * the full `PlanAdmissionResult` field shape/cross-field invariants
+ * `admitPlan()` (`plan-admission.ts`) itself always guarantees, not just
+ * identity. Before this correction, `blockedReasons`/`awaiting`/
+ * `evaluatedApprovalId` had zero type/shape validation at all - a
+ * corrupted or forged record could claim, for example, `status:
+ * "ADMITTED"` with no `evaluatedApprovalId`, or `status: "BLOCKED"` with
+ * a populated `awaiting`, neither of which `admitPlan()` can actually
+ * produce. Every status/field-shape combination that function's own three
+ * branches cannot produce is rejected here, fail-closed.
+ */
+function validatePersistedPlanAdmissionResult(result: Record<string, unknown>): void {
+  if (!Array.isArray(result.blockedReasons)) {
+    throw new CorruptedPlanAdmissionEventError("result.blockedReasons must be an array");
+  }
+  result.blockedReasons.forEach((reason, index) =>
+    requireNonEmptyStringField(reason, `result.blockedReasons[${index}]`),
+  );
+
+  let awaiting: { entity: string; reason: string } | undefined;
+  if (result.awaiting !== undefined) {
+    if (typeof result.awaiting !== "object" || result.awaiting === null || Array.isArray(result.awaiting)) {
+      throw new CorruptedPlanAdmissionEventError("result.awaiting must be an object when present");
+    }
+    const rawAwaiting = result.awaiting as Record<string, unknown>;
+    awaiting = {
+      entity: requireNonEmptyStringField(rawAwaiting.entity, "result.awaiting.entity"),
+      reason: requireNonEmptyStringField(rawAwaiting.reason, "result.awaiting.reason"),
+    };
+  }
+
+  const evaluatedApprovalId =
+    result.evaluatedApprovalId !== undefined
+      ? requireNonEmptyStringField(result.evaluatedApprovalId, "result.evaluatedApprovalId")
+      : undefined;
+
+  const status = result.status;
+  if (status === "BLOCKED") {
+    if (result.blockedReasons.length === 0) {
+      throw new CorruptedPlanAdmissionEventError("result.status is BLOCKED but blockedReasons is empty - admitPlan() never produces this");
+    }
+    if (awaiting !== undefined) {
+      throw new CorruptedPlanAdmissionEventError("result.status is BLOCKED but awaiting is populated - admitPlan() never produces this");
+    }
+    if (evaluatedApprovalId !== undefined) {
+      throw new CorruptedPlanAdmissionEventError("result.status is BLOCKED but evaluatedApprovalId is populated - admitPlan() never produces this");
+    }
+  } else if (status === "WAITING") {
+    if (result.blockedReasons.length !== 0) {
+      throw new CorruptedPlanAdmissionEventError("result.status is WAITING but blockedReasons is non-empty - admitPlan() never produces this");
+    }
+    if (awaiting === undefined) {
+      throw new CorruptedPlanAdmissionEventError("result.status is WAITING but awaiting is missing - admitPlan() never produces this");
+    }
+    if (evaluatedApprovalId !== undefined) {
+      throw new CorruptedPlanAdmissionEventError("result.status is WAITING but evaluatedApprovalId is populated - admitPlan() never produces this");
+    }
+  } else if (status === "ADMITTED") {
+    if (result.blockedReasons.length !== 0) {
+      throw new CorruptedPlanAdmissionEventError("result.status is ADMITTED but blockedReasons is non-empty - admitPlan() never produces this");
+    }
+    if (awaiting !== undefined) {
+      throw new CorruptedPlanAdmissionEventError("result.status is ADMITTED but awaiting is populated - admitPlan() never produces this");
+    }
+    if (evaluatedApprovalId === undefined) {
+      throw new CorruptedPlanAdmissionEventError("result.status is ADMITTED but evaluatedApprovalId is missing - admitPlan() never produces this");
+    }
+  }
+}
+
+/**
  * OS-V0-03 Phase A: persisted plan-admission event JSON is untrusted replay
  * input, exactly like every other durable store in this repository that
  * already revalidates on read (`validatePersistedConnectorConnection`,
@@ -68,6 +147,15 @@ function requirePositiveIntegerField(value: unknown, field: string): number {
  * event envelope it is nested inside. Every failure throws
  * `CorruptedPlanAdmissionEventError` (fail-closed) rather than silently
  * dropping or coercing a bad record.
+ *
+ * AUD-DURABILITY-GAP-V2 (re-derived) strengthened this further: an
+ * `EVALUATION_RECORDED` event's own `eventId` is now recomputed via
+ * `evaluationEventId(result)` and compared exactly, rather than merely
+ * checked for non-emptiness - `createEvaluationRecordedEvent` derives
+ * `eventId` deterministically from `planId`+`planVersion`, so a forged
+ * `eventId` that doesn't match its own `result` is now caught. The nested
+ * `result`'s full field shape is also now validated (see
+ * `validatePersistedPlanAdmissionResult`).
  */
 function validatePersistedPlanAdmissionEvent(
   raw: unknown,
@@ -88,7 +176,7 @@ function validatePersistedPlanAdmissionEvent(
     );
   }
 
-  requireNonEmptyStringField(candidate.eventId, "eventId");
+  const eventId = requireNonEmptyStringField(candidate.eventId, "eventId");
   const tenantId = requireNonEmptyStringField(candidate.tenantId, "tenantId");
   const customerId = requireNonEmptyStringField(candidate.customerId, "customerId");
   const projectId = requireNonEmptyStringField(candidate.projectId, "projectId");
@@ -132,6 +220,13 @@ function validatePersistedPlanAdmissionEvent(
     if (typeof result.status !== "string" || !RECOGNIZED_ADMISSION_STATUSES.has(result.status)) {
       throw new CorruptedPlanAdmissionEventError(
         `EVALUATION_RECORDED.result.status is not a recognized AdmissionStatus: ${JSON.stringify(result.status)}`,
+      );
+    }
+    validatePersistedPlanAdmissionResult(result);
+    const recomputedEventId = evaluationEventId(result as unknown as Pick<PlanAdmissionResult, "planId" | "planVersion">);
+    if (eventId !== recomputedEventId) {
+      throw new CorruptedPlanAdmissionEventError(
+        `EVALUATION_RECORDED.eventId "${eventId}" does not match the deterministic id "${recomputedEventId}" its own planId/planVersion recompute to`,
       );
     }
     return candidate as unknown as PlanAdmissionEvent;
@@ -188,19 +283,29 @@ export interface DurablePlanAdmissionStore {
 
 /**
  * Reference/local durable implementation using only Node's built-in
- * `node:fs` - no new runtime dependency (matches T10/T12). One append-only
- * JSON-lines file per tenant/customer/project/plan under `baseDir`;
- * `getState` always reads the full file and replays it through the pure
- * reducer, proving
- * restart-safety by construction (T7) exactly as `FileDurableEngineeringStore`
- * does for ENG-ORCH-001.
+ * `node:fs`/`node:crypto` - no new runtime dependency (matches T10/T12).
+ * One append-only JSON-lines file per tenant/customer/project/plan under
+ * `baseDir`; `getState` always reads the full file and replays it through
+ * the pure reducer, proving restart-safety by construction (T7) exactly
+ * as `FileDurableEngineeringStore` does for ENG-ORCH-001.
+ *
+ * AUD-DURABILITY-GAP-V2 (re-derived against current `main` after the
+ * #167/#168 systemic torn-read/lost-write correction): this store
+ * previously had no lock at all around `appendEvent`'s read-check-write
+ * critical section, and `getEvents` was fully lock-free - the identical
+ * hazard class `FileDurableEngineeringStore` had. Fixed with the same
+ * two-part pattern: a `linkSync`-based per-plan lock shared by the writer
+ * AND every reader.
  */
 export class FileDurablePlanAdmissionStore implements DurablePlanAdmissionStore {
   private readonly baseDir: string;
+  private static readonly LOCK_TIMEOUT_MS = 5000;
+  private static readonly LOCK_RETRY_BACKOFF_MS = 5;
 
   constructor(baseDir: string) {
     this.baseDir = baseDir;
     mkdirSync(this.baseDir, { recursive: true });
+    mkdirSync(this.lockDir(), { recursive: true });
   }
 
   private filePathFor(
@@ -215,15 +320,99 @@ export class FileDurablePlanAdmissionStore implements DurablePlanAdmissionStore 
     return join(this.baseDir, `${safeKey}.jsonl`);
   }
 
-  appendEvent(event: PlanAdmissionEvent): void {
-    const filePath = this.filePathFor(event.tenantId, event.customerId, event.projectId, event.planId);
-    const line = `${JSON.stringify(event)}\n`;
-    if (existsSync(filePath)) {
-      const existing = readFileSync(filePath, "utf8");
-      writeFileSync(filePath, existing + line, "utf8");
-    } else {
-      writeFileSync(filePath, line, "utf8");
+  private lockDir(): string {
+    return join(this.baseDir, ".locks");
+  }
+
+  private lockPathFor(
+    tenantId: TenantScope["tenantId"],
+    customerId: Customer["customerId"],
+    projectId: Project["projectId"],
+    planId: ProjectPlanVersion["planId"],
+  ): string {
+    const safeKey = Buffer.from(planKey(tenantId, customerId, projectId, planId), "utf8").toString(
+      "base64url",
+    );
+    return join(this.lockDir(), `${safeKey}.lock`);
+  }
+
+  /**
+   * Real cross-process mutual exclusion for the shared per-plan file,
+   * reusing the exact `linkSync` atomic-creation primitive every other
+   * `FileDurable*Store` in this repository already uses. A bounded
+   * timeout throws `PlanAdmissionStoreLockTimeoutError` rather than
+   * deadlocking forever against a lock abandoned by a crashed process.
+   */
+  private withPlanLock<T>(
+    tenantId: TenantScope["tenantId"],
+    customerId: Customer["customerId"],
+    projectId: Project["projectId"],
+    planId: ProjectPlanVersion["planId"],
+    criticalSection: () => T,
+  ): T {
+    const key = planKey(tenantId, customerId, projectId, planId);
+    const lockPath = this.lockPathFor(tenantId, customerId, projectId, planId);
+    const tmpPath = `${lockPath}.${process.pid}.${process.hrtime.bigint()}.tmp`;
+    writeFileSync(tmpPath, String(process.pid), "utf8");
+    const deadline = Date.now() + FileDurablePlanAdmissionStore.LOCK_TIMEOUT_MS;
+    for (;;) {
+      try {
+        linkSync(tmpPath, lockPath);
+        break;
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "EEXIST") {
+          try {
+            unlinkSync(tmpPath);
+          } catch {
+            // best-effort cleanup only
+          }
+          throw cause;
+        }
+        if (Date.now() > deadline) {
+          try {
+            unlinkSync(tmpPath);
+          } catch {
+            // best-effort cleanup only
+          }
+          throw new PlanAdmissionStoreLockTimeoutError(key);
+        }
+        Atomics.wait(
+          new Int32Array(new SharedArrayBuffer(4)),
+          0,
+          0,
+          FileDurablePlanAdmissionStore.LOCK_RETRY_BACKOFF_MS,
+        );
+      }
     }
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // best-effort cleanup only - lockPath (the hard-linked copy) is what
+      // actually arbitrates ownership from here on.
+    }
+    try {
+      return criticalSection();
+    } finally {
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // best-effort: if this somehow fails, the lock would be abandoned
+        // and only cleared by another holder's own timeout/replacement.
+      }
+    }
+  }
+
+  appendEvent(event: PlanAdmissionEvent): void {
+    this.withPlanLock(event.tenantId, event.customerId, event.projectId, event.planId, () => {
+      const filePath = this.filePathFor(event.tenantId, event.customerId, event.projectId, event.planId);
+      const line = `${JSON.stringify(event)}\n`;
+      if (existsSync(filePath)) {
+        const existing = readFileSync(filePath, "utf8");
+        writeFileSync(filePath, existing + line, "utf8");
+      } else {
+        writeFileSync(filePath, line, "utf8");
+      }
+    });
   }
 
   getEvents(
@@ -232,17 +421,19 @@ export class FileDurablePlanAdmissionStore implements DurablePlanAdmissionStore 
     projectId: Project["projectId"],
     planId: ProjectPlanVersion["planId"],
   ): ReadonlyArray<PlanAdmissionEvent> {
-    const filePath = this.filePathFor(tenantId, customerId, projectId, planId);
-    if (!existsSync(filePath)) {
-      return [];
-    }
-    const content = readFileSync(filePath, "utf8");
-    return content
-      .split("\n")
-      .filter((line) => line.trim().length > 0)
-      .map((line) =>
-        validatePersistedPlanAdmissionEvent(JSON.parse(line), { tenantId, customerId, projectId, planId }),
-      );
+    return this.withPlanLock(tenantId, customerId, projectId, planId, () => {
+      const filePath = this.filePathFor(tenantId, customerId, projectId, planId);
+      if (!existsSync(filePath)) {
+        return [];
+      }
+      const content = readFileSync(filePath, "utf8");
+      return content
+        .split("\n")
+        .filter((line) => line.trim().length > 0)
+        .map((line) =>
+          validatePersistedPlanAdmissionEvent(JSON.parse(line), { tenantId, customerId, projectId, planId }),
+        );
+    });
   }
 
   getState(
