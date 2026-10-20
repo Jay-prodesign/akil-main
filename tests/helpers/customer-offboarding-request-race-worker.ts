@@ -61,12 +61,13 @@ try {
       : { ...current.request, status: "COMPLETED" as const, decidedByRef: `membership-${workerLabel}`, decidedAt: new Date().toISOString() };
   const result = store.transitionToTerminal({ tenantId: typedTenantId, requestId: current.request.requestId, expectedVersion, next });
   process.stdout.write(JSON.stringify({ label: workerLabel, outcome: "success", version: result.version }));
-  process.exit(0);
+  process.exitCode = 0;
 } catch (error) {
   if (error instanceof CustomerOffboardingRequestVersionConflictError) {
     process.stdout.write(JSON.stringify({ label: workerLabel, outcome: "conflict" }));
-    process.exit(0);
+    process.exitCode = 0;
+  } else {
+    process.stderr.write(String(error));
+    process.exitCode = 1;
   }
-  process.stderr.write(String(error));
-  process.exit(1);
 }

@@ -64,12 +64,13 @@ try {
     next,
   });
   process.stdout.write(JSON.stringify({ label: workerLabel, outcome: "success", version: result.version }));
-  process.exit(0);
+  process.exitCode = 0;
 } catch (error) {
   if (error instanceof ProjectVersionConflictError) {
     process.stdout.write(JSON.stringify({ label: workerLabel, outcome: "conflict" }));
-    process.exit(0);
+    process.exitCode = 0;
+  } else {
+    process.stderr.write(String(error));
+    process.exitCode = 1;
   }
-  process.stderr.write(String(error));
-  process.exit(1);
 }

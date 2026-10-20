@@ -17,6 +17,17 @@ import { FileDurableCustomerRepository } from "../../src/application/durable-cus
  * could silently lose one worker's write entirely (not merely clobber a
  * value - make it vanish).
  *
+ * CI correction: every outcome path now sets `process.exitCode` instead of
+ * calling `process.exit()`. `process.stdout.write()` to a piped stdout
+ * (`stdio: ["ignore", "pipe", "pipe"]` in the parent test) can be
+ * asynchronous; `process.exit()` terminates immediately and can truncate a
+ * write still in flight - exactly what a busy CI runner exposed here
+ * (`worker stdout was not valid JSON: (Unexpected end of JSON input)`).
+ * Setting `exitCode` and letting the process end naturally once the event
+ * loop drains lets Node flush pending output first. The identical fix was
+ * applied to every other race-worker script in this repository, all of
+ * which shared the same pattern.
+ *
  * usage: node customer-repository-race-worker.js <storeDir> <readyFile>
  *   <goFile> <tenantId> <customerId> <workerLabel>
  */
@@ -45,8 +56,8 @@ try {
   const customer = createCustomer({ tenantScope, customerId, displayName: `Race Customer ${workerLabel}` });
   repo.save(customer);
   process.stdout.write(JSON.stringify({ label: workerLabel, outcome: "success" }));
-  process.exit(0);
+  process.exitCode = 0;
 } catch (error) {
   process.stderr.write(String(error));
-  process.exit(1);
+  process.exitCode = 1;
 }

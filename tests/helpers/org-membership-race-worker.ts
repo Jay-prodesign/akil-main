@@ -55,10 +55,8 @@ try {
     });
     store.create(membership);
     process.stdout.write(JSON.stringify({ label: workerLabel, outcome: "success" }));
-    process.exit(0);
-  }
-
-  if (mode === "revoke") {
+    process.exitCode = 0;
+  } else if (mode === "revoke") {
     store.revoke({
       tenantId: tenantScope.tenantId,
       membershipId: membershipId as never,
@@ -67,11 +65,11 @@ try {
       revokedReason: `revoked by worker ${workerLabel}`,
     });
     process.stdout.write(JSON.stringify({ label: workerLabel, outcome: "success" }));
-    process.exit(0);
+    process.exitCode = 0;
+  } else {
+    throw new Error(`unknown mode "${mode}"`);
   }
-
-  throw new Error(`unknown mode "${mode}"`);
 } catch (error) {
   process.stderr.write(String(error));
-  process.exit(1);
+  process.exitCode = 1;
 }

@@ -47,8 +47,8 @@ try {
   const event = createAuditEvent({ job, eventId, actorRef: `engineer:${workerLabel}`, eventType: "JOB_CREATED", timestamp: "2026-10-16T00:00:00.000Z" });
   log.append(event);
   process.stdout.write(JSON.stringify({ label: workerLabel, outcome: "success" }));
-  process.exit(0);
+  process.exitCode = 0;
 } catch (error) {
   process.stderr.write(String(error));
-  process.exit(1);
+  process.exitCode = 1;
 }
