@@ -91,6 +91,15 @@ export interface OrganizationOnboardingRequest {
   readonly decidedByRef?: string;
   readonly decidedAt?: string;
   readonly rejectionReason?: string;
+  /**
+   * The exact validated `evidenceRef` that supported this admission decision
+   * (ORG-ONBOARD-001 Brain correction, comment `6294369735`). Present only on
+   * an `ADMITTED` request - a durable, replayable provenance pointer proving
+   * which reviewing evidence justified this specific admission, mirroring
+   * `service-catalog-admission.ts`'s own `ServiceCatalogAdmission.evidenceRef`
+   * precedent. Never set by `submitOrganizationOnboardingRequest`.
+   */
+  readonly admissionEvidenceRef?: string;
 }
 
 /** The only construction path for a request: always born `SUBMITTED`, no caller-forgeable status. */
@@ -131,7 +140,12 @@ export interface OrganizationOnboardingAdmissionResult {
  * `createOrganizationAccessRoleContext` - this function adds no second
  * construction path for any of them. The admitted request's own
  * `admittedOrganizationId` is the forward-provenance pointer back from the
- * new Organization to the application that produced it.
+ * new Organization to the application that produced it, and its
+ * `admissionEvidenceRef` is the forward-provenance pointer to the exact
+ * reviewing evidence that justified the decision (Brain correction,
+ * comment `6294369735` - the validated `evidenceRef` was previously
+ * discarded via `void evidenceRef`, making two admissions over different
+ * evidence observationally identical and unauditable).
  */
 export function admitOrganizationOnboardingRequest(input: {
   request: OrganizationOnboardingRequest;
@@ -190,12 +204,8 @@ export function admitOrganizationOnboardingRequest(input: {
     admittedOrganizationId: organization.organizationId,
     decidedByRef: admittingAuthorityPrincipalRef,
     decidedAt: admittedAt,
+    admissionEvidenceRef: evidenceRef,
   };
-  // evidenceRef is accepted/validated above as the required reviewing-evidence proof
-  // for this admission decision; it is intentionally not persisted on the request
-  // itself (mirrors service-catalog-admission.ts's ServiceCatalogAdmission, which
-  // records evidenceRef on the admission record, not by mutating the thing admitted).
-  void evidenceRef;
   return { admittedRequest, organization, founderMembership, founderAccessRoleContext };
 }
 

@@ -40,6 +40,14 @@ No modification to `organization.ts`, `organization-membership.ts`, `organizatio
 - `package.json`: zero new runtime dependency.
 - Files touched: `src/domain/organization-onboarding.ts` (new), `tests/organization-onboarding.test.ts` (new), `tests/org-onboard-001-boundary-scan.test.ts` (new), this exec-plan, `docs/engineering/CURRENT_STATE.md`.
 
+## Brain correction (F1) — evidence discarded, comment `6294369735`
+
+Brain's independent exact-head review of `211eedd7` found `admitOrganizationOnboardingRequest` validated the required `evidenceRef` and then discarded it (`void evidenceRef`) rather than preserving it anywhere — two admissions over different reviewing evidence were observationally identical, and no downstream audit/replay could prove which evidence supported a given admission, contradicting this module's own stated evidence-required contract and its own doc comment's claim of mirroring `service-catalog-admission.ts`'s evidence-retention precedent.
+
+Fixed: `OrganizationOnboardingRequest` gained an `admissionEvidenceRef?: string` field, set once on the admitted request to the exact validated `evidenceRef`, never touched by `submitOrganizationOnboardingRequest`. 3 new tests (O6b: whitespace-only evidenceRef rejected; O6c: two admissions over different evidenceRef values retain two distinct, correct `admissionEvidenceRef`s) plus a new assertion in O3. Guard-disable sanity (reintroducing `void evidenceRef`) confirmed load-bearing: broke exactly O3's new assertion + O6c, nothing else; restored byte-identical.
+
+Full regression after correction + forward-port onto current `main` (`a91da015e41008a13578a9f136424909e482806e`): **3044/3044 passing**.
+
 ## Status
 
-**IMPLEMENTED / SELF-VALIDATED** — pending Brain/Founder independent review per `AGENTS.md` §10; Claude's authority ends at this status. `MERGE_DISPOSITION: HOLD_MERGE` — normal task-scoped PR against `main`; merge requires its own separately-granted protected owner-gate. Risk classification: MEDIUM — this checkpoint composes `OrganizationMembership`/`OrganizationAccessRoleContext` construction (adjacent to, but not itself, IAM authority), so it is reviewed with the same care as `service-catalog-admission.ts`/`partner-capability-admission.ts`, not treated as a routine LOW/pure-data change.
+**IMPLEMENTED / SELF-VALIDATED (corrected)** — Brain's F1 finding closed; pending fresh independent REV218 review of the corrected exact head. `MERGE_DISPOSITION: HOLD_MERGE`.

@@ -49,6 +49,7 @@ test("O3 (successful admission): constructs a real, active Organization + founde
   assert.equal(admittedRequest.status, "ADMITTED");
   assert.equal(admittedRequest.admittedOrganizationId, organization.organizationId);
   assert.equal(admittedRequest.decidedByRef, "akilta-staff-reviewer-1");
+  assert.equal(admittedRequest.admissionEvidenceRef, "internal://onboarding/review/req-1");
 
   assert.equal(organization.state, "ACTIVE");
   assert.equal(organization.tenantId, tenantScope.tenantId);
@@ -117,6 +118,51 @@ test("O6 (evidenceRef required): an admission with an empty evidenceRef is rejec
       }),
     InvalidOrganizationOnboardingError,
   );
+});
+
+test("O6b (evidenceRef required): a whitespace-only evidenceRef is rejected (malformed, not merely empty)", () => {
+  const request = freshRequest({ requestId: "req-6b" });
+  assert.throws(
+    () =>
+      admitOrganizationOnboardingRequest({
+        request,
+        newTenantScope: createTenantScope("tenant-6b"),
+        newOrganizationId: "org-6b",
+        founderMembershipId: "membership-6b",
+        admittingAuthorityPrincipalRef: "staff-6b",
+        evidenceRef: "   ",
+        admittedAt: "2026-10-11T01:00:00.000Z",
+      }),
+    InvalidOrganizationOnboardingError,
+  );
+});
+
+test("O6c (Brain correction, comment 6294369735): two admissions of otherwise-identical requests over DIFFERENT evidenceRef values are NOT observationally identical - each admitted request durably retains its own exact evidence", () => {
+  const requestA = freshRequest({ requestId: "req-6c-a" });
+  const requestB = freshRequest({ requestId: "req-6c-b" });
+
+  const { admittedRequest: admittedA } = admitOrganizationOnboardingRequest({
+    request: requestA,
+    newTenantScope: createTenantScope("tenant-6c"),
+    newOrganizationId: "org-6c-a",
+    founderMembershipId: "membership-6c-a",
+    admittingAuthorityPrincipalRef: "staff-6c",
+    evidenceRef: "internal://onboarding/review/evidence-A",
+    admittedAt: "2026-10-11T01:00:00.000Z",
+  });
+  const { admittedRequest: admittedB } = admitOrganizationOnboardingRequest({
+    request: requestB,
+    newTenantScope: createTenantScope("tenant-6c"),
+    newOrganizationId: "org-6c-b",
+    founderMembershipId: "membership-6c-b",
+    admittingAuthorityPrincipalRef: "staff-6c",
+    evidenceRef: "internal://onboarding/review/evidence-B",
+    admittedAt: "2026-10-11T01:00:00.000Z",
+  });
+
+  assert.equal(admittedA.admissionEvidenceRef, "internal://onboarding/review/evidence-A");
+  assert.equal(admittedB.admissionEvidenceRef, "internal://onboarding/review/evidence-B");
+  assert.notEqual(admittedA.admissionEvidenceRef, admittedB.admissionEvidenceRef);
 });
 
 test("O7 (successful rejection): a SUBMITTED request can be rejected, terminal, with reason/decision provenance recorded", () => {
