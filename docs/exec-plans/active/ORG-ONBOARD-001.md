@@ -48,6 +48,14 @@ Fixed: `OrganizationOnboardingRequest` gained an `admissionEvidenceRef?: string`
 
 Full regression after correction + forward-port onto current `main` (`a91da015e41008a13578a9f136424909e482806e`): **3044/3044 passing**.
 
+## Brain correction (F2) — submitted-request coherence not revalidated at transition, comment `6311999915`
+
+Brain's independent exact-head review of PR #169's forward-ported head (`cb66f2a5`) found that `OrganizationOnboardingRequest` is an exported structural interface, so a caller can hand-build a nominally `SUBMITTED` object; `admitOrganizationOnboardingRequest`/`rejectOrganizationOnboardingRequest` checked only `request.status === "SUBMITTED"` before consuming it, never revalidating `requestId`/`requestedDisplayName`/`requestedByRef`/`submittedAt` against the same invariants `submitOrganizationOnboardingRequest` itself enforces, nor rejecting a `SUBMITTED` request that already carries terminal-only metadata (`admittedOrganizationId`/`decidedByRef`/`decidedAt`/`rejectionReason`/`admissionEvidenceRef`). `admittedAt`/`rejectedAt` were also never ordered against `request.submittedAt`, so a terminal decision could predate the submission it decided.
+
+Fixed: a shared `requireCoherentSubmittedRequest` revalidates the four construction-time fields and fails closed on any terminal-only field already present; a shared `requireDecisionNotBeforeSubmission` rejects an `admittedAt`/`rejectedAt` chronologically before `request.submittedAt` (equal is accepted). Both run immediately after the status guard, before any further validation or construction, in both `admitOrganizationOnboardingRequest` and `rejectOrganizationOnboardingRequest` — preserving the self-admission prohibition, `admissionEvidenceRef` retention, and the B3/B4 boundary tests' own ordering invariants unchanged. 4 new tests (O11: stale `decidedAt`/`decidedByRef` on a nominally-SUBMITTED request rejected; O12: stale `admissionEvidenceRef`/`admittedOrganizationId` rejected on admit and reject; O13: malformed `requestId`/`requestedDisplayName`/`requestedByRef`/`submittedAt` rejected at the transition boundary, not just at submit time; O14: a decision timestamp before `submittedAt` fails closed on both paths, equal accepted). Guard-disable sanity (no-opping both new functions) confirmed load-bearing: broke exactly O11-O14, nothing else; restored byte-identical.
+
+Full regression after this correction: **3098/3098 passing**.
+
 ## Status
 
-**IMPLEMENTED / SELF-VALIDATED (corrected)** — Brain's F1 finding closed; pending fresh independent REV218 review of the corrected exact head. `MERGE_DISPOSITION: HOLD_MERGE`.
+**IMPLEMENTED / SELF-VALIDATED (corrected, F1+F2)** — both Brain findings closed; pending a fresh independent REV218 review of the corrected exact head on PR #169. `MERGE_DISPOSITION: HOLD_MERGE`.

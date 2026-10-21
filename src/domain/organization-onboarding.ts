@@ -69,6 +69,57 @@ function requireNonEmptyString(value: unknown, field: string): string {
   return value;
 }
 
+const TERMINAL_ONLY_FIELDS = [
+  "admittedOrganizationId",
+  "decidedByRef",
+  "decidedAt",
+  "rejectionReason",
+  "admissionEvidenceRef",
+] as const;
+
+/**
+ * Brain correction (comment `6311999915`, F1): `OrganizationOnboardingRequest`
+ * is an exported structural interface, so a caller can hand-build a
+ * nominally `SUBMITTED` object - the status guard alone (`request.status
+ * !== "SUBMITTED"`) does not prove the rest of the object is coherent.
+ * Revalidates `requestId`/`requestedDisplayName`/`requestedByRef`/
+ * `submittedAt` against the exact same invariants
+ * `submitOrganizationOnboardingRequest` itself enforces, and fails closed
+ * if any terminal-only field (`admittedOrganizationId`/`decidedByRef`/
+ * `decidedAt`/`rejectionReason`/`admissionEvidenceRef`) is already
+ * populated on a request claiming to still be `SUBMITTED` - no terminal
+ * decision ever consumes stale/forged terminal metadata. Returns the
+ * parsed `submittedAt` instant so both `admitOrganizationOnboardingRequest`
+ * and `rejectOrganizationOnboardingRequest` can order their own decision
+ * timestamp against it.
+ */
+function requireCoherentSubmittedRequest(request: OrganizationOnboardingRequest): number {
+  requireNonEmptyString(request.requestId, "request.requestId");
+  requireNonEmptyString(request.requestedDisplayName, "request.requestedDisplayName");
+  requireNonEmptyString(request.requestedByRef, "request.requestedByRef");
+  const submittedAt = requireNonEmptyString(request.submittedAt, "request.submittedAt");
+  const submittedAtMs = Date.parse(submittedAt);
+  if (Number.isNaN(submittedAtMs)) {
+    throw new InvalidOrganizationOnboardingError("request.submittedAt must be a valid ISO timestamp");
+  }
+  for (const field of TERMINAL_ONLY_FIELDS) {
+    if (request[field] !== undefined) {
+      throw new OrganizationOnboardingAdmissionError(
+        `request "${request.requestId}" claims status "SUBMITTED" but already carries terminal-only field "${field}" - a SUBMITTED request can never carry terminal decision metadata`,
+      );
+    }
+  }
+  return submittedAtMs;
+}
+
+function requireDecisionNotBeforeSubmission(decisionAtMs: number, submittedAtMs: number, field: string): void {
+  if (decisionAtMs < submittedAtMs) {
+    throw new InvalidOrganizationOnboardingError(
+      `${field} must not be chronologically before the request's own submittedAt - a decision can never predate the submission it decides`,
+    );
+  }
+}
+
 export type OrganizationOnboardingRequestId = string & { readonly __brand: "OrganizationOnboardingRequestId" };
 
 export type OrganizationOnboardingRequestStatus = "SUBMITTED" | "ADMITTED" | "REJECTED";
@@ -162,6 +213,7 @@ export function admitOrganizationOnboardingRequest(input: {
       `request "${request.requestId}" has status "${request.status}" - only a SUBMITTED request may be admitted, never resurrected from ADMITTED or REJECTED`,
     );
   }
+  const submittedAtMs = requireCoherentSubmittedRequest(request);
   const admittingAuthorityPrincipalRef = requireNonEmptyString(
     input.admittingAuthorityPrincipalRef,
     "admittingAuthorityPrincipalRef",
@@ -173,9 +225,11 @@ export function admitOrganizationOnboardingRequest(input: {
   }
   const evidenceRef = requireNonEmptyString(input.evidenceRef, "evidenceRef");
   const admittedAt = requireNonEmptyString(input.admittedAt, "admittedAt");
-  if (Number.isNaN(Date.parse(admittedAt))) {
+  const admittedAtMs = Date.parse(admittedAt);
+  if (Number.isNaN(admittedAtMs)) {
     throw new InvalidOrganizationOnboardingError("admittedAt must be a valid ISO timestamp");
   }
+  requireDecisionNotBeforeSubmission(admittedAtMs, submittedAtMs, "admittedAt");
 
   const organizationId = requireNonEmptyString(input.newOrganizationId, "newOrganizationId");
   const organization = activateOrganization({
@@ -222,15 +276,18 @@ export function rejectOrganizationOnboardingRequest(input: {
       `request "${request.requestId}" has status "${request.status}" - only a SUBMITTED request may be rejected`,
     );
   }
+  const submittedAtMs = requireCoherentSubmittedRequest(request);
   const rejectingAuthorityPrincipalRef = requireNonEmptyString(
     input.rejectingAuthorityPrincipalRef,
     "rejectingAuthorityPrincipalRef",
   );
   const reason = requireNonEmptyString(input.reason, "reason");
   const rejectedAt = requireNonEmptyString(input.rejectedAt, "rejectedAt");
-  if (Number.isNaN(Date.parse(rejectedAt))) {
+  const rejectedAtMs = Date.parse(rejectedAt);
+  if (Number.isNaN(rejectedAtMs)) {
     throw new InvalidOrganizationOnboardingError("rejectedAt must be a valid ISO timestamp");
   }
+  requireDecisionNotBeforeSubmission(rejectedAtMs, submittedAtMs, "rejectedAt");
   return {
     ...request,
     status: "REJECTED",

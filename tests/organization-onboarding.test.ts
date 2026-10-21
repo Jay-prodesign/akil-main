@@ -243,3 +243,167 @@ test("O10 (malformed admittedAt/rejectedAt timestamps rejected)", () => {
     InvalidOrganizationOnboardingError,
   );
 });
+
+// --- Brain correction (comment 6311999915, F2): submitted-request coherence revalidation ---
+
+test("O11 (Brain F2): a hand-built nominally-SUBMITTED request carrying stale terminal metadata (decidedAt/decidedByRef) cannot be admitted", () => {
+  const request = freshRequest({ requestId: "req-11" });
+  const forged: OrganizationOnboardingRequest = {
+    ...request,
+    decidedAt: "2026-10-01T00:00:00.000Z",
+    decidedByRef: "someone-else",
+  };
+  assert.throws(
+    () =>
+      admitOrganizationOnboardingRequest({
+        request: forged,
+        newTenantScope: createTenantScope("tenant-11"),
+        newOrganizationId: "org-11",
+        founderMembershipId: "membership-11",
+        admittingAuthorityPrincipalRef: "staff-11",
+        evidenceRef: "internal://onboarding/review/11",
+        admittedAt: "2026-10-11T01:00:00.000Z",
+      }),
+    OrganizationOnboardingAdmissionError,
+  );
+});
+
+test("O12 (Brain F2): a hand-built nominally-SUBMITTED request carrying a stale admissionEvidenceRef or admittedOrganizationId cannot be admitted or rejected", () => {
+  const request = freshRequest({ requestId: "req-12" });
+  const forgedWithEvidence: OrganizationOnboardingRequest = {
+    ...request,
+    admissionEvidenceRef: "internal://stale-evidence",
+  };
+  assert.throws(
+    () =>
+      admitOrganizationOnboardingRequest({
+        request: forgedWithEvidence,
+        newTenantScope: createTenantScope("tenant-12"),
+        newOrganizationId: "org-12",
+        founderMembershipId: "membership-12",
+        admittingAuthorityPrincipalRef: "staff-12",
+        evidenceRef: "internal://onboarding/review/12",
+        admittedAt: "2026-10-11T01:00:00.000Z",
+      }),
+    OrganizationOnboardingAdmissionError,
+  );
+
+  const forgedWithOrgId: OrganizationOnboardingRequest = {
+    ...request,
+    admittedOrganizationId: "org-forged" as never,
+  };
+  assert.throws(
+    () =>
+      rejectOrganizationOnboardingRequest({
+        request: forgedWithOrgId,
+        rejectingAuthorityPrincipalRef: "staff-12b",
+        reason: "x",
+        rejectedAt: "2026-10-11T01:00:00.000Z",
+      }),
+    OrganizationOnboardingAdmissionError,
+  );
+});
+
+test("O13 (Brain F2): a hand-built SUBMITTED request with malformed submittedAt/requestId/requestedDisplayName/requestedByRef provenance is rejected at the transition boundary, not just at submit time", () => {
+  const request = freshRequest({ requestId: "req-13" });
+
+  const malformedSubmittedAt: OrganizationOnboardingRequest = { ...request, submittedAt: "not-a-timestamp" };
+  assert.throws(
+    () =>
+      admitOrganizationOnboardingRequest({
+        request: malformedSubmittedAt,
+        newTenantScope: createTenantScope("tenant-13"),
+        newOrganizationId: "org-13a",
+        founderMembershipId: "membership-13a",
+        admittingAuthorityPrincipalRef: "staff-13a",
+        evidenceRef: "internal://onboarding/review/13a",
+        admittedAt: "2026-10-11T01:00:00.000Z",
+      }),
+    InvalidOrganizationOnboardingError,
+  );
+
+  const emptyRequestId: OrganizationOnboardingRequest = { ...request, requestId: "" as never };
+  assert.throws(
+    () =>
+      rejectOrganizationOnboardingRequest({
+        request: emptyRequestId,
+        rejectingAuthorityPrincipalRef: "staff-13b",
+        reason: "x",
+        rejectedAt: "2026-10-11T01:00:00.000Z",
+      }),
+    InvalidOrganizationOnboardingError,
+  );
+
+  const paddedDisplayName: OrganizationOnboardingRequest = { ...request, requestedDisplayName: "  padded  " };
+  assert.throws(
+    () =>
+      admitOrganizationOnboardingRequest({
+        request: paddedDisplayName,
+        newTenantScope: createTenantScope("tenant-13c"),
+        newOrganizationId: "org-13c",
+        founderMembershipId: "membership-13c",
+        admittingAuthorityPrincipalRef: "staff-13c",
+        evidenceRef: "internal://onboarding/review/13c",
+        admittedAt: "2026-10-11T01:00:00.000Z",
+      }),
+    InvalidOrganizationOnboardingError,
+  );
+
+  const emptyRequestedByRef: OrganizationOnboardingRequest = { ...request, requestedByRef: "" };
+  assert.throws(
+    () =>
+      admitOrganizationOnboardingRequest({
+        request: emptyRequestedByRef,
+        newTenantScope: createTenantScope("tenant-13d"),
+        newOrganizationId: "org-13d",
+        founderMembershipId: "membership-13d",
+        admittingAuthorityPrincipalRef: "staff-13d",
+        evidenceRef: "internal://onboarding/review/13d",
+        admittedAt: "2026-10-11T01:00:00.000Z",
+      }),
+    InvalidOrganizationOnboardingError,
+  );
+});
+
+test("O14 (Brain F2): a decision timestamp chronologically before the request's own submittedAt fails closed for both admission and rejection", () => {
+  const request = freshRequest({ requestId: "req-14", submittedAt: "2026-10-11T12:00:00.000Z" });
+
+  assert.throws(
+    () =>
+      admitOrganizationOnboardingRequest({
+        request,
+        newTenantScope: createTenantScope("tenant-14a"),
+        newOrganizationId: "org-14a",
+        founderMembershipId: "membership-14a",
+        admittingAuthorityPrincipalRef: "staff-14a",
+        evidenceRef: "internal://onboarding/review/14a",
+        admittedAt: "2026-10-11T00:00:00.000Z",
+      }),
+    InvalidOrganizationOnboardingError,
+  );
+
+  const request2 = freshRequest({ requestId: "req-14b", submittedAt: "2026-10-11T12:00:00.000Z" });
+  assert.throws(
+    () =>
+      rejectOrganizationOnboardingRequest({
+        request: request2,
+        rejectingAuthorityPrincipalRef: "staff-14b",
+        reason: "x",
+        rejectedAt: "2026-10-11T00:00:00.000Z",
+      }),
+    InvalidOrganizationOnboardingError,
+  );
+
+  // Equal to submittedAt is acceptable (not "before").
+  const request3 = freshRequest({ requestId: "req-14c", submittedAt: "2026-10-11T12:00:00.000Z" });
+  const admitted = admitOrganizationOnboardingRequest({
+    request: request3,
+    newTenantScope: createTenantScope("tenant-14c"),
+    newOrganizationId: "org-14c",
+    founderMembershipId: "membership-14c",
+    admittingAuthorityPrincipalRef: "staff-14c",
+    evidenceRef: "internal://onboarding/review/14c",
+    admittedAt: "2026-10-11T12:00:00.000Z",
+  });
+  assert.equal(admitted.admittedRequest.status, "ADMITTED");
+});
