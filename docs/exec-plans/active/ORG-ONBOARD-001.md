@@ -40,6 +40,22 @@ No modification to `organization.ts`, `organization-membership.ts`, `organizatio
 - `package.json`: zero new runtime dependency.
 - Files touched: `src/domain/organization-onboarding.ts` (new), `tests/organization-onboarding.test.ts` (new), `tests/org-onboard-001-boundary-scan.test.ts` (new), this exec-plan, `docs/engineering/CURRENT_STATE.md`.
 
+## Brain correction (F1) — evidence discarded, comment `6294369735`
+
+Brain's independent exact-head review of `211eedd7` found `admitOrganizationOnboardingRequest` validated the required `evidenceRef` and then discarded it (`void evidenceRef`) rather than preserving it anywhere — two admissions over different reviewing evidence were observationally identical, and no downstream audit/replay could prove which evidence supported a given admission, contradicting this module's own stated evidence-required contract and its own doc comment's claim of mirroring `service-catalog-admission.ts`'s evidence-retention precedent.
+
+Fixed: `OrganizationOnboardingRequest` gained an `admissionEvidenceRef?: string` field, set once on the admitted request to the exact validated `evidenceRef`, never touched by `submitOrganizationOnboardingRequest`. 3 new tests (O6b: whitespace-only evidenceRef rejected; O6c: two admissions over different evidenceRef values retain two distinct, correct `admissionEvidenceRef`s) plus a new assertion in O3. Guard-disable sanity (reintroducing `void evidenceRef`) confirmed load-bearing: broke exactly O3's new assertion + O6c, nothing else; restored byte-identical.
+
+Full regression after correction + forward-port onto current `main` (`a91da015e41008a13578a9f136424909e482806e`): **3044/3044 passing**.
+
+## Brain correction (F2) — submitted-request coherence not revalidated at transition, comment `6311999915`
+
+Brain's independent exact-head review of PR #169's forward-ported head (`cb66f2a5`) found that `OrganizationOnboardingRequest` is an exported structural interface, so a caller can hand-build a nominally `SUBMITTED` object; `admitOrganizationOnboardingRequest`/`rejectOrganizationOnboardingRequest` checked only `request.status === "SUBMITTED"` before consuming it, never revalidating `requestId`/`requestedDisplayName`/`requestedByRef`/`submittedAt` against the same invariants `submitOrganizationOnboardingRequest` itself enforces, nor rejecting a `SUBMITTED` request that already carries terminal-only metadata (`admittedOrganizationId`/`decidedByRef`/`decidedAt`/`rejectionReason`/`admissionEvidenceRef`). `admittedAt`/`rejectedAt` were also never ordered against `request.submittedAt`, so a terminal decision could predate the submission it decided.
+
+Fixed: a shared `requireCoherentSubmittedRequest` revalidates the four construction-time fields and fails closed on any terminal-only field already present; a shared `requireDecisionNotBeforeSubmission` rejects an `admittedAt`/`rejectedAt` chronologically before `request.submittedAt` (equal is accepted). Both run immediately after the status guard, before any further validation or construction, in both `admitOrganizationOnboardingRequest` and `rejectOrganizationOnboardingRequest` — preserving the self-admission prohibition, `admissionEvidenceRef` retention, and the B3/B4 boundary tests' own ordering invariants unchanged. 4 new tests (O11: stale `decidedAt`/`decidedByRef` on a nominally-SUBMITTED request rejected; O12: stale `admissionEvidenceRef`/`admittedOrganizationId` rejected on admit and reject; O13: malformed `requestId`/`requestedDisplayName`/`requestedByRef`/`submittedAt` rejected at the transition boundary, not just at submit time; O14: a decision timestamp before `submittedAt` fails closed on both paths, equal accepted). Guard-disable sanity (no-opping both new functions) confirmed load-bearing: broke exactly O11-O14, nothing else; restored byte-identical.
+
+Full regression after this correction: **3098/3098 passing**.
+
 ## Status
 
-**IMPLEMENTED / SELF-VALIDATED** — pending Brain/Founder independent review per `AGENTS.md` §10; Claude's authority ends at this status. `MERGE_DISPOSITION: HOLD_MERGE` — normal task-scoped PR against `main`; merge requires its own separately-granted protected owner-gate. Risk classification: MEDIUM — this checkpoint composes `OrganizationMembership`/`OrganizationAccessRoleContext` construction (adjacent to, but not itself, IAM authority), so it is reviewed with the same care as `service-catalog-admission.ts`/`partner-capability-admission.ts`, not treated as a routine LOW/pure-data change.
+**IMPLEMENTED / SELF-VALIDATED (corrected, F1+F2)** — both Brain findings closed; pending a fresh independent REV218 review of the corrected exact head on PR #169. `MERGE_DISPOSITION: HOLD_MERGE`.

@@ -39,10 +39,13 @@ services:
         value: production
       - key: PERSISTENCE_DRIVER
         value: FILE
-    # No HTTP /health route exists on this runtime yet (AA-002's own
-    # "SAFE DARK LIMIT" notes this). Use a TCP check, not an http_path,
-    # until a real health route is built.
+    # DEPLOY-003 closed the gap AA-002's "SAFE DARK LIMIT" flagged (no HTTP
+    # /health route existed): http-server.ts now serves GET /health
+    # unauthenticated, backed by the same evaluateHealth() aggregation
+    # RUNTIME-001 already defined. Use the real http_path check, not a bare
+    # TCP probe.
     health_check:
+      http_path: /health
       port: 8080
       initial_delay_seconds: 10
       period_seconds: 10
