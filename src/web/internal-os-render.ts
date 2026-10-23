@@ -1,4 +1,4 @@
-import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, AdminResourceBindingViewState, OperationalObservabilityViewState, PendingOffboardingRequestsViewState, ConnectionsViewState, KnowledgeViewState, KnowledgeEvidenceEntry, PeopleDirectoryEntry, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary } from "./internal-os-view-state.js";
+import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, AdminResourceBindingViewState, OperationalObservabilityViewState, PendingOffboardingRequestsViewState, ConnectionsViewState, KnowledgeViewState, KnowledgeEvidenceEntry, AttentionViewState, AttentionCredentialAccessItem, AttentionCustomerApprovalItem, PeopleDirectoryEntry, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary } from "./internal-os-view-state.js";
 import type { ConnectionState } from "../domain/connection-authority.js";
 import type { IntegrationConnectionSummary } from "../domain/integration-admin-view.js";
 
@@ -667,6 +667,105 @@ export function knowledgePageContent(
         organizationName,
         title: "Knowledge",
         bodyHtml: renderKnowledgeBody(view),
+      });
+  }
+}
+
+function renderCredentialAccessRow(item: AttentionCredentialAccessItem): string {
+  const ownership = `${escapeHtml(item.customerId)} / ${escapeHtml(item.projectId)}${
+    item.serviceRef !== undefined ? ` / ${escapeHtml(item.serviceRef)}` : ""
+  }`;
+  return `<tr><td>${escapeHtml(item.connectionBindingId)}</td><td>${escapeHtml(item.connectorKind)}</td><td><span class="status status-${CONNECTION_STATE_TONE[item.connectionState]}" role="status">${escapeHtml(item.connectionState)}</span></td><td>${ownership}</td></tr>`;
+}
+
+function renderCustomerApprovalRow(item: AttentionCustomerApprovalItem): string {
+  return `<tr><td>${escapeHtml(item.waitRequestId)}</td><td>${escapeHtml(item.customerId)} / ${escapeHtml(item.projectId)}</td><td>${escapeHtml(item.jobId)}</td><td>${escapeHtml(item.decisionRef)}</td><td>${escapeHtml(item.effectRef)}</td><td>${escapeHtml(item.raisedAt)}</td></tr>`;
+}
+
+/**
+ * Says exactly which attention families this page covers, so an empty
+ * page can never read as "nothing in this organization needs attention"
+ * for families it does not track.
+ */
+const ATTENTION_SCOPE_NOTE =
+  "Read-only. This page covers two kinds of attention: connections with a credential or access problem (DEGRADED or REVOKED), and protected decisions waiting for approval. Other kinds of attention are not tracked here yet.";
+
+/**
+ * C3 Attention slice: read-only Attention destination. Every field comes
+ * from `AttentionCredentialAccessItem` / `AttentionCustomerApprovalItem`,
+ * the allow-lists `resolveAttentionView` builds, so no secret reference and
+ * no wait `reason` reaches this function. Escaped text only, no mutation
+ * control.
+ */
+function renderAttentionBody(view: Exclude<AttentionViewState, { kind: "NOT_ACTIVE" } | { kind: "ERROR" }>): string {
+  if (view.kind === "EMPTY") {
+    return `
+  <section aria-labelledby="attention-heading" class="card">
+    <h2 id="attention-heading">Attention</h2>
+    <p>${ATTENTION_SCOPE_NOTE}</p>
+    <p>No connection has a credential or access problem, and no protected decision is waiting for approval.</p>
+  </section>`;
+  }
+  const credentialSection =
+    view.credentialAccessProblems.length === 0
+      ? `<p>No connection has a credential or access problem.</p>`
+      : `<p>No state-change time is recorded for connections, so this list cannot show how long each has been in this state.</p>
+    <table>
+      <thead><tr><th>Connection</th><th>Connector</th><th>State</th><th>Customer / project</th></tr></thead>
+      <tbody>
+      ${view.credentialAccessProblems.map(renderCredentialAccessRow).join("\n      ")}
+      </tbody>
+    </table>`;
+  const approvalSection =
+    view.customerApprovalsRequired.length === 0
+      ? `<p>No protected decision is waiting for approval.</p>`
+      : `<p>Longest waiting first.</p>
+    <table>
+      <thead><tr><th>Wait request</th><th>Customer / project</th><th>Job</th><th>Decision</th><th>Effect</th><th>Waiting since</th></tr></thead>
+      <tbody>
+      ${view.customerApprovalsRequired.map(renderCustomerApprovalRow).join("\n      ")}
+      </tbody>
+    </table>`;
+  return `
+  <section aria-labelledby="attention-heading" class="card">
+    <h2 id="attention-heading">Attention</h2>
+    <p>${ATTENTION_SCOPE_NOTE}</p>
+  </section>
+  <section aria-labelledby="attention-credential-heading" class="card">
+    <h2 id="attention-credential-heading">Credential or access problem</h2>
+    ${credentialSection}
+  </section>
+  <section aria-labelledby="attention-approval-heading" class="card">
+    <h2 id="attention-approval-heading">Customer approval required</h2>
+    ${approvalSection}
+  </section>`;
+}
+
+/**
+ * C3 Attention slice: `NOT_ACTIVE` returns exactly what
+ * `notActiveDestinationPageContent` returned for `attention` before C3, so
+ * an unwired caller's page (and a viewer without WRITE) is unchanged.
+ * `ERROR` becomes the OS ERROR page (500, no data and no detail shown),
+ * never an EMPTY list.
+ */
+export function attentionPageContent(
+  nav: ReadonlyArray<NavDestination>,
+  organizationName: string,
+  view: AttentionViewState,
+): InternalOsPageContent {
+  switch (view.kind) {
+    case "NOT_ACTIVE":
+      return notActiveDestinationPageContent(nav, organizationName, "attention");
+    case "ERROR":
+      return { kind: "ERROR", reason: "attention items could not be read" };
+    case "EMPTY":
+    case "READY":
+      return destinationContent({
+        nav,
+        activeKey: "attention",
+        organizationName,
+        title: "Attention",
+        bodyHtml: renderAttentionBody(view),
       });
   }
 }

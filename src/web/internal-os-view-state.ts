@@ -16,6 +16,7 @@ import type { StoredConnectorConnection } from "../domain/durable-connector-conn
 import { buildConnectorCatalog } from "../domain/integration-connector-catalog.js";
 import { buildIntegrationsAdminView, type IntegrationConnectionSummary } from "../domain/integration-admin-view.js";
 import type { EvidenceReference } from "../domain/evidence.js";
+import type { StoredProtectedDecisionWait } from "../domain/durable-protected-decision-wait-store.js";
 import {
   requireInternalOsProjectAccess,
   InternalOsAccessDeniedError,
@@ -358,8 +359,9 @@ export function resolveHomeView(input: {
  * C3 (gap scan 2026-10-23) update: Connections now has a real source port
  * (`ConnectionsSource` / `resolveConnectionsView` below), and so does
  * Knowledge (`KnowledgeSource` / `resolveKnowledgeView`, C3 Knowledge
- * slice). Each still renders this same `NOT_ACTIVE` state when no source is
- * wired. Attention and AI & Capabilities are unchanged.
+ * slice), and so does Attention (`AttentionSource` / `resolveAttentionView`,
+ * C3 Attention slice). Each still renders this same `NOT_ACTIVE` state when
+ * no source is wired. AI & Capabilities is unchanged.
  */
 export type NotActiveViewState = { readonly kind: "NOT_ACTIVE" };
 
@@ -586,6 +588,247 @@ export function resolveKnowledgeView(
     capturedAt: record.capturedAt,
   }));
   return { kind: "READY", evidence };
+}
+
+/**
+ * C3 Attention slice (gap scan 2026-10-23): caller-injected read source for
+ * the dedicated `/os/attention` destination. Same optional-source pattern
+ * as `ConnectionsSource`: an absent source renders `NOT_ACTIVE`, never
+ * fabricated content. The deployable runtime wires
+ * `createDurableAttentionSource` here, over the runtime's single
+ * `FileDurableConnectorConnectionStore` (the same instance `/os/connections`
+ * and `/os/admin` read) and its `FileDurableProtectedDecisionWaitStore`.
+ *
+ * This page covers two of V4-OPS-001's deferred attention families, the
+ * two that now have a real source in this repository:
+ * - **credential/access problem**: a connector connection in `DEGRADED` or
+ *   `REVOKED` state (`listConnections`);
+ * - **customer approval required**: a protected-decision WAIT with no
+ *   resume authorization yet (`listProtectedDecisionWaits`).
+ *
+ * Contract for both methods: return every stored record for the
+ * Organization's tenant, unfiltered. A read or replay failure THROWS. It
+ * must never be reported as an empty list - that would tell staff "nothing
+ * needs attention", which would be false. Both return raw records; family
+ * selection and field selection happen in `resolveAttentionView`, so every
+ * source, including a faulty one, goes through the same rules.
+ */
+export interface AttentionSource {
+  listConnections(organization: Organization): ReadonlyArray<StoredConnectorConnection>;
+  listProtectedDecisionWaits(organization: Organization): ReadonlyArray<StoredProtectedDecisionWait>;
+}
+
+/**
+ * One credential/access-problem row: an allow-list built from CONN-001's
+ * secret-masked `IntegrationConnectionSummary` (so no field can hold a
+ * `secretRef`). Only what is needed to identify the connection and whom it
+ * belongs to.
+ *
+ * No "since" timestamp: `ConnectionBinding` and `StoredConnectorConnection`
+ * record no time for a state change (only a record `version`), so this row
+ * cannot say how long a connection has been DEGRADED or REVOKED, and does
+ * not pretend to. Workspace/instance references, auth mode and evidence
+ * reference are left to `/os/connections`, which shows the full masked
+ * record.
+ */
+export interface AttentionCredentialAccessItem {
+  readonly connectionBindingId: string;
+  readonly connectorKind: string;
+  readonly connectionState: "DEGRADED" | "REVOKED";
+  readonly customerId: string;
+  readonly projectId: string;
+  readonly serviceRef?: string;
+}
+
+/**
+ * One customer-approval-required row: an allow-list of
+ * `ProtectedDecisionWaitRequest` fields - the wait id, the customer /
+ * project / job it was raised for, the decision it is waiting on, the
+ * effect it gates, and when it was raised.
+ *
+ * Left out on purpose:
+ * - `reason`: free text supplied by whoever raised the wait, validated
+ *   only for being non-empty. The one existing staff read model over wait
+ *   requests (OS-V0-12's `PendingApprovalObservability` on `/os/admin`)
+ *   already leaves it out, and this page follows that precedent the same
+ *   way Knowledge leaves out `sourceLocator`.
+ * - `activationFingerprintAtWait`, `runId`, `attempt`: internal execution
+ *   bookkeeping used only by the resume gate's currentness recheck.
+ * - `tenantId`: the page's own Organization by construction.
+ *
+ * "Waiting since" is `raisedAt` as recorded. The page does not compute an
+ * elapsed duration: this module reads no clock.
+ */
+export interface AttentionCustomerApprovalItem {
+  readonly waitRequestId: string;
+  readonly customerId: string;
+  readonly projectId: string;
+  readonly jobId: string;
+  readonly decisionRef: string;
+  readonly effectRef: string;
+  readonly raisedAt: string;
+}
+
+/**
+ * Same four states as `ConnectionsViewState`:
+ * - `NOT_ACTIVE`: no source is wired (the pre-C3 default), or the viewer
+ *   does not hold WRITE (see `resolveAttentionView`).
+ * - `ERROR`: either source threw, or either returned a record that belongs
+ *   to a different tenant. Rendered as the OS ERROR page (500), never as
+ *   EMPTY.
+ * - `EMPTY`: both sources were read successfully and neither family has an
+ *   item.
+ * - `READY`: at least one item in at least one family. One family may
+ *   still be empty.
+ *
+ * Each family is its own array, so a later family (for example "recovery
+ * required", once retry containment is wired - gap scan C6) is one more
+ * array, not a change to these two.
+ */
+export type AttentionViewState =
+  | { readonly kind: "NOT_ACTIVE" }
+  | { readonly kind: "ERROR" }
+  | { readonly kind: "EMPTY" }
+  | {
+      readonly kind: "READY";
+      readonly credentialAccessProblems: ReadonlyArray<AttentionCredentialAccessItem>;
+      readonly customerApprovalsRequired: ReadonlyArray<AttentionCustomerApprovalItem>;
+    };
+
+const ATTENTION_CONNECTION_STATE_ORDER: Readonly<Record<"DEGRADED" | "REVOKED", number>> = { REVOKED: 0, DEGRADED: 1 };
+
+function isCredentialAccessProblemState(
+  state: IntegrationConnectionSummary["connectionState"],
+): state is "DEGRADED" | "REVOKED" {
+  return state === "DEGRADED" || state === "REVOKED";
+}
+
+/** REVOKED before DEGRADED, then by `connectionBindingId`. */
+function compareCredentialAccessOrder(a: AttentionCredentialAccessItem, b: AttentionCredentialAccessItem): number {
+  const byState = ATTENTION_CONNECTION_STATE_ORDER[a.connectionState] - ATTENTION_CONNECTION_STATE_ORDER[b.connectionState];
+  if (byState !== 0) {
+    return byState;
+  }
+  if (a.connectionBindingId !== b.connectionBindingId) {
+    return a.connectionBindingId < b.connectionBindingId ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Longest waiting first (`raisedAt` ascending), then by `waitRequestId`.
+ * `raisedAt` is compared as a plain string, like Knowledge's `capturedAt`:
+ * deterministic, and chronological for ISO-8601 timestamps.
+ */
+function compareCustomerApprovalOrder(a: AttentionCustomerApprovalItem, b: AttentionCustomerApprovalItem): number {
+  if (a.raisedAt !== b.raisedAt) {
+    return a.raisedAt < b.raisedAt ? -1 : 1;
+  }
+  if (a.waitRequestId !== b.waitRequestId) {
+    return a.waitRequestId < b.waitRequestId ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Access: the `attention` destination is gated by `isDestinationVisible`
+ * on EXECUTE or `canPerformProtectedActions`, which the request handler
+ * enforces before this function is called. That gate does not imply
+ * WRITE. Both families shown here are new, Organization-wide exposure:
+ * every customer's connection state (which `/os/connections` shows only to
+ * WRITE holders) and every customer's pending protected decisions (the
+ * same customer / project / job identifiers `/os/knowledge` shows only to
+ * WRITE holders). Following the People slice's precedent - new broad
+ * exposure on a destination whose own floor is lower is additionally
+ * WRITE-gated, and a viewer without WRITE gets the unchanged pre-C3 page,
+ * not a 403 - this function returns `NOT_ACTIVE` without WRITE and never
+ * reads either source.
+ *
+ * Tenant isolation follows `resolveConnectionsView` for both sources: each
+ * returned record's own tenant is re-checked against the Organization's,
+ * and a mismatch makes the whole view `ERROR` instead of being dropped
+ * (dropping it could turn a contaminated read into EMPTY). Both durable
+ * stores already throw on this case during replay; this check covers any
+ * other implementation of the port. A resume whose `waitRequestId` does
+ * not match its own wait request is treated the same way.
+ */
+export function resolveAttentionView(input: {
+  readonly organization: Organization;
+  readonly context: InternalOsAccessContext;
+  readonly source: AttentionSource | undefined;
+}): AttentionViewState {
+  const { organization, source } = input;
+  if (source === undefined || !input.context.access.permissions.has("WRITE")) {
+    return { kind: "NOT_ACTIVE" };
+  }
+
+  let connections: ReadonlyArray<StoredConnectorConnection>;
+  try {
+    connections = source.listConnections(organization);
+  } catch {
+    // A read/replay failure (e.g. CorruptedConnectorConnectionFileError, or
+    // a lock timeout) is this view's own ERROR - never relabeled as EMPTY
+    // ("nothing needs attention") and never left to escape.
+    return { kind: "ERROR" };
+  }
+  let waits: ReadonlyArray<StoredProtectedDecisionWait>;
+  try {
+    waits = source.listProtectedDecisionWaits(organization);
+  } catch {
+    // Same rule for the second source (e.g.
+    // CorruptedProtectedDecisionWaitLineError): ERROR, never EMPTY, never
+    // an escaped exception - even though the first source was read fine.
+    return { kind: "ERROR" };
+  }
+
+  if (connections.some((record) => record.instance.binding.ownership.tenantId !== organization.tenantId)) {
+    return { kind: "ERROR" };
+  }
+  if (
+    waits.some(
+      (wait) =>
+        wait.request.tenantId !== organization.tenantId ||
+        (wait.resume !== undefined && wait.resume.waitRequestId !== wait.request.waitRequestId),
+    )
+  ) {
+    return { kind: "ERROR" };
+  }
+
+  const { connections: masked } = buildIntegrationsAdminView({ catalog: NO_CONNECTOR_CATALOG, connections });
+  const credentialAccessProblems: AttentionCredentialAccessItem[] = [];
+  for (const connection of masked) {
+    const state = connection.connectionState;
+    if (!isCredentialAccessProblemState(state)) {
+      continue;
+    }
+    credentialAccessProblems.push({
+      connectionBindingId: connection.connectionBindingId,
+      connectorKind: connection.connectorKind,
+      connectionState: state,
+      customerId: connection.ownership.customerId,
+      projectId: connection.ownership.projectId,
+      ...(connection.ownership.serviceRef !== undefined ? { serviceRef: connection.ownership.serviceRef } : {}),
+    });
+  }
+  credentialAccessProblems.sort(compareCredentialAccessOrder);
+
+  const customerApprovalsRequired: AttentionCustomerApprovalItem[] = waits
+    .filter((wait) => wait.resume === undefined)
+    .map(({ request }) => ({
+      waitRequestId: request.waitRequestId,
+      customerId: request.customerId,
+      projectId: request.projectId,
+      jobId: request.jobId,
+      decisionRef: request.decisionRef,
+      effectRef: request.effectRef,
+      raisedAt: request.raisedAt,
+    }))
+    .sort(compareCustomerApprovalOrder);
+
+  if (credentialAccessProblems.length === 0 && customerApprovalsRequired.length === 0) {
+    return { kind: "EMPTY" };
+  }
+  return { kind: "READY", credentialAccessProblems, customerApprovalsRequired };
 }
 
 /**

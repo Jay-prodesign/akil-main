@@ -15,6 +15,7 @@ import { createDurableWorkJobSource } from "../web/work-job-admin-source.js";
 import { createDurableOperationalObservabilitySource } from "../web/operational-observability-admin-source.js";
 import { createDurableConnectionsSource } from "../web/connections-durable-source.js";
 import { createDurableKnowledgeSource } from "../web/knowledge-durable-source.js";
+import { createDurableAttentionSource } from "../web/attention-durable-source.js";
 import { createDurablePeopleDirectorySource } from "../web/people-directory-durable-source.js";
 import { createDurableCustomerOffboardingAdminSource } from "../web/customer-offboarding-admin-source.js";
 import { createDurableOrganizationResourceBindingSource } from "../web/organization-resource-binding-durable-source.js";
@@ -70,6 +71,16 @@ import type { StaffAccessGrant } from "../web/internal-os-access.js";
  *   shown (`sourceLocator` is left out) - see `resolveKnowledgeView`. The
  *   destination stays WRITE-gated, unchanged. A store read failure renders
  *   the OS ERROR page, not an empty list.
+ * - **Attention destination (C3).** `/os/attention` lists two attention
+ *   families (`createDurableAttentionSource`): connections in `DEGRADED`
+ *   or `REVOKED` state, from the same `FileDurableConnectorConnectionStore`
+ *   instance, and protected-decision waits with no resume yet, from
+ *   `FileDurableProtectedDecisionWaitStore.listByTenant` (a store newly
+ *   composed for this page, with its own `/health` probe). Both are
+ *   allow-listed in `resolveAttentionView`. The items additionally require
+ *   WRITE on top of the destination's existing EXECUTE/protected-actions
+ *   gate. A read failure in either store renders the OS ERROR page, not
+ *   an empty list.
  * - **Routing.** One Node server dispatches `GET /health`, then `/os/*`
  *   (the staff surface), then everything else (the customer `/portal`
  *   surface) - see `createHttpServer`.
@@ -210,6 +221,7 @@ export function createNodeRuntime(config: AppConfig, options: NodeRuntimeOptions
     connectionsSource: createDurableConnectionsSource(stores.connectorConnectionStore),
     peopleDirectorySource: createDurablePeopleDirectorySource(stores.organizationMembershipStore),
     knowledgeSource: createDurableKnowledgeSource(stores.evidenceReferenceStore),
+    attentionSource: createDurableAttentionSource(stores.connectorConnectionStore, stores.protectedDecisionWaitStore),
   });
 
   const server = createHttpServer({

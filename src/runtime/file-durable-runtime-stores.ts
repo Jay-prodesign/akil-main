@@ -12,6 +12,7 @@ import { FileDurableConfigurationPolicyDecisionStore } from "../domain/durable-c
 import { FileDurableEvidenceReferenceStore } from "../domain/durable-evidence-reference-store.js";
 import { FileDurableControlledOrganizationProvisioningStore } from "../domain/durable-controlled-organization-provisioning-store.js";
 import { FileDurableStaffAccessGrantStore } from "../domain/durable-staff-access-grant-store.js";
+import { FileDurableProtectedDecisionWaitStore } from "../domain/durable-protected-decision-wait-store.js";
 import type { HealthProbeResult } from "./health-check.js";
 
 /**
@@ -25,9 +26,16 @@ import type { HealthProbeResult } from "./health-check.js";
  * Only stores that a read surface (`/portal` or `/os`) actually uses are
  * composed here. Stores that no served route reads yet (engineering, plan
  * admission, quota reservation, outcome-job execution, external sale
- * bootstrap, protected-decision record/wait) are deliberately not
- * constructed: building a store nothing reads would add a health probe
- * with nothing behind it.
+ * bootstrap, protected-decision record) are deliberately not constructed:
+ * building a store nothing reads would add a health probe with nothing
+ * behind it.
+ *
+ * C3 Attention slice: the protected-decision WAIT store is now composed,
+ * because `/os/attention` reads it (`listByTenant`). Its directory has the
+ * same shape a standalone `FileDurableProtectedDecisionWaitStore` uses
+ * (per-tenant `.wait.jsonl`/`.resume.jsonl` logs plus its lock
+ * directories), and it adds one `file-store:protected-decision-waits`
+ * health probe.
  */
 export const FILE_DURABLE_RUNTIME_STORE_LAYOUT = {
   projects: "projects",
@@ -42,6 +50,7 @@ export const FILE_DURABLE_RUNTIME_STORE_LAYOUT = {
   evidenceReferences: "evidence-references",
   controlledOrganizationProvisioning: "controlled-organization-provisioning",
   staffAccessGrants: "staff-access-grants",
+  protectedDecisionWaits: "protected-decision-waits",
 } as const;
 
 export type FileDurableRuntimeStoreKey = keyof typeof FILE_DURABLE_RUNTIME_STORE_LAYOUT;
@@ -61,6 +70,8 @@ export interface FileDurableRuntimeStores {
   readonly controlledOrganizationProvisioningStore: FileDurableControlledOrganizationProvisioningStore;
   /** C2: explicit per-membership `/os` access grants (`requireInternalOsAccess` evidence). */
   readonly staffAccessGrantStore: FileDurableStaffAccessGrantStore;
+  /** C3 Attention: protected-decision WAIT/resume logs (`/os/attention` "customer approval required"). */
+  readonly protectedDecisionWaitStore: FileDurableProtectedDecisionWaitStore;
 }
 
 /** Absolute (or caller-relative) directory of one store under `dataDir`. */
@@ -93,6 +104,7 @@ export function createFileDurableRuntimeStores(dataDir: string): FileDurableRunt
       dir("controlledOrganizationProvisioning"),
     ),
     staffAccessGrantStore: new FileDurableStaffAccessGrantStore(dir("staffAccessGrants")),
+    protectedDecisionWaitStore: new FileDurableProtectedDecisionWaitStore(dir("protectedDecisionWaits")),
   };
 }
 
