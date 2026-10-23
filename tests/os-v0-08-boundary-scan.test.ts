@@ -92,6 +92,7 @@ test("OS-V0-08: each module exports exactly the expected surface", () => {
     "NAV_DESTINATIONS",
     "isDestinationVisible",
     "resolveAdminView",
+    "resolveConnectionsView",
     "resolveHomeView",
     "resolveNavVisibility",
     "resolveNotActiveView",
@@ -107,6 +108,7 @@ test("OS-V0-08: each module exports exactly the expected surface", () => {
   ]);
   assert.deepEqual(Object.keys(InternalOsRender).sort(), [
     "adminPageContent",
+    "connectionsPageContent",
     "homePageContent",
     "notActiveDestinationPageContent",
     "peoplePageContent",

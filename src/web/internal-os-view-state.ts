@@ -12,6 +12,9 @@ import type {
 import type { OperationalObservabilityView } from "../domain/operational-observability-view.js";
 import type { Customer } from "../domain/customer.js";
 import type { CustomerOffboardingRequest, CustomerOffboardingRequestId } from "../domain/customer-offboarding.js";
+import type { StoredConnectorConnection } from "../domain/durable-connector-connection-store.js";
+import { buildConnectorCatalog } from "../domain/integration-connector-catalog.js";
+import { buildIntegrationsAdminView, type IntegrationConnectionSummary } from "../domain/integration-admin-view.js";
 import {
   requireInternalOsProjectAccess,
   InternalOsAccessDeniedError,
@@ -340,11 +343,108 @@ export function resolveHomeView(input: {
  * truthful `NOT_ACTIVE` state for all four is the honest Phase A answer -
  * "Missing data source must degrade to explicit UNAVAILABLE rather than
  * fabricate content."
+ *
+ * C3 (gap scan 2026-10-23) update: Connections now has a real source port
+ * (`ConnectionsSource` / `resolveConnectionsView` below). It still renders
+ * this same `NOT_ACTIVE` state when no source is wired. Attention, AI &
+ * Capabilities and Knowledge are unchanged.
  */
 export type NotActiveViewState = { readonly kind: "NOT_ACTIVE" };
 
 export function resolveNotActiveView(): NotActiveViewState {
   return { kind: "NOT_ACTIVE" };
+}
+
+/**
+ * C3 (gap scan 2026-10-23): caller-injected read source for the
+ * Organization's connector connections, for the dedicated `/os/connections`
+ * destination. It follows the same optional-source pattern as
+ * `OperationalObservabilitySource`: an absent source renders `NOT_ACTIVE`,
+ * never fabricated content. The deployable runtime wires
+ * `createDurableConnectionsSource` (over `FileDurableConnectorConnectionStore`)
+ * here.
+ *
+ * Contract: returns every stored connection for the Organization's tenant.
+ * A read or replay failure THROWS. It must never be reported as an empty
+ * list, which is the same rule `InternalOsOrganizationSource` and
+ * `InternalOsStaffAccessGrantSource` follow (a storage error is never
+ * relabeled as absence).
+ *
+ * The port deliberately returns the raw `StoredConnectorConnection` rather
+ * than a pre-masked shape. Masking happens in `resolveConnectionsView`, so
+ * every source, including a faulty one, goes through the one existing
+ * secret-masking read model.
+ */
+export interface ConnectionsSource {
+  listConnections(organization: Organization): ReadonlyArray<StoredConnectorConnection>;
+}
+
+/**
+ * - `NOT_ACTIVE`: no source is wired (the pre-C3 default).
+ * - `ERROR`: the source threw, or returned a record that belongs to a
+ *   different tenant. Rendered as the OS ERROR page (500), never as EMPTY.
+ * - `EMPTY`: the source was read successfully and this tenant has no
+ *   connections.
+ * - `READY`: at least one connection, already masked.
+ *
+ * `EMPTY` and `NOT_ACTIVE` are kept distinct on purpose: "this build has no
+ * data source for this page" and "this organization has configured no
+ * connections" are different facts. Collapsing them would tell a staff
+ * member something false in one of the two cases.
+ */
+export type ConnectionsViewState =
+  | { readonly kind: "NOT_ACTIVE" }
+  | { readonly kind: "ERROR" }
+  | { readonly kind: "EMPTY" }
+  | { readonly kind: "READY"; readonly connections: ReadonlyArray<IntegrationConnectionSummary> };
+
+/**
+ * `buildIntegrationsAdminView` also lists the connector catalog. This
+ * repository has no production connector catalog, and this page shows only
+ * connection instances, so it is given an empty one. Only `.connections` is
+ * read from its result.
+ */
+const NO_CONNECTOR_CATALOG = buildConnectorCatalog([]);
+
+/**
+ * Secret masking: every connection goes through CONN-001's own
+ * `buildIntegrationsAdminView`. Its `IntegrationConnectionSummary` type has
+ * no field that can hold a `secretRef`, so a secret reference cannot reach
+ * the rendered page.
+ *
+ * Tenant isolation: each returned record's own `binding.ownership.tenantId`
+ * is re-checked against the Organization's `tenantId`. A mismatch makes the
+ * whole view `ERROR`. It is not filtered out silently, because dropping the
+ * record could turn a contaminated read into `EMPTY` ("no connections"),
+ * which is the relabeling the port contract above forbids.
+ * `FileDurableConnectorConnectionStore` already throws on this case during
+ * replay. This check covers any other implementation of the port.
+ */
+export function resolveConnectionsView(
+  organization: Organization,
+  source: ConnectionsSource | undefined,
+): ConnectionsViewState {
+  if (source === undefined) {
+    return { kind: "NOT_ACTIVE" };
+  }
+  let stored: ReadonlyArray<StoredConnectorConnection>;
+  try {
+    stored = source.listConnections(organization);
+  } catch {
+    // A read/replay failure (e.g. CorruptedConnectorConnectionFileError) is
+    // never relabeled as EMPTY ("no connections") or left to escape as an
+    // uncaught exception - it is this view state's own ERROR, exactly like
+    // the tenant-mismatch check just below.
+    return { kind: "ERROR" };
+  }
+  if (stored.some((record) => record.instance.binding.ownership.tenantId !== organization.tenantId)) {
+    return { kind: "ERROR" };
+  }
+  if (stored.length === 0) {
+    return { kind: "EMPTY" };
+  }
+  const { connections } = buildIntegrationsAdminView({ catalog: NO_CONNECTOR_CATALOG, connections: stored });
+  return { kind: "READY", connections };
 }
 
 export interface PeopleViewState {

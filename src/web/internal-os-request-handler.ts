@@ -16,7 +16,9 @@ import {
   resolvePeopleView,
   resolveProductsView,
   resolveAdminView,
+  resolveConnectionsView,
   type DestinationKey,
+  type ConnectionsSource,
   type WorkProjectSource,
   type WorkJobSource,
   type OrganizationResourceBindingSource,
@@ -29,6 +31,7 @@ import {
   workPageContent,
   workProjectDetailPageContent,
   notActiveDestinationPageContent,
+  connectionsPageContent,
   peoplePageContent,
   productsPageContent,
   adminPageContent,
@@ -81,6 +84,15 @@ export interface InternalOsRequestHandlerDeps {
    * wires `createDurableCustomerOffboardingAdminSource` here.
    */
   readonly customerOffboardingAdminSource?: CustomerOffboardingAdminSource;
+  /**
+   * C3 (gap scan 2026-10-23): caller-injected read source for the dedicated
+   * `/os/connections` destination. It follows the same optional-source
+   * pattern as `operationalObservabilitySource`. Absent renders the same
+   * `NOT_ACTIVE` page as before C3, never fabricated content. A source that
+   * throws renders the OS ERROR page. The deployable runtime wires
+   * `createDurableConnectionsSource` here.
+   */
+  readonly connectionsSource?: ConnectionsSource;
 }
 
 function toResponse(rendered: RenderedInternalOsPage): OutgoingResponseLike {
@@ -261,9 +273,15 @@ export function createInternalOsRequestHandler(deps: InternalOsRequestHandlerDep
         break;
       case "attention":
       case "ai-capabilities":
-      case "connections":
       case "knowledge":
         content = notActiveDestinationPageContent(nav, organizationName, parsed.kind);
+        break;
+      case "connections":
+        content = connectionsPageContent(
+          nav,
+          organizationName,
+          resolveConnectionsView(deps.organization, deps.connectionsSource),
+        );
         break;
       case "people":
         content = peoplePageContent(nav, organizationName, resolvePeopleView({ context }));

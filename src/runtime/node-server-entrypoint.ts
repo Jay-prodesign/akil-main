@@ -13,6 +13,7 @@ import { createDurableClientProjectSnapshotSource } from "../web/client-project-
 import { createDurableWorkProjectSource } from "../web/work-project-admin-source.js";
 import { createDurableWorkJobSource } from "../web/work-job-admin-source.js";
 import { createDurableOperationalObservabilitySource } from "../web/operational-observability-admin-source.js";
+import { createDurableConnectionsSource } from "../web/connections-durable-source.js";
 import { createDurableCustomerOffboardingAdminSource } from "../web/customer-offboarding-admin-source.js";
 import { createDurableOrganizationResourceBindingSource } from "../web/organization-resource-binding-durable-source.js";
 import { createDurableInternalOsOrganizationSource } from "../web/internal-os-organization-durable-source.js";
@@ -49,6 +50,10 @@ import type { StaffAccessGrant } from "../web/internal-os-access.js";
  *   `FileDurableOrganizationMembershipStore`, for the configured
  *   internal-OS tenant (`createDurableInternalOsStaffAccessGrantSource`).
  *   A membership with no explicitly written grant record has no grant.
+ * - **Connections destination (C3).** `/os/connections` reads the same
+ *   `FileDurableConnectorConnectionStore` (`createDurableConnectionsSource`),
+ *   masked through CONN-001's `buildIntegrationsAdminView`. A store read
+ *   failure renders the OS ERROR page, not an empty list.
  * - **Routing.** One Node server dispatches `GET /health`, then `/os/*`
  *   (the staff surface), then everything else (the customer `/portal`
  *   surface) - see `createHttpServer`.
@@ -186,6 +191,7 @@ export function createNodeRuntime(config: AppConfig, options: NodeRuntimeOptions
     ),
     operationalObservabilitySource: createDurableOperationalObservabilitySource(stores.connectorConnectionStore),
     customerOffboardingAdminSource: createDurableCustomerOffboardingAdminSource(stores.customerOffboardingRequestStore),
+    connectionsSource: createDurableConnectionsSource(stores.connectorConnectionStore),
   });
 
   const server = createHttpServer({

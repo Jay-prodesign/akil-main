@@ -49,6 +49,7 @@ export function createInternalOsHttpServer(
     ...(deps.customerOffboardingAdminSource !== undefined
       ? { customerOffboardingAdminSource: deps.customerOffboardingAdminSource }
       : {}),
+    ...(deps.connectionsSource !== undefined ? { connectionsSource: deps.connectionsSource } : {}),
   });
 
   return createServer((req, res) => {
