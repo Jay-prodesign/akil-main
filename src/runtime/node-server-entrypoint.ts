@@ -15,10 +15,12 @@ import { createDurableWorkJobSource } from "../web/work-job-admin-source.js";
 import { createDurableOperationalObservabilitySource } from "../web/operational-observability-admin-source.js";
 import { createDurableCustomerOffboardingAdminSource } from "../web/customer-offboarding-admin-source.js";
 import { createDurableOrganizationResourceBindingSource } from "../web/organization-resource-binding-durable-source.js";
+import { createDurableInternalOsOrganizationSource } from "../web/internal-os-organization-durable-source.js";
 import {
-  createCurrentOrganizationInternalOsRequestHandler,
-  createDurableInternalOsOrganizationSource,
-} from "../web/internal-os-organization-durable-source.js";
+  createCurrentStaffAccessGrantsInternalOsRequestHandler,
+  createDurableInternalOsStaffAccessGrantSource,
+  type InternalOsStaffAccessGrantSource,
+} from "../web/internal-os-staff-access-grant-durable-source.js";
 import { selectInternalOsStaffSessionProvider } from "../web/staff-session-provider-selection.js";
 import type { SessionContext } from "../web/session-context.js";
 import type { StaffSessionContext } from "../web/staff-session-context.js";
@@ -42,6 +44,11 @@ import type { StaffAccessGrant } from "../web/internal-os-access.js";
  *   injected. That covers CLIENT-SNAPSHOT-DURABLE-001, PROJ-DURABLE-001,
  *   WORK-JOB-SOURCE-001, OBS-ADMIN-SOURCE-001, CUS-OFFBOARD-DURABLE-001
  *   and ORG-MEMBERSHIP-DURABLE-001 and its follow-ons.
+ * - **Staff access grants (C2).** The `/os` surface's `StaffAccessGrant[]`
+ *   is read per request from `FileDurableStaffAccessGrantStore` joined with
+ *   `FileDurableOrganizationMembershipStore`, for the configured
+ *   internal-OS tenant (`createDurableInternalOsStaffAccessGrantSource`).
+ *   A membership with no explicitly written grant record has no grant.
  * - **Routing.** One Node server dispatches `GET /health`, then `/os/*`
  *   (the staff surface), then everything else (the customer `/portal`
  *   surface) - see `createHttpServer`.
@@ -55,8 +62,6 @@ import type { StaffAccessGrant } from "../web/internal-os-access.js";
  * - `teamAttentionSource`, `commercialStatusSource`,
  *   `billingReferenceStatusSource` and `lifecycleReadinessSource` (gap
  *   scan C9).
- * - A durable staff access-grant source (gap scan C2). `grants` defaults
- *   to `[]`.
  *
  * This wires real DATA sources, not real AUTHENTICATION. No identity
  * verifier and no staff-session-provider override is passed. In
@@ -98,9 +103,8 @@ export function health(config: AppConfig, stores?: FileDurableRuntimeStores): He
 
 /**
  * Optional, non-production, non-authentication inputs, so a caller (a
- * test, or a later C2 durable grant source) can supply staff evidence
- * without editing the composition root. Deliberately absent: any
- * `identityVerifier`, any `SessionProvider`/`StaffSessionProvider`
+ * test) can supply staff evidence without editing the composition root.
+ * Deliberately absent: any `identityVerifier`, any `SessionProvider`/`StaffSessionProvider`
  * override, and any data source override. Data always comes from the
  * durable stores.
  *
@@ -108,10 +112,12 @@ export function health(config: AppConfig, stores?: FileDurableRuntimeStores): He
  *   `deploymentEnv !== "production"`. In production, the fail-closed
  *   providers are selected and these maps are never read (the same
  *   discipline as `createHttpServer`/`createInternalOsHttpServer`).
- * - `staffAccessGrants` defaults to `[]`, the honest value until a durable
- *   grant source exists (gap scan C2). It is evidence only. It cannot
- *   authenticate anyone, and in production the staff provider still
- *   authenticates no one.
+ * - `staffAccessGrants`, when supplied, replaces the durable grant source
+ *   with this fixed list (C1's original test seam, kept unchanged). When
+ *   omitted (the deployable default since C2), grants are read per request
+ *   from the durable grant and membership stores. Either way it is
+ *   evidence only. It cannot authenticate anyone, and in production the
+ *   staff provider still authenticates no one.
  */
 export interface NodeRuntimeOptions {
   readonly devSessionFixtures?: ReadonlyMap<string, SessionContext>;
@@ -141,8 +147,20 @@ export function createNodeRuntime(config: AppConfig, options: NodeRuntimeOptions
     stores.auditLog,
   );
 
-  // Staff /os sources.
-  const internalOsHandler = createCurrentOrganizationInternalOsRequestHandler({
+  // Staff /os sources. Without a configured internal-OS organization there
+  // is no tenant to read grants for; the handler renders NOT_FOUND anyway.
+  const fixedGrants = options.staffAccessGrants;
+  const grantSource: InternalOsStaffAccessGrantSource =
+    fixedGrants !== undefined
+      ? { listCurrentGrants: () => fixedGrants }
+      : config.internalOsOrganization !== undefined
+        ? createDurableInternalOsStaffAccessGrantSource(
+            stores.staffAccessGrantStore,
+            stores.organizationMembershipStore,
+            config.internalOsOrganization,
+          )
+        : { listCurrentGrants: () => [] };
+  const internalOsHandler = createCurrentStaffAccessGrantsInternalOsRequestHandler({
     provider: selectInternalOsStaffSessionProvider({
       isProduction,
       ...(options.devStaffSessionFixtures !== undefined ? { devStaffFixtures: options.devStaffSessionFixtures } : {}),
@@ -154,7 +172,7 @@ export function createNodeRuntime(config: AppConfig, options: NodeRuntimeOptions
             config.internalOsOrganization,
           )
         : undefined,
-    grants: options.staffAccessGrants ?? [],
+    grantSource,
     projectSource: createDurableWorkProjectSource(stores.projectStore),
     jobSource: createDurableWorkJobSource(stores.outcomeJobStore),
     resourceBindingSource: createDurableOrganizationResourceBindingSource(
