@@ -1,4 +1,6 @@
-import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, AdminResourceBindingViewState, OperationalObservabilityViewState, PendingOffboardingRequestsViewState, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary } from "./internal-os-view-state.js";
+import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, AdminResourceBindingViewState, OperationalObservabilityViewState, PendingOffboardingRequestsViewState, ConnectionsViewState, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary } from "./internal-os-view-state.js";
+import type { ConnectionState } from "../domain/connection-authority.js";
+import type { IntegrationConnectionSummary } from "../domain/integration-admin-view.js";
 
 export interface RenderedInternalOsPage {
   readonly status: number;
@@ -473,6 +475,87 @@ export function notActiveDestinationPageContent(
 ): InternalOsPageContent {
   const label = NOT_ACTIVE_DESTINATION_LABELS[key];
   return destinationContent({ nav, activeKey: key, organizationName, title: label, bodyHtml: renderNotActiveCard(label) });
+}
+
+/**
+ * C3: the visible state text is always rendered next to the tone, so the
+ * state never depends on color alone. The `Record` over `ConnectionState`
+ * makes a new connection state a compile error here until it is given a
+ * tone.
+ */
+const CONNECTION_STATE_TONE: Record<ConnectionState, "neutral" | "warning" | "danger" | "success"> = {
+  REQUESTED: "neutral",
+  CONNECTED_UNVERIFIED: "neutral",
+  VERIFIED: "success",
+  DEGRADED: "warning",
+  REVOKED: "danger",
+  HANDOVER_COMPLETE: "neutral",
+};
+
+function renderConnectionRow(connection: IntegrationConnectionSummary): string {
+  const ownership = `${escapeHtml(connection.ownership.customerId)} / ${escapeHtml(connection.ownership.projectId)}${
+    connection.ownership.serviceRef !== undefined ? ` / ${escapeHtml(connection.ownership.serviceRef)}` : ""
+  }`;
+  const evidence =
+    connection.verificationEvidenceRef !== undefined ? escapeHtml(connection.verificationEvidenceRef) : "none";
+  return `<tr><td>${escapeHtml(connection.connectionBindingId)}</td><td>${escapeHtml(connection.connectorKind)}</td><td>${escapeHtml(connection.authMode)}</td><td><span class="status status-${CONNECTION_STATE_TONE[connection.connectionState]}" role="status">${escapeHtml(connection.connectionState)}</span></td><td>${ownership}</td><td>${escapeHtml(connection.workspaceRef)}</td><td>${escapeHtml(connection.integrationInstanceRef)}</td><td>${evidence}</td></tr>`;
+}
+
+/**
+ * C3: read-only Connections destination. Every field comes from
+ * `IntegrationConnectionSummary` (CONN-001's secret-masked read model), so
+ * there is no secret reference here to escape or omit. Like every other
+ * card in this module, it renders escaped text only and no mutation
+ * control.
+ */
+function renderConnectionsBody(view: Exclude<ConnectionsViewState, { kind: "NOT_ACTIVE" } | { kind: "ERROR" }>): string {
+  if (view.kind === "EMPTY") {
+    return `
+  <section aria-labelledby="connections-heading" class="card">
+    <h2 id="connections-heading">Connections</h2>
+    <p>No connections are configured for this organization yet.</p>
+  </section>`;
+  }
+  const rows = view.connections.map(renderConnectionRow).join("\n      ");
+  return `
+  <section aria-labelledby="connections-heading" class="card">
+    <h2 id="connections-heading">Connections</h2>
+    <p>Read-only. Credentials are never shown on this page.</p>
+    <table>
+      <thead><tr><th>Connection</th><th>Connector</th><th>Auth mode</th><th>State</th><th>Customer / project</th><th>Workspace</th><th>Instance</th><th>Verification evidence</th></tr></thead>
+      <tbody>
+      ${rows}
+      </tbody>
+    </table>
+  </section>`;
+}
+
+/**
+ * C3: `NOT_ACTIVE` returns exactly what `notActiveDestinationPageContent`
+ * returned for `connections` before C3, so an unwired caller's page is
+ * unchanged. `ERROR` becomes the OS ERROR page (500, no data and no detail
+ * shown), never an EMPTY list.
+ */
+export function connectionsPageContent(
+  nav: ReadonlyArray<NavDestination>,
+  organizationName: string,
+  view: ConnectionsViewState,
+): InternalOsPageContent {
+  switch (view.kind) {
+    case "NOT_ACTIVE":
+      return notActiveDestinationPageContent(nav, organizationName, "connections");
+    case "ERROR":
+      return { kind: "ERROR", reason: "connections could not be read" };
+    case "EMPTY":
+    case "READY":
+      return destinationContent({
+        nav,
+        activeKey: "connections",
+        organizationName,
+        title: "Connections",
+        bodyHtml: renderConnectionsBody(view),
+      });
+  }
 }
 
 export function peoplePageContent(nav: ReadonlyArray<NavDestination>, organizationName: string, view: PeopleViewState): InternalOsPageContent {
