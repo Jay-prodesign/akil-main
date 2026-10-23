@@ -18,7 +18,9 @@ import {
   resolveAdminView,
   resolveConnectionsView,
   resolveKnowledgeView,
+  resolveAttentionView,
   type DestinationKey,
+  type AttentionSource,
   type ConnectionsSource,
   type KnowledgeSource,
   type PeopleDirectorySource,
@@ -36,6 +38,7 @@ import {
   notActiveDestinationPageContent,
   connectionsPageContent,
   knowledgePageContent,
+  attentionPageContent,
   peoplePageContent,
   productsPageContent,
   adminPageContent,
@@ -120,6 +123,21 @@ export interface InternalOsRequestHandlerDeps {
    * deployable runtime wires `createDurableKnowledgeSource` here.
    */
   readonly knowledgeSource?: KnowledgeSource;
+  /**
+   * C3 Attention slice (gap scan 2026-10-23): caller-injected read source
+   * for the dedicated `/os/attention` destination (credential/access
+   * problems and customer approvals required). Same optional-source
+   * pattern as `connectionsSource`. Absent renders the same `NOT_ACTIVE`
+   * page as before C3, never fabricated content. A source that throws
+   * renders the OS ERROR page. It is read only on `/os/attention`, only
+   * after `requireInternalOsAccess` has granted access and the existing
+   * `isDestinationVisible("attention")` EXECUTE/protected-actions gate has
+   * passed, and only when the viewer additionally holds WRITE
+   * (`resolveAttentionView`'s own gate - without WRITE the viewer gets the
+   * unchanged pre-C3 page, not a 403). The deployable runtime wires
+   * `createDurableAttentionSource` here.
+   */
+  readonly attentionSource?: AttentionSource;
 }
 
 function toResponse(rendered: RenderedInternalOsPage): OutgoingResponseLike {
@@ -299,6 +317,12 @@ export function createInternalOsRequestHandler(deps: InternalOsRequestHandlerDep
         );
         break;
       case "attention":
+        content = attentionPageContent(
+          nav,
+          organizationName,
+          resolveAttentionView({ organization: deps.organization, context, source: deps.attentionSource }),
+        );
+        break;
       case "ai-capabilities":
         content = notActiveDestinationPageContent(nav, organizationName, parsed.kind);
         break;

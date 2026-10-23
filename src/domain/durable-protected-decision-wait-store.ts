@@ -216,7 +216,47 @@ export interface DurableProtectedDecisionWaitStore {
   getEffectStarted(tenantId: TenantScope["tenantId"], waitRequestId: string): boolean;
 }
 
-export class FileDurableProtectedDecisionWaitStore implements DurableProtectedDecisionWaitStore {
+/**
+ * C3 Attention slice (whole-product gap scan 2026-10-23): one wait request
+ * plus its resume authorization, if one has been claimed. `resume` absent
+ * means the wait is still outstanding: no protected decision has
+ * authorized it yet.
+ */
+export interface StoredProtectedDecisionWait {
+  readonly request: ProtectedDecisionWaitRequest;
+  readonly resume?: ProtectedDecisionResumeAuthorization;
+}
+
+/**
+ * C3 Attention slice: the one enumeration method this store gains.
+ * OS-V0-12 deliberately left `DurableProtectedDecisionWaitStore` with
+ * exact-id lookup only ("a future task can add one if a real consumer
+ * needs it"). The `/os/attention` page is that consumer.
+ *
+ * It is a SEPARATE read-only port rather than a new member of
+ * `DurableProtectedDecisionWaitStore`. The resume/effect path
+ * (`resume-protected-decision-for-connector-effect.ts`) depends on that
+ * interface and never needs to enumerate, so it is not widened. The read
+ * surface depends on this narrower port only, and so cannot reach
+ * `putIfAbsentWaitRequest`/`claimResume`/`claimEffectStarted`.
+ *
+ * Bounded by construction:
+ * - One tenant per call. There is no cross-tenant scan: the method never
+ *   lists `baseDir` or any lock directory. It reads exactly the two
+ *   per-tenant files `get` and `getResume` already read in full on every
+ *   call (`<tenant>.wait.jsonl` and `<tenant>.resume.jsonl`), so one call
+ *   costs the same I/O as one `get` plus one `getResume`.
+ * - Current state, not history. Each `waitRequestId` appears once, in
+ *   first-recorded order, carrying its resume if one exists.
+ * - Every line goes through the same fail-closed replay validation as
+ *   `get`/`getResume` (including the tenant-contamination check), and a
+ *   failure THROWS. It is never reported as an empty list.
+ */
+export interface DurableProtectedDecisionWaitListing {
+  listByTenant(tenantId: TenantScope["tenantId"]): ReadonlyArray<StoredProtectedDecisionWait>;
+}
+
+export class FileDurableProtectedDecisionWaitStore implements DurableProtectedDecisionWaitStore, DurableProtectedDecisionWaitListing {
   private readonly baseDir: string;
 
   constructor(baseDir: string) {
@@ -463,6 +503,68 @@ export class FileDurableProtectedDecisionWaitStore implements DurableProtectedDe
 
   getResume(tenantId: TenantScope["tenantId"], waitRequestId: string): ProtectedDecisionResumeAuthorization | undefined {
     return this.dedupedResumesById(this.readAllResumes(tenantId)).get(waitRequestId);
+  }
+
+  /**
+   * See `DurableProtectedDecisionWaitListing`. This is stricter than
+   * `get`/`getResume` in three replay cases, and throws
+   * `CorruptedProtectedDecisionWaitLineError` for each, because a listing
+   * that silently picked one side could mislabel a wait as resolved or
+   * outstanding:
+   * - two lines for the same `waitRequestId` with different wait requests
+   *   (the store's own reconciliation only ever re-appends an identical
+   *   line);
+   * - two lines for the same `waitRequestId` with different resume
+   *   authorizations;
+   * - a resume whose `effectRef` differs from its wait request's
+   *   (`claimResume` refuses that on write).
+   *
+   * A resume line with no matching wait line is ignored: it cannot make
+   * an outstanding wait look resolved, because there is no wait for it to
+   * attach to.
+   *
+   * Like `get`, this reads only the per-tenant JSONL logs. A wait whose
+   * creation crashed after winning its lock file but before its log
+   * append is invisible here exactly as it is to `get`, until the next
+   * `putIfAbsentWaitRequest` for that id reconciles it.
+   */
+  listByTenant(tenantId: TenantScope["tenantId"]): ReadonlyArray<StoredProtectedDecisionWait> {
+    const waitFilePath = this.waitFilePathFor(tenantId);
+    const resumeFilePath = this.resumeFilePathFor(tenantId);
+
+    const requestsById = new Map<string, ProtectedDecisionWaitRequest>();
+    for (const { waitRequestId, request } of this.readAllWaitRequests(tenantId)) {
+      const existing = requestsById.get(waitRequestId);
+      if (existing === undefined) {
+        requestsById.set(waitRequestId, request);
+      } else if (!waitRequestCoreIdentityEquals(existing, request)) {
+        fail(waitFilePath, `waitRequestId "${waitRequestId}" is recorded more than once with different wait requests`);
+      }
+    }
+
+    const resumesById = new Map<string, ProtectedDecisionResumeAuthorization>();
+    for (const { waitRequestId, authorization } of this.readAllResumes(tenantId)) {
+      const existing = resumesById.get(waitRequestId);
+      if (existing === undefined) {
+        resumesById.set(waitRequestId, authorization);
+      } else if (JSON.stringify(existing) !== JSON.stringify(authorization)) {
+        fail(resumeFilePath, `waitRequestId "${waitRequestId}" has more than one different resume authorization`);
+      }
+    }
+
+    const listed: StoredProtectedDecisionWait[] = [];
+    for (const [waitRequestId, request] of requestsById) {
+      const resume = resumesById.get(waitRequestId);
+      if (resume === undefined) {
+        listed.push({ request });
+        continue;
+      }
+      if (resume.effectRef !== request.effectRef) {
+        fail(resumeFilePath, `resume for waitRequestId "${waitRequestId}" names a different effectRef than its wait request`);
+      }
+      listed.push({ request, resume });
+    }
+    return listed;
   }
 
   claimEffectStarted(tenantId: TenantScope["tenantId"], waitRequestId: string): PersistResult<true> {
