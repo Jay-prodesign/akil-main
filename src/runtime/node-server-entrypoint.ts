@@ -58,8 +58,10 @@ import type { StaffAccessGrant } from "../web/internal-os-access.js";
  * - **People directory (C3).** `/os/people` lists the configured tenant's
  *   memberships from the same `FileDurableOrganizationMembershipStore`
  *   (`createDurablePeopleDirectorySource`), next to the viewer's own
- *   membership. Only principal reference, role and state are shown. A
- *   store read failure renders the OS ERROR page, not an empty roster.
+ *   membership. Only principal reference, role and state are shown. The
+ *   roster requires WRITE (the destination itself stays READ, unchanged
+ *   for the self-section) - see `resolvePeopleView`. A store read failure
+ *   renders the OS ERROR page, not an empty roster.
  * - **Routing.** One Node server dispatches `GET /health`, then `/os/*`
  *   (the staff surface), then everything else (the customer `/portal`
  *   surface) - see `createHttpServer`.

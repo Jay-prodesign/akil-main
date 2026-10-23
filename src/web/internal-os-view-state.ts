@@ -485,8 +485,9 @@ export interface PeopleDirectorySource {
  *
  * Left out on purpose:
  * - `revokedReason`: free text written when a membership is revoked. It can
- *   carry personnel detail, and `/os/people` is on the READ floor that
- *   every GRANTED staff member reaches.
+ *   carry personnel detail, and even the WRITE-gated roster (see
+ *   `resolvePeopleView` below) has no operational need to show it - `state`
+ *   already says REVOKED.
  * - `revokedAt`: when someone was removed is not needed to read a
  *   directory. `state` already says the membership is `REVOKED`.
  * - `membershipId` and `tenantId`: internal keys. The tenant is the page's

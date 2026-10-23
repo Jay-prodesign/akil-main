@@ -99,8 +99,10 @@ export interface InternalOsRequestHandlerDeps {
    * the `/os/people` membership roster. Same optional-source pattern as
    * `connectionsSource`. Absent renders the same self-only People page as
    * before C3. A source that throws renders the OS ERROR page. It is read
-   * only on `/os/people`, and only after `requireInternalOsAccess` has
-   * granted access. The deployable runtime wires
+   * only on `/os/people`, only after `requireInternalOsAccess` has granted
+   * access, and only when the caller additionally holds WRITE
+   * (`resolvePeopleView`'s own gate - a READ-only grant still reaches this
+   * destination, just without the roster). The deployable runtime wires
    * `createDurablePeopleDirectorySource` here.
    */
   readonly peopleDirectorySource?: PeopleDirectorySource;
