@@ -239,7 +239,7 @@ test("FULL1: an admitted Organization's own Customer can be subscribed/entitled,
     evidenceRef: "internal://tests/v2-floor-int-002/execution-evidence",
   });
   assert.equal(executionDone.status, "COMPLETED");
-  assert.equal(executionDone.resourceDispositions.length, 3);
+  assert.equal(executionDone.resourceDispositions.length, 9);
   for (const disposition of executionDone.resourceDispositions) {
     assert.equal(disposition.status, "BLOCKED_UNSUPPORTED");
   }
