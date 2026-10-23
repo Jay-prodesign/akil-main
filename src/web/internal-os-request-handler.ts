@@ -19,6 +19,7 @@ import {
   resolveConnectionsView,
   type DestinationKey,
   type ConnectionsSource,
+  type PeopleDirectorySource,
   type WorkProjectSource,
   type WorkJobSource,
   type OrganizationResourceBindingSource,
@@ -93,6 +94,18 @@ export interface InternalOsRequestHandlerDeps {
    * `createDurableConnectionsSource` here.
    */
   readonly connectionsSource?: ConnectionsSource;
+  /**
+   * C3 People slice (gap scan 2026-10-23): caller-injected read source for
+   * the `/os/people` membership roster. Same optional-source pattern as
+   * `connectionsSource`. Absent renders the same self-only People page as
+   * before C3. A source that throws renders the OS ERROR page. It is read
+   * only on `/os/people`, only after `requireInternalOsAccess` has granted
+   * access, and only when the caller additionally holds WRITE
+   * (`resolvePeopleView`'s own gate - a READ-only grant still reaches this
+   * destination, just without the roster). The deployable runtime wires
+   * `createDurablePeopleDirectorySource` here.
+   */
+  readonly peopleDirectorySource?: PeopleDirectorySource;
 }
 
 function toResponse(rendered: RenderedInternalOsPage): OutgoingResponseLike {
@@ -284,7 +297,16 @@ export function createInternalOsRequestHandler(deps: InternalOsRequestHandlerDep
         );
         break;
       case "people":
-        content = peoplePageContent(nav, organizationName, resolvePeopleView({ context }));
+        content = peoplePageContent(
+          nav,
+          organizationName,
+          resolvePeopleView({
+            context,
+            ...(deps.peopleDirectorySource !== undefined
+              ? { directory: { organization: deps.organization, source: deps.peopleDirectorySource } }
+              : {}),
+          }),
+        );
         break;
       case "products":
         content = productsPageContent(nav, organizationName, resolveProductsView());

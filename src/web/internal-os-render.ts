@@ -1,4 +1,4 @@
-import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, AdminResourceBindingViewState, OperationalObservabilityViewState, PendingOffboardingRequestsViewState, ConnectionsViewState, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary } from "./internal-os-view-state.js";
+import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, AdminResourceBindingViewState, OperationalObservabilityViewState, PendingOffboardingRequestsViewState, ConnectionsViewState, PeopleDirectoryEntry, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary } from "./internal-os-view-state.js";
 import type { ConnectionState } from "../domain/connection-authority.js";
 import type { IntegrationConnectionSummary } from "../domain/integration-admin-view.js";
 
@@ -208,15 +208,68 @@ function renderHomeBody(view: HomeViewState): string {
   </section>`;
 }
 
-function renderPeopleBody(view: PeopleViewState): string {
+function renderPeopleSelfSection(view: PeopleViewState): string {
   return `
   <section aria-labelledby="people-heading" class="card">
     <h2 id="people-heading">You</h2>
     <p>${escapeHtml(view.self.principalDisplayName)}</p>
     <p>Organization role: ${escapeHtml(view.self.organizationRole)}</p>
     <p>Membership state: ${escapeHtml(view.self.membershipState)}</p>
-  </section>
+  </section>`;
+}
+
+/**
+ * C3 People slice: the visible state text is always rendered next to the
+ * tone, so the state never depends on color alone. The `Record` makes a new
+ * membership state a compile error here until it is given a tone.
+ */
+const MEMBERSHIP_STATE_TONE: Record<PeopleDirectoryEntry["membershipState"], "neutral" | "danger"> = {
+  ACTIVE: "neutral",
+  REVOKED: "danger",
+};
+
+function renderPeopleDirectoryRow(entry: PeopleDirectoryEntry): string {
+  return `<tr><td>${escapeHtml(entry.principalRef)}</td><td>${escapeHtml(entry.organizationRole)}</td><td><span class="status status-${MEMBERSHIP_STATE_TONE[entry.membershipState]}" role="status">${escapeHtml(entry.membershipState)}</span></td></tr>`;
+}
+
+/**
+ * C3 People slice: read-only roster. Every field comes from
+ * `PeopleDirectoryEntry`'s allow-list, so revocation reasons and timestamps
+ * are not available to render. Principals are shown by their stored
+ * reference because the membership store records no display name.
+ */
+function renderPeopleDirectorySection(members: ReadonlyArray<PeopleDirectoryEntry>): string {
+  if (members.length === 0) {
+    return `
+  <section aria-labelledby="people-directory-heading" class="card">
+    <h2 id="people-directory-heading">Directory</h2>
+    <p>No memberships are recorded for this organization.</p>
+  </section>`;
+  }
+  const rows = members.map(renderPeopleDirectoryRow).join("\n      ");
+  return `
+  <section aria-labelledby="people-directory-heading" class="card">
+    <h2 id="people-directory-heading">Directory</h2>
+    <p>Read-only. Members are listed by principal reference; display names are not recorded for memberships.</p>
+    <table>
+      <thead><tr><th>Principal reference</th><th>Organization role</th><th>Membership state</th></tr></thead>
+      <tbody>
+      ${rows}
+      </tbody>
+    </table>
+  </section>`;
+}
+
+/**
+ * Without a roster this returns exactly the pre-C3 People body, byte for
+ * byte.
+ */
+function renderPeopleBody(view: PeopleViewState, members: ReadonlyArray<PeopleDirectoryEntry> | undefined): string {
+  if (members === undefined) {
+    return `${renderPeopleSelfSection(view)}
   <p>A full directory is not yet available in this build.</p>`;
+  }
+  return `${renderPeopleSelfSection(view)}${renderPeopleDirectorySection(members)}`;
 }
 
 function renderProductsBody(view: ProductsViewState): string {
@@ -558,8 +611,22 @@ export function connectionsPageContent(
   }
 }
 
+/**
+ * C3 People slice: a roster `ERROR` becomes the OS ERROR page (500, no data
+ * and no detail shown), never an empty directory. No roster renders the
+ * pre-C3 self-only page unchanged.
+ */
 export function peoplePageContent(nav: ReadonlyArray<NavDestination>, organizationName: string, view: PeopleViewState): InternalOsPageContent {
-  return destinationContent({ nav, activeKey: "people", organizationName, title: "People", bodyHtml: renderPeopleBody(view) });
+  if (view.roster?.kind === "ERROR") {
+    return { kind: "ERROR", reason: "people directory could not be read" };
+  }
+  return destinationContent({
+    nav,
+    activeKey: "people",
+    organizationName,
+    title: "People",
+    bodyHtml: renderPeopleBody(view, view.roster?.members),
+  });
 }
 
 export function productsPageContent(nav: ReadonlyArray<NavDestination>, organizationName: string, view: ProductsViewState): InternalOsPageContent {

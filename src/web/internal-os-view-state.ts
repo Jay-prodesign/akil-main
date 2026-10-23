@@ -83,6 +83,16 @@ export const NAV_DESTINATIONS: ReadonlyArray<NavDestination> = [
  * destination hidden from navigation cannot be reached by deep-linking
  * either (Rev170: "server-side fail-closed direct access to destinations
  * hidden by that policy").
+ *
+ * C3 People slice: `people` deliberately stays on the READ floor - every
+ * GRANTED staff member keeps seeing their own membership exactly as before
+ * C3. When a `PeopleDirectorySource` is wired, `resolvePeopleView` ALSO
+ * requires WRITE before it includes the Organization-wide membership
+ * roster (every other member's role and lifecycle state, including
+ * REVOKED) - a READ-only viewer gets the unchanged self-only page, not a
+ * 403. The roster itself is limited to `PeopleDirectoryEntry`'s allow-list
+ * (principal reference, role, state), so revocation reasons and
+ * timestamps never reach either floor.
  */
 export function isDestinationVisible(key: DestinationKey, context: InternalOsAccessContext): boolean {
   const access = context.access;
@@ -447,6 +457,74 @@ export function resolveConnectionsView(
   return { kind: "READY", connections };
 }
 
+/**
+ * C3 People slice (gap scan 2026-10-23): caller-injected read source for the
+ * Organization's membership roster, for the `/os/people` destination. Same
+ * optional-source pattern as `ConnectionsSource`: an absent source leaves
+ * the page exactly as it was before (the viewer's own membership only). The
+ * deployable runtime wires `createDurablePeopleDirectorySource` (over the
+ * runtime's single `FileDurableOrganizationMembershipStore`) here.
+ *
+ * Contract: returns every stored membership for the Organization's tenant,
+ * `ACTIVE` and `REVOKED` alike. A read or replay failure THROWS. It must
+ * never be reported as an empty list (a storage error is never relabeled
+ * as absence).
+ *
+ * The port returns the raw `OrganizationMembership`, not a pre-masked
+ * shape. Field selection happens in `resolvePeopleView`, so every source,
+ * including a faulty one, goes through the same allow-list.
+ */
+export interface PeopleDirectorySource {
+  listMemberships(organization: Organization): ReadonlyArray<OrganizationMembership>;
+}
+
+/**
+ * One roster row. This is an allow-list of the only membership fields that
+ * are shown: the principal reference, the organization role and the
+ * lifecycle state.
+ *
+ * Left out on purpose:
+ * - `revokedReason`: free text written when a membership is revoked. It can
+ *   carry personnel detail, and even the WRITE-gated roster (see
+ *   `resolvePeopleView` below) has no operational need to show it - `state`
+ *   already says REVOKED.
+ * - `revokedAt`: when someone was removed is not needed to read a
+ *   directory. `state` already says the membership is `REVOKED`.
+ * - `membershipId` and `tenantId`: internal keys. The tenant is the page's
+ *   own Organization by construction.
+ *
+ * No display name exists here. `OrganizationMembership` stores only an
+ * opaque `principalRef`, and this repository has no staff-principal
+ * directory to resolve a name from (the viewer's own display name comes
+ * from their authenticated session, which is why only the self-section has
+ * one). The roster shows the reference as stored rather than inventing a
+ * name.
+ */
+export interface PeopleDirectoryEntry {
+  readonly principalRef: string;
+  readonly organizationRole: OrganizationMembership["role"];
+  readonly membershipState: OrganizationMembership["state"];
+}
+
+/**
+ * - `ERROR`: the source threw, or returned a membership that belongs to a
+ *   different tenant. `peoplePageContent` renders the OS ERROR page (500),
+ *   never an empty roster.
+ * - `READY`: the source was read successfully. `members` may be empty only
+ *   if the source truly has no memberships for this tenant.
+ */
+export type PeopleDirectoryViewState =
+  | { readonly kind: "ERROR" }
+  | { readonly kind: "READY"; readonly members: ReadonlyArray<PeopleDirectoryEntry> };
+
+/**
+ * `self` is the viewer's own membership, resolved from the authenticated
+ * access context. It is always present and unchanged by C3.
+ *
+ * `roster` is optional so the pre-C3 shape stays valid: absent means no
+ * `PeopleDirectorySource` is wired, and the page renders exactly what it
+ * rendered before C3.
+ */
 export interface PeopleViewState {
   readonly kind: "READY";
   readonly self: {
@@ -454,23 +532,85 @@ export interface PeopleViewState {
     readonly organizationRole: string;
     readonly membershipState: string;
   };
+  readonly roster?: PeopleDirectoryViewState;
+}
+
+function comparePeopleDirectoryOrder(a: OrganizationMembership, b: OrganizationMembership): number {
+  if (a.principalRef !== b.principalRef) {
+    return a.principalRef < b.principalRef ? -1 : 1;
+  }
+  if (a.membershipId !== b.membershipId) {
+    return a.membershipId < b.membershipId ? -1 : 1;
+  }
+  return 0;
 }
 
 /**
- * People: Phase A shows only the CURRENT viewer's own membership - no
- * directory-listing source exists anywhere in this repository (there is no
- * "list all memberships in a tenant" port), so rendering a broader
- * directory would require fabricating one. This is an honest, narrow but
- * real projection rather than a placeholder.
+ * Tenant isolation follows `resolveConnectionsView`: each returned
+ * membership's own `tenantId` is re-checked against the Organization's. A
+ * mismatch makes the whole roster `ERROR` instead of being dropped, because
+ * dropping it could turn a contaminated read into a shorter (or empty)
+ * roster that looks correct. `FileDurableOrganizationMembershipStore`
+ * already throws on this case during replay; this check covers any other
+ * implementation of the port.
  */
-export function resolvePeopleView(input: { context: InternalOsAccessContext }): PeopleViewState {
+function resolvePeopleDirectoryView(
+  organization: Organization,
+  source: PeopleDirectorySource,
+): PeopleDirectoryViewState {
+  let memberships: ReadonlyArray<OrganizationMembership>;
+  try {
+    memberships = source.listMemberships(organization);
+  } catch {
+    // A read/replay failure (e.g. CorruptedOrganizationMembershipFileError,
+    // or a lock timeout) is this roster's own ERROR, never an empty list.
+    return { kind: "ERROR" };
+  }
+  if (memberships.some((membership) => membership.tenantId !== organization.tenantId)) {
+    return { kind: "ERROR" };
+  }
+  const members = [...memberships].sort(comparePeopleDirectoryOrder).map((membership) => ({
+    principalRef: membership.principalRef,
+    organizationRole: membership.role,
+    membershipState: membership.state,
+  }));
+  return { kind: "READY", members };
+}
+
+/**
+ * People: Phase A showed only the CURRENT viewer's own membership, because
+ * no "list all memberships in a tenant" source existed. C3 People slice:
+ * one exists now (`FileDurableOrganizationMembershipStore.listByTenant`,
+ * reached through `PeopleDirectorySource`). When `directory` is given, the
+ * view also carries the tenant's roster. The self-section is unchanged
+ * either way. When `directory` is absent, the result is exactly the pre-C3
+ * value (no `roster` key at all).
+ */
+export function resolvePeopleView(input: {
+  readonly context: InternalOsAccessContext;
+  readonly directory?: { readonly organization: Organization; readonly source: PeopleDirectorySource };
+}): PeopleViewState {
+  const self = {
+    principalDisplayName: input.context.session.principal.displayName,
+    organizationRole: input.context.membership.role,
+    membershipState: input.context.membership.state,
+  };
+  // The `people` destination itself stays on the READ floor (every GRANTED
+  // staff member can see their own membership, exactly as before C3). The
+  // roster is new, broader exposure - every OTHER member's role and
+  // lifecycle state, including REVOKED - so it additionally requires
+  // WRITE, the same bar `isDestinationVisible` already applies to
+  // `connections`/`admin`/`knowledge` for comparable reasons. A READ-only
+  // viewer with a directory source wired still gets the unchanged
+  // self-only page, never a 403: the destination remains reachable, only
+  // the roster section is withheld.
+  if (input.directory === undefined || !input.context.access.permissions.has("WRITE")) {
+    return { kind: "READY", self };
+  }
   return {
     kind: "READY",
-    self: {
-      principalDisplayName: input.context.session.principal.displayName,
-      organizationRole: input.context.membership.role,
-      membershipState: input.context.membership.state,
-    },
+    self,
+    roster: resolvePeopleDirectoryView(input.directory.organization, input.directory.source),
   };
 }
 
