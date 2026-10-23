@@ -11,6 +11,7 @@ import { FileDurableOrganizationServicePrincipalStore } from "../domain/durable-
 import { FileDurableConfigurationPolicyDecisionStore } from "../domain/durable-configuration-policy-decision-store.js";
 import { FileDurableEvidenceReferenceStore } from "../domain/durable-evidence-reference-store.js";
 import { FileDurableControlledOrganizationProvisioningStore } from "../domain/durable-controlled-organization-provisioning-store.js";
+import { FileDurableStaffAccessGrantStore } from "../domain/durable-staff-access-grant-store.js";
 import type { HealthProbeResult } from "./health-check.js";
 
 /**
@@ -40,6 +41,7 @@ export const FILE_DURABLE_RUNTIME_STORE_LAYOUT = {
   configurationPolicyDecisions: "configuration-policy-decisions",
   evidenceReferences: "evidence-references",
   controlledOrganizationProvisioning: "controlled-organization-provisioning",
+  staffAccessGrants: "staff-access-grants",
 } as const;
 
 export type FileDurableRuntimeStoreKey = keyof typeof FILE_DURABLE_RUNTIME_STORE_LAYOUT;
@@ -57,6 +59,8 @@ export interface FileDurableRuntimeStores {
   readonly configurationPolicyDecisionStore: FileDurableConfigurationPolicyDecisionStore;
   readonly evidenceReferenceStore: FileDurableEvidenceReferenceStore;
   readonly controlledOrganizationProvisioningStore: FileDurableControlledOrganizationProvisioningStore;
+  /** C2: explicit per-membership `/os` access grants (`requireInternalOsAccess` evidence). */
+  readonly staffAccessGrantStore: FileDurableStaffAccessGrantStore;
 }
 
 /** Absolute (or caller-relative) directory of one store under `dataDir`. */
@@ -88,6 +92,7 @@ export function createFileDurableRuntimeStores(dataDir: string): FileDurableRunt
     controlledOrganizationProvisioningStore: new FileDurableControlledOrganizationProvisioningStore(
       dir("controlledOrganizationProvisioning"),
     ),
+    staffAccessGrantStore: new FileDurableStaffAccessGrantStore(dir("staffAccessGrants")),
   };
 }
 
