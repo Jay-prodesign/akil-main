@@ -137,8 +137,6 @@ export function createHttpServer(deps: {
   });
 
   return createServer((req, res) => {
-    const request = toIncomingRequestLikeFromNode(req);
-
     /**
      * C1 last-resort guard. Before C1, every source behind these handlers
      * was an in-memory fixture that never threw. Now they read real FILE
@@ -150,9 +148,20 @@ export function createHttpServer(deps: {
      * tenant. This guard turns any exception that escapes into a single
      * generic 500 for that one request. It never reveals the error, and
      * the process keeps serving.
+     *
+     * C1 fix (review finding): `toIncomingRequestLikeFromNode` itself can
+     * throw - `new URL(req.url ?? "/", "http://localhost")` rejects a
+     * request target such as `//` or `//:99999/` (parsed as a host, then
+     * rejected as an invalid one) with `ERR_INVALID_URL`. That call used
+     * to run before this guard, so a single unauthenticated, malformed
+     * request line crashed the whole process for every tenant. The
+     * translation now runs inside the guard, like every other failure
+     * path.
      */
     let response: OutgoingResponseLike;
     try {
+      const request = toIncomingRequestLikeFromNode(req);
+
       // DEPLOY-003: health checks are a transport-level concern (no
       // session/snapshot involvement), so they're handled here, before
       // translating into the authenticated-shell request path at all -

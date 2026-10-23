@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { connect } from "node:net";
 import { createHttpServer, toIncomingRequestLikeFromNode, isInternalOsPath } from "../src/web/http-server.js";
 import {
   createWebShellFixtureSnapshotSource,
@@ -26,6 +27,36 @@ function listenOnEphemeralPort(server: import("node:http").Server): Promise<numb
 function closeServer(server: import("node:http").Server): Promise<void> {
   return new Promise((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+/**
+ * `fetch` (and every normal HTTP client) normalizes a request target before
+ * it is ever sent, so it cannot produce a raw line like `GET // HTTP/1.1`.
+ * Reaching `new URL(req.url, "http://localhost")` with a target Node's own
+ * `http` parser accepts but the WHATWG URL parser rejects (a bare `//`,
+ * parsed as an empty/invalid host) requires writing the request line onto
+ * the socket directly.
+ */
+function sendRawRequestLine(port: number, requestLine: string): Promise<{ statusCode: number }> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, "127.0.0.1", () => {
+      socket.write(`${requestLine}\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`);
+    });
+    let raw = "";
+    socket.on("data", (chunk) => {
+      raw += chunk.toString("utf8");
+    });
+    socket.on("error", reject);
+    socket.on("close", () => {
+      const statusLine = raw.split("\r\n")[0] ?? "";
+      const match = /^HTTP\/1\.[01] (\d{3})/.exec(statusLine);
+      if (match === null) {
+        reject(new Error(`no HTTP status line in raw response: ${JSON.stringify(raw)}`));
+        return;
+      }
+      resolve({ statusCode: Number(match[1]) });
+    });
   });
 }
 
@@ -215,6 +246,30 @@ test("C1 H10: an exception escaping a handler becomes one generic 500 with no er
     const body = await response.text();
     assert.equal(body, "Internal Server Error");
     assert.doesNotMatch(body, /secret-internal-detail/);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/health`)).status, 200);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("C1 H11 (review finding): a malformed raw request target that new URL() rejects gets the generic 500, not a crashed process", async () => {
+  const server = createHttpServer({
+    isProduction: false,
+    snapshotSource: createWebShellFixtureSnapshotSource(),
+    healthCheck: () => ({ healthy: true, body: "{}" }),
+  });
+  const port = await listenOnEphemeralPort(server);
+  try {
+    // `//` is parsed by node:http as a valid request target, but
+    // `new URL("//", "http://localhost")` throws ERR_INVALID_URL (it is
+    // read as an empty/invalid host). Before the fix, toIncomingRequestLikeFromNode
+    // ran outside the last-resort guard, so this single unauthenticated
+    // request crashed the whole server process.
+    const malformed = await sendRawRequestLine(port, "GET // HTTP/1.1");
+    assert.equal(malformed.statusCode, 500);
+
+    // The process - and this same server - must still be serving every
+    // other tenant/request afterward.
     assert.equal((await fetch(`http://127.0.0.1:${port}/health`)).status, 200);
   } finally {
     await closeServer(server);
