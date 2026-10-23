@@ -15,6 +15,7 @@ import type { CustomerOffboardingRequest, CustomerOffboardingRequestId } from ".
 import type { StoredConnectorConnection } from "../domain/durable-connector-connection-store.js";
 import { buildConnectorCatalog } from "../domain/integration-connector-catalog.js";
 import { buildIntegrationsAdminView, type IntegrationConnectionSummary } from "../domain/integration-admin-view.js";
+import type { EvidenceReference } from "../domain/evidence.js";
 import {
   requireInternalOsProjectAccess,
   InternalOsAccessDeniedError,
@@ -355,9 +356,10 @@ export function resolveHomeView(input: {
  * fabricate content."
  *
  * C3 (gap scan 2026-10-23) update: Connections now has a real source port
- * (`ConnectionsSource` / `resolveConnectionsView` below). It still renders
- * this same `NOT_ACTIVE` state when no source is wired. Attention, AI &
- * Capabilities and Knowledge are unchanged.
+ * (`ConnectionsSource` / `resolveConnectionsView` below), and so does
+ * Knowledge (`KnowledgeSource` / `resolveKnowledgeView`, C3 Knowledge
+ * slice). Each still renders this same `NOT_ACTIVE` state when no source is
+ * wired. Attention and AI & Capabilities are unchanged.
  */
 export type NotActiveViewState = { readonly kind: "NOT_ACTIVE" };
 
@@ -455,6 +457,135 @@ export function resolveConnectionsView(
   }
   const { connections } = buildIntegrationsAdminView({ catalog: NO_CONNECTOR_CATALOG, connections: stored });
   return { kind: "READY", connections };
+}
+
+/**
+ * C3 Knowledge slice (gap scan 2026-10-23): caller-injected read source for
+ * the Organization's recorded evidence references, for the dedicated
+ * `/os/knowledge` destination. Same optional-source pattern as
+ * `ConnectionsSource`: an absent source renders `NOT_ACTIVE`, never
+ * fabricated content. The deployable runtime wires
+ * `createDurableKnowledgeSource` (over the runtime's single
+ * `FileDurableEvidenceReferenceStore`, KNOWLEDGE-EVIDENCE-DURABLE-001) here.
+ *
+ * Contract: returns every evidence reference recorded for the
+ * Organization's tenant. A read or replay failure THROWS. It must never be
+ * reported as an empty list (a storage error is never relabeled as
+ * absence).
+ *
+ * The port returns the raw `EvidenceReference`, not a pre-masked shape.
+ * Field selection happens in `resolveKnowledgeView`, so every source,
+ * including a faulty one, goes through the same allow-list.
+ */
+export interface KnowledgeSource {
+  listEvidenceReferences(organization: Organization): ReadonlyArray<EvidenceReference>;
+}
+
+/**
+ * One Knowledge row: an allow-list of the `EvidenceReference` fields that
+ * are shown - the evidence id and type, the customer / project / job it was
+ * captured for, and when it was captured.
+ *
+ * Left out on purpose:
+ * - `sourceLocator`: `evidence.ts` intends it to be a locator rather than
+ *   secret material, but nothing enforces that. It is free text, validated
+ *   only for being non-empty and trimmed, so a recording caller could put a
+ *   pre-signed link, an internal storage path or a URL with query-string
+ *   credentials there. The one existing staff read model over
+ *   `EvidenceReference` (OS-V0-12's `AuditEvidenceObservability`, rendered
+ *   on `/os/admin`) already leaves it out for the same reason, and this
+ *   page follows that precedent rather than widening it.
+ * - `tenantId`: the tenant is the page's own Organization by construction
+ *   (re-checked in `resolveKnowledgeView`).
+ */
+export interface KnowledgeEvidenceEntry {
+  readonly evidenceId: string;
+  readonly evidenceType: string;
+  readonly customerId: string;
+  readonly projectId: string;
+  readonly jobId: string;
+  readonly capturedAt: string;
+}
+
+/**
+ * Same four states as `ConnectionsViewState`, for the same reasons:
+ * - `NOT_ACTIVE`: no source is wired (the pre-C3 default).
+ * - `ERROR`: the source threw, or returned a record that belongs to a
+ *   different tenant. Rendered as the OS ERROR page (500), never as EMPTY.
+ * - `EMPTY`: the source was read successfully and this tenant has no
+ *   recorded evidence references.
+ * - `READY`: at least one evidence reference, already allow-listed.
+ *
+ * `EMPTY` and `NOT_ACTIVE` stay distinct: "this build has no data source
+ * for this page" and "this organization has recorded no evidence" are
+ * different facts.
+ */
+export type KnowledgeViewState =
+  | { readonly kind: "NOT_ACTIVE" }
+  | { readonly kind: "ERROR" }
+  | { readonly kind: "EMPTY" }
+  | { readonly kind: "READY"; readonly evidence: ReadonlyArray<KnowledgeEvidenceEntry> };
+
+/**
+ * Most recently captured first, then by `evidenceId`, so the order does not
+ * depend on the store's file layout. `capturedAt` is compared as a plain
+ * string: the domain does not constrain its format, so this is a
+ * deterministic order, and a chronological one for ISO-8601 timestamps.
+ */
+function compareKnowledgeOrder(a: EvidenceReference, b: EvidenceReference): number {
+  if (a.capturedAt !== b.capturedAt) {
+    return a.capturedAt < b.capturedAt ? 1 : -1;
+  }
+  if (a.evidenceId !== b.evidenceId) {
+    return a.evidenceId < b.evidenceId ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Tenant isolation follows `resolveConnectionsView`: each returned record's
+ * own `tenantId` is re-checked against the Organization's. A mismatch makes
+ * the whole view `ERROR` instead of being dropped, because dropping it
+ * could turn a contaminated read into `EMPTY`. `FileDurableEvidenceReferenceStore`
+ * already throws on this case during replay; this check covers any other
+ * implementation of the port.
+ *
+ * Access: this function does no permission check of its own. The
+ * `knowledge` destination is already WRITE-gated by `isDestinationVisible`,
+ * which the request handler enforces before this function is ever called,
+ * so every viewer who reaches it already holds WRITE.
+ */
+export function resolveKnowledgeView(
+  organization: Organization,
+  source: KnowledgeSource | undefined,
+): KnowledgeViewState {
+  if (source === undefined) {
+    return { kind: "NOT_ACTIVE" };
+  }
+  let records: ReadonlyArray<EvidenceReference>;
+  try {
+    records = source.listEvidenceReferences(organization);
+  } catch {
+    // A read/replay failure (e.g. CorruptedEvidenceReferenceFileError, or a
+    // lock timeout) is this view's own ERROR - never relabeled as EMPTY ("no
+    // evidence") and never left to escape as an uncaught exception.
+    return { kind: "ERROR" };
+  }
+  if (records.some((record) => record.tenantId !== organization.tenantId)) {
+    return { kind: "ERROR" };
+  }
+  if (records.length === 0) {
+    return { kind: "EMPTY" };
+  }
+  const evidence = [...records].sort(compareKnowledgeOrder).map((record) => ({
+    evidenceId: record.evidenceId,
+    evidenceType: record.evidenceType,
+    customerId: record.customerId,
+    projectId: record.projectId,
+    jobId: record.jobId,
+    capturedAt: record.capturedAt,
+  }));
+  return { kind: "READY", evidence };
 }
 
 /**

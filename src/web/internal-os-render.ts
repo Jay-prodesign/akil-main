@@ -1,4 +1,4 @@
-import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, AdminResourceBindingViewState, OperationalObservabilityViewState, PendingOffboardingRequestsViewState, ConnectionsViewState, PeopleDirectoryEntry, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary } from "./internal-os-view-state.js";
+import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, AdminResourceBindingViewState, OperationalObservabilityViewState, PendingOffboardingRequestsViewState, ConnectionsViewState, KnowledgeViewState, KnowledgeEvidenceEntry, PeopleDirectoryEntry, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary } from "./internal-os-view-state.js";
 import type { ConnectionState } from "../domain/connection-authority.js";
 import type { IntegrationConnectionSummary } from "../domain/integration-admin-view.js";
 
@@ -607,6 +607,66 @@ export function connectionsPageContent(
         organizationName,
         title: "Connections",
         bodyHtml: renderConnectionsBody(view),
+      });
+  }
+}
+
+function renderKnowledgeRow(entry: KnowledgeEvidenceEntry): string {
+  return `<tr><td>${escapeHtml(entry.evidenceId)}</td><td>${escapeHtml(entry.evidenceType)}</td><td>${escapeHtml(entry.customerId)} / ${escapeHtml(entry.projectId)}</td><td>${escapeHtml(entry.jobId)}</td><td>${escapeHtml(entry.capturedAt)}</td></tr>`;
+}
+
+/**
+ * C3 Knowledge slice: read-only Knowledge destination. Every field comes
+ * from `KnowledgeEvidenceEntry`, the allow-list `resolveKnowledgeView`
+ * builds, so an evidence reference's `sourceLocator` never reaches this
+ * function. Escaped text only, no mutation control.
+ */
+function renderKnowledgeBody(view: Exclude<KnowledgeViewState, { kind: "NOT_ACTIVE" } | { kind: "ERROR" }>): string {
+  if (view.kind === "EMPTY") {
+    return `
+  <section aria-labelledby="knowledge-heading" class="card">
+    <h2 id="knowledge-heading">Knowledge</h2>
+    <p>No evidence references have been recorded for this organization yet.</p>
+  </section>`;
+  }
+  const rows = view.evidence.map(renderKnowledgeRow).join("\n      ");
+  return `
+  <section aria-labelledby="knowledge-heading" class="card">
+    <h2 id="knowledge-heading">Knowledge</h2>
+    <p>Read-only. Recorded evidence references, most recently captured first. Source locations are not shown on this page.</p>
+    <table>
+      <thead><tr><th>Evidence</th><th>Type</th><th>Customer / project</th><th>Job</th><th>Captured</th></tr></thead>
+      <tbody>
+      ${rows}
+      </tbody>
+    </table>
+  </section>`;
+}
+
+/**
+ * C3 Knowledge slice: `NOT_ACTIVE` returns exactly what
+ * `notActiveDestinationPageContent` returned for `knowledge` before C3, so
+ * an unwired caller's page is unchanged. `ERROR` becomes the OS ERROR page
+ * (500, no data and no detail shown), never an EMPTY list.
+ */
+export function knowledgePageContent(
+  nav: ReadonlyArray<NavDestination>,
+  organizationName: string,
+  view: KnowledgeViewState,
+): InternalOsPageContent {
+  switch (view.kind) {
+    case "NOT_ACTIVE":
+      return notActiveDestinationPageContent(nav, organizationName, "knowledge");
+    case "ERROR":
+      return { kind: "ERROR", reason: "knowledge evidence could not be read" };
+    case "EMPTY":
+    case "READY":
+      return destinationContent({
+        nav,
+        activeKey: "knowledge",
+        organizationName,
+        title: "Knowledge",
+        bodyHtml: renderKnowledgeBody(view),
       });
   }
 }

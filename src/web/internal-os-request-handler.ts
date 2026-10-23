@@ -17,8 +17,10 @@ import {
   resolveProductsView,
   resolveAdminView,
   resolveConnectionsView,
+  resolveKnowledgeView,
   type DestinationKey,
   type ConnectionsSource,
+  type KnowledgeSource,
   type PeopleDirectorySource,
   type WorkProjectSource,
   type WorkJobSource,
@@ -33,6 +35,7 @@ import {
   workProjectDetailPageContent,
   notActiveDestinationPageContent,
   connectionsPageContent,
+  knowledgePageContent,
   peoplePageContent,
   productsPageContent,
   adminPageContent,
@@ -106,6 +109,17 @@ export interface InternalOsRequestHandlerDeps {
    * `createDurablePeopleDirectorySource` here.
    */
   readonly peopleDirectorySource?: PeopleDirectorySource;
+  /**
+   * C3 Knowledge slice (gap scan 2026-10-23): caller-injected read source for
+   * the dedicated `/os/knowledge` destination. Same optional-source pattern
+   * as `connectionsSource`. Absent renders the same `NOT_ACTIVE` page as
+   * before C3, never fabricated content. A source that throws renders the OS
+   * ERROR page. It is read only on `/os/knowledge`, only after
+   * `requireInternalOsAccess` has granted access and the existing
+   * `isDestinationVisible("knowledge")` WRITE gate has passed. The
+   * deployable runtime wires `createDurableKnowledgeSource` here.
+   */
+  readonly knowledgeSource?: KnowledgeSource;
 }
 
 function toResponse(rendered: RenderedInternalOsPage): OutgoingResponseLike {
@@ -286,8 +300,14 @@ export function createInternalOsRequestHandler(deps: InternalOsRequestHandlerDep
         break;
       case "attention":
       case "ai-capabilities":
-      case "knowledge":
         content = notActiveDestinationPageContent(nav, organizationName, parsed.kind);
+        break;
+      case "knowledge":
+        content = knowledgePageContent(
+          nav,
+          organizationName,
+          resolveKnowledgeView(deps.organization, deps.knowledgeSource),
+        );
         break;
       case "connections":
         content = connectionsPageContent(

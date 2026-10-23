@@ -51,6 +51,7 @@ export function createInternalOsHttpServer(
       : {}),
     ...(deps.connectionsSource !== undefined ? { connectionsSource: deps.connectionsSource } : {}),
     ...(deps.peopleDirectorySource !== undefined ? { peopleDirectorySource: deps.peopleDirectorySource } : {}),
+    ...(deps.knowledgeSource !== undefined ? { knowledgeSource: deps.knowledgeSource } : {}),
   });
 
   return createServer((req, res) => {
