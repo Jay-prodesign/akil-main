@@ -20,6 +20,11 @@ import type { WorkProjectSource } from "./internal-os-view-state.js";
  * sources; this checkpoint does not change that pattern on its own
  * initiative. A caller that separately wires this adapter into a running
  * route is a later, explicit integration decision.
+ *
+ * C1 update: that integration step is now done. The deployable runtime's
+ * composition root (`node-server-entrypoint.ts`) wires this adapter, over
+ * the runtime's one `FileDurableProjectStore`, into the live `/os` route.
+ * `internal-os-dev-main.ts` still uses its in-memory review fixtures.
  */
 export function createDurableWorkProjectSource(store: DurableProjectStore): WorkProjectSource {
   return {

@@ -69,6 +69,13 @@ import type { ClientProjectSnapshotSource } from "./snapshot-view-state.js";
  * itself would otherwise fail closed on any foreign-project event, so
  * this filter is required, not optional, for the golden path to ever
  * reach `READY`.
+ *
+ * C1 update: `node-server-entrypoint.ts` no longer injects
+ * `createWebShellFixtureSnapshotSource`. Its composition root now wires
+ * this adapter, over the runtime's one `FileDurableProjectStore`/
+ * `FileDurableOutcomeJobStore`/`FileDurableAuditLog`, into the live
+ * `/portal` route. The "no such source exists yet" comment quoted above
+ * has been replaced there.
  */
 export function createDurableClientProjectSnapshotSource(
   projectStore: DurableProjectStore,

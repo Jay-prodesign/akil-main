@@ -1,0 +1,121 @@
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
+import { FileDurableProjectStore } from "../domain/durable-project-store.js";
+import { FileDurableOutcomeJobStore } from "../domain/durable-outcome-job-store.js";
+import { FileDurableAuditLog } from "../application/durable-audit-log.js";
+import { FileDurableConnectorConnectionStore } from "../domain/durable-connector-connection-store.js";
+import { FileDurableCustomerOffboardingRequestStore } from "../domain/durable-customer-offboarding-request-store.js";
+import { FileDurableOrganizationResourceBindingStore } from "../domain/durable-organization-resource-binding-store.js";
+import { FileDurableOrganizationMembershipStore } from "../domain/durable-organization-membership-store.js";
+import { FileDurableOrganizationServicePrincipalStore } from "../domain/durable-organization-service-principal-store.js";
+import { FileDurableConfigurationPolicyDecisionStore } from "../domain/durable-configuration-policy-decision-store.js";
+import { FileDurableEvidenceReferenceStore } from "../domain/durable-evidence-reference-store.js";
+import { FileDurableControlledOrganizationProvisioningStore } from "../domain/durable-controlled-organization-provisioning-store.js";
+import type { HealthProbeResult } from "./health-check.js";
+
+/**
+ * C1 (runtime composition root, FILE driver): the fixed on-disk layout of
+ * every `FileDurable*` store the deployable runtime reads from, one
+ * subdirectory per store under the single configured `AppConfig.dataDir`.
+ * Each store needs its OWN directory: most of them write one
+ * `<base64url(tenantId)>.json` file per tenant, so two stores sharing one
+ * directory would overwrite each other's tenant files.
+ *
+ * Only stores that a read surface (`/portal` or `/os`) actually uses are
+ * composed here. Stores that no served route reads yet (engineering, plan
+ * admission, quota reservation, outcome-job execution, external sale
+ * bootstrap, protected-decision record/wait) are deliberately not
+ * constructed: building a store nothing reads would add a health probe
+ * with nothing behind it.
+ */
+export const FILE_DURABLE_RUNTIME_STORE_LAYOUT = {
+  projects: "projects",
+  outcomeJobs: "outcome-jobs",
+  auditLog: "audit-log",
+  connectorConnections: "connector-connections",
+  customerOffboardingRequests: "customer-offboarding-requests",
+  organizationResourceBindings: "organization-resource-bindings",
+  organizationMemberships: "organization-memberships",
+  organizationServicePrincipals: "organization-service-principals",
+  configurationPolicyDecisions: "configuration-policy-decisions",
+  evidenceReferences: "evidence-references",
+  controlledOrganizationProvisioning: "controlled-organization-provisioning",
+} as const;
+
+export type FileDurableRuntimeStoreKey = keyof typeof FILE_DURABLE_RUNTIME_STORE_LAYOUT;
+
+export interface FileDurableRuntimeStores {
+  readonly dataDir: string;
+  readonly projectStore: FileDurableProjectStore;
+  readonly outcomeJobStore: FileDurableOutcomeJobStore;
+  readonly auditLog: FileDurableAuditLog;
+  readonly connectorConnectionStore: FileDurableConnectorConnectionStore;
+  readonly customerOffboardingRequestStore: FileDurableCustomerOffboardingRequestStore;
+  readonly organizationResourceBindingStore: FileDurableOrganizationResourceBindingStore;
+  readonly organizationMembershipStore: FileDurableOrganizationMembershipStore;
+  readonly organizationServicePrincipalStore: FileDurableOrganizationServicePrincipalStore;
+  readonly configurationPolicyDecisionStore: FileDurableConfigurationPolicyDecisionStore;
+  readonly evidenceReferenceStore: FileDurableEvidenceReferenceStore;
+  readonly controlledOrganizationProvisioningStore: FileDurableControlledOrganizationProvisioningStore;
+}
+
+/** Absolute (or caller-relative) directory of one store under `dataDir`. */
+export function fileDurableRuntimeStoreDir(dataDir: string, key: FileDurableRuntimeStoreKey): string {
+  return join(dataDir, FILE_DURABLE_RUNTIME_STORE_LAYOUT[key]);
+}
+
+/**
+ * Builds each store exactly once, rooted at `dataDir`. Each store's
+ * constructor already creates its own directory (`mkdirSync(..., {
+ * recursive: true })`), so a `dataDir` that cannot be created or written
+ * makes this throw at boot. The runtime never starts with a store it
+ * could not open.
+ */
+export function createFileDurableRuntimeStores(dataDir: string): FileDurableRuntimeStores {
+  const dir = (key: FileDurableRuntimeStoreKey): string => fileDurableRuntimeStoreDir(dataDir, key);
+  return {
+    dataDir,
+    projectStore: new FileDurableProjectStore(dir("projects")),
+    outcomeJobStore: new FileDurableOutcomeJobStore(dir("outcomeJobs")),
+    auditLog: new FileDurableAuditLog(dir("auditLog")),
+    connectorConnectionStore: new FileDurableConnectorConnectionStore(dir("connectorConnections")),
+    customerOffboardingRequestStore: new FileDurableCustomerOffboardingRequestStore(dir("customerOffboardingRequests")),
+    organizationResourceBindingStore: new FileDurableOrganizationResourceBindingStore(dir("organizationResourceBindings")),
+    organizationMembershipStore: new FileDurableOrganizationMembershipStore(dir("organizationMemberships")),
+    organizationServicePrincipalStore: new FileDurableOrganizationServicePrincipalStore(dir("organizationServicePrincipals")),
+    configurationPolicyDecisionStore: new FileDurableConfigurationPolicyDecisionStore(dir("configurationPolicyDecisions")),
+    evidenceReferenceStore: new FileDurableEvidenceReferenceStore(dir("evidenceReferences")),
+    controlledOrganizationProvisioningStore: new FileDurableControlledOrganizationProvisioningStore(
+      dir("controlledOrganizationProvisioning"),
+    ),
+  };
+}
+
+/**
+ * C1 store-readability health probe: one CRITICAL probe per composed
+ * store. Each probe re-lists that store's own directory every time
+ * `/health` is evaluated, so it reflects the directory as it is now, not
+ * as it was at boot. A directory that was deleted, replaced by a file, or
+ * made unreadable after boot fails its probe, and `evaluateHealth` then
+ * reports `UNHEALTHY` (503).
+ *
+ * This checks that each store's directory can be read. It does not
+ * re-validate every tenant file's contents: a corrupted tenant file is a
+ * data-integrity problem for that one tenant, and the store's own
+ * fail-closed replay validation already reports it on read.
+ *
+ * `detail` never includes a filesystem path, only the store key and an
+ * errno code, because `/health` is unauthenticated.
+ */
+export function probeFileDurableRuntimeStoreReadability(dataDir: string): ReadonlyArray<HealthProbeResult> {
+  return (Object.keys(FILE_DURABLE_RUNTIME_STORE_LAYOUT) as FileDurableRuntimeStoreKey[]).map((key) => {
+    const name = `file-store:${FILE_DURABLE_RUNTIME_STORE_LAYOUT[key]}`;
+    try {
+      readdirSync(fileDurableRuntimeStoreDir(dataDir, key));
+      return { name, healthy: true, critical: true, detail: "readable" };
+    } catch (cause) {
+      const code = (cause as NodeJS.ErrnoException).code ?? "UNKNOWN";
+      return { name, healthy: false, critical: true, detail: `unreadable (${code})` };
+    }
+  });
+}

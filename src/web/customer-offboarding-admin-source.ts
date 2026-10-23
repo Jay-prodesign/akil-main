@@ -16,6 +16,10 @@ import type { CustomerOffboardingAdminSource } from "./internal-os-view-state.js
  * ever rendering it (the Rev28 bounded-correction discipline this whole
  * corridor applies at the view-state boundary, not the source boundary).
  * This module adds no new mutation surface: it only ever reads.
+ *
+ * C1 update: the deployable runtime's composition root
+ * (`node-server-entrypoint.ts`) now wires this adapter into the live
+ * `/os/admin` route.
  */
 export function createDurableCustomerOffboardingAdminSource(
   store: DurableCustomerOffboardingRequestStore,
