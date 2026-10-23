@@ -57,7 +57,8 @@ export interface InternalOsRequestHandlerDeps {
    * route - mirrors `projectSource`/`jobSource`'s own established optional-
    * source pattern. Absent (the honest production default until a durable
    * binding store is separately wired) renders `NOT_ACTIVE`, never
-   * fabricated content.
+   * fabricated content. C1: the deployable runtime now wires
+   * `createDurableOrganizationResourceBindingSource` here.
    */
   readonly resourceBindingSource?: OrganizationResourceBindingSource;
   /**
@@ -66,7 +67,8 @@ export interface InternalOsRequestHandlerDeps {
    * route - mirrors `resourceBindingSource`'s own established optional-
    * source pattern exactly. Absent (the honest production default until a
    * real source is separately wired) renders `NOT_ACTIVE`, never
-   * fabricated content.
+   * fabricated content. C1: the deployable runtime now wires
+   * `createDurableOperationalObservabilitySource` here.
    */
   readonly operationalObservabilitySource?: OperationalObservabilitySource;
   /**
@@ -75,7 +77,8 @@ export interface InternalOsRequestHandlerDeps {
    * `/os/admin` route - mirrors `resourceBindingSource`'s own established
    * optional-source pattern exactly. Absent (the honest production default
    * until a durable offboarding-request store is separately wired) renders
-   * `NOT_ACTIVE`, never fabricated content.
+   * `NOT_ACTIVE`, never fabricated content. C1: the deployable runtime now
+   * wires `createDurableCustomerOffboardingAdminSource` here.
    */
   readonly customerOffboardingAdminSource?: CustomerOffboardingAdminSource;
 }

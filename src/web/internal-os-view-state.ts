@@ -143,6 +143,10 @@ export function summarizeAccess(access: EffectiveAccessResolution): AccessSummar
  * until such a store is separately authorized) renders `NOT_ACTIVE`, never
  * fabricated content - mirroring `request-handler.ts`'s own optional
  * `teamAttentionSource?` pattern exactly.
+ *
+ * C1 update: no longer true. `DurableProjectStore` exists (PROJ-DURABLE-001),
+ * and the deployable runtime (`node-server-entrypoint.ts`) wires
+ * `createDurableWorkProjectSource` into this port on the live `/os` route.
  */
 export interface WorkProjectSource {
   getProject(input: {
@@ -160,6 +164,10 @@ export interface WorkProjectSource {
  * if... otherwise treat as read-only accepted substrate" - the same
  * discipline extends to OS-V0-03's own store here) - Phase A itself takes
  * only the narrow `listJobs` shape it actually renders.
+ *
+ * C1 update: the deployable runtime (`node-server-entrypoint.ts`) now wires
+ * `createDurableWorkJobSource` (WORK-JOB-SOURCE-001, over
+ * `FileDurableOutcomeJobStore`) into this port on the live `/os` route.
  */
 export interface WorkJobSource {
   listJobs(project: Project): ReadonlyArray<OutcomeJob>;
@@ -404,6 +412,10 @@ export function resolveProductsView(): ProductsViewState {
  * bootstrapped yet (no `OrganizationResourceBinding` exists for it) - a
  * legitimate, distinct `NOT_BOUND` state, never conflated with `NOT_ACTIVE`
  * (no source wired) or a fabricated `READY`.
+ *
+ * C1 update: the deployable runtime (`node-server-entrypoint.ts`) now wires
+ * `createDurableOrganizationResourceBindingSource` (ORG-MEMBERSHIP-DURABLE-001
+ * and its follow-ons) into this port on the live `/os/admin` route.
  */
 export interface OrganizationResourceBindingSource {
   resolveStatus(organization: Organization): OrganizationResourceBindingStatus | undefined;
@@ -468,6 +480,10 @@ export function resolveResourceBindingView(
  * empty-dimensioned) `OperationalObservabilityView` - there is no separate
  * "never bootstrapped" state here, since every dimension of the view is
  * already independently optional/empty by construction.
+ *
+ * C1 update: the deployable runtime (`node-server-entrypoint.ts`) now wires
+ * `createDurableOperationalObservabilitySource` (OBS-ADMIN-SOURCE-001) into
+ * this port on the live `/os/admin` route.
  */
 export interface OperationalObservabilitySource {
   resolveView(organization: Organization): OperationalObservabilityView;

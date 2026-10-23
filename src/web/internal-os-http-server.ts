@@ -1,12 +1,12 @@
 import { createServer, type Server } from "node:http";
-import { createProductionStaffSessionProvider } from "./production-staff-session-provider.js";
-import { createDevFixtureStaffSessionProvider } from "./dev-fixture-staff-session-provider.js";
+import { selectInternalOsStaffSessionProvider } from "./staff-session-provider-selection.js";
 import type { StaffSessionContext } from "./staff-session-context.js";
 import {
   createInternalOsRequestHandler,
   type InternalOsRequestHandlerDeps,
 } from "./internal-os-request-handler.js";
 import type { IncomingRequestLike } from "./request-handler.js";
+import { toIncomingRequestLikeFromNode } from "./http-server.js";
 
 /**
  * Rev168 (mirrors `http-server.ts`'s own ADR 0001 discipline exactly, for
@@ -18,6 +18,12 @@ import type { IncomingRequestLike } from "./request-handler.js";
  * asked to build under `isProduction: true` (`DevFixtureStaffSessionProviderInProductionError`),
  * so this is a second, independent guard at the composition point, not the
  * only one.
+ *
+ * C1: this standalone server is now used only by the dev-only
+ * `internal-os-dev-main.ts` bootstrap and by tests. The deployable runtime
+ * serves `/os` through `http-server.ts`'s single composed Node server. The
+ * provider selection itself moved to `staff-session-provider-selection.ts`
+ * (unchanged behavior), so both servers share one implementation.
  */
 export function createInternalOsHttpServer(
   deps: Omit<InternalOsRequestHandlerDeps, "provider"> & {
@@ -25,12 +31,10 @@ export function createInternalOsHttpServer(
     devStaffFixtures?: ReadonlyMap<string, StaffSessionContext>;
   },
 ): Server {
-  const provider = deps.isProduction
-    ? createProductionStaffSessionProvider()
-    : createDevFixtureStaffSessionProvider({
-        fixtures: deps.devStaffFixtures ?? new Map(),
-        isProduction: false,
-      });
+  const provider = selectInternalOsStaffSessionProvider({
+    isProduction: deps.isProduction,
+    ...(deps.devStaffFixtures !== undefined ? { devStaffFixtures: deps.devStaffFixtures } : {}),
+  });
 
   const handleRequest = createInternalOsRequestHandler({
     provider,
@@ -48,13 +52,17 @@ export function createInternalOsHttpServer(
   });
 
   return createServer((req, res) => {
-    const method = req.method ?? "GET";
-    const url = new URL(req.url ?? "/", "http://localhost");
-    const headers: Record<string, string | undefined> = {};
-    for (const [key, value] of Object.entries(req.headers)) {
-      headers[key] = Array.isArray(value) ? value[0] : value;
-    }
-    const request: IncomingRequestLike = { method, path: url.pathname, headers };
+    /**
+     * C1a (PROTO-HEADER-HARDENING follow-up): that checkpoint said it fixed
+     * "both Node and Cloudflare Worker transports", but it only changed
+     * `http-server.ts` and `cloudflare-worker-fetch-adapter.ts`. This
+     * second Node transport kept its own inline copy of the translation,
+     * with a plain `{}` header dictionary that silently drops a
+     * caller-supplied `__proto__` header. It now calls the same
+     * null-prototype translation `http-server.ts` uses
+     * (`toIncomingRequestLikeFromNode`) instead of keeping a copy.
+     */
+    const request: IncomingRequestLike = toIncomingRequestLikeFromNode(req);
 
     const response = handleRequest(request);
     res.writeHead(response.status, response.headers);

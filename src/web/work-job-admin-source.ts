@@ -27,6 +27,10 @@ import type { WorkJobSource } from "./internal-os-view-state.js";
  * corridor's own established discipline (see `operational-observability-
  * admin-source.ts`'s identical reasoning for not re-adding
  * `FileDurableConnectorConnectionStore`'s own already-proven guarantee).
+ *
+ * C1 update: the deployable runtime's composition root
+ * (`node-server-entrypoint.ts`) now wires this adapter, over the runtime's
+ * one `FileDurableOutcomeJobStore`, into the live `/os` route.
  */
 export function createDurableWorkJobSource(store: DurableOutcomeJobStore): WorkJobSource {
   return {

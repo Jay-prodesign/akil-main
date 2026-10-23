@@ -48,6 +48,12 @@ import type { OperationalObservabilitySource } from "./internal-os-view-state.js
  * internally and degrades to an empty-but-valid view, mirroring
  * `resolvePendingOffboardingRequestsView`'s own established "a throwing
  * source degrades to the safe default rather than propagating" precedent.
+ *
+ * C1 update: the deployable runtime's composition root
+ * (`node-server-entrypoint.ts`) now wires this adapter, over the runtime's
+ * one `FileDurableConnectorConnectionStore`, into the live `/os/admin`
+ * route. The "every caller leaves it unwired" statement above describes
+ * the state before C1.
  */
 export function createDurableOperationalObservabilitySource(
   store: DurableConnectorConnectionStore,

@@ -27,3 +27,6 @@ node_modules/
 dist/
 build/
 .cache/
+
+# C1: default FILE-driver data root for a locally-run runtime (runtime/app-config.ts DEFAULT_FILE_DATA_DIR)
+.akilta-data/

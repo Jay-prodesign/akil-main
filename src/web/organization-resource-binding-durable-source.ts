@@ -88,6 +88,11 @@ import type { OrganizationResourceBindingSource } from "./internal-os-view-state
  * (bootstrap-time provenance only, per `organization-resource-binding.ts`'s
  * own Rev183 F2 doc comment) truthfully blocks on that gate forever via
  * this adapter, since no current evidence can ever be supplied for it yet.
+ *
+ * C1 update: the deployable runtime's composition root
+ * (`node-server-entrypoint.ts`) now wires this adapter into the live
+ * `/os/admin` route. It is built over the same single instance of each
+ * `FileDurable*` store that the runtime's other sources read.
  */
 export function createDurableOrganizationResourceBindingSource(
   bindingStore: DurableOrganizationResourceBindingStore,
