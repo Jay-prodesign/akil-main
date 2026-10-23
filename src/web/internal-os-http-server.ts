@@ -50,6 +50,7 @@ export function createInternalOsHttpServer(
       ? { customerOffboardingAdminSource: deps.customerOffboardingAdminSource }
       : {}),
     ...(deps.connectionsSource !== undefined ? { connectionsSource: deps.connectionsSource } : {}),
+    ...(deps.peopleDirectorySource !== undefined ? { peopleDirectorySource: deps.peopleDirectorySource } : {}),
   });
 
   return createServer((req, res) => {
