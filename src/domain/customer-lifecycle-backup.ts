@@ -2,6 +2,9 @@ import type { TenantScope } from "./tenant-scope.js";
 import { createCustomer, type Customer } from "./customer.js";
 import type { EffectiveAccessResolution } from "./effective-organization-access.js";
 import type { CustomerOffboardingRequest } from "./customer-offboarding.js";
+import type { Project } from "./project.js";
+import type { DurableProjectStore } from "./durable-project-store.js";
+import type { DurableCustomerOffboardingRequestStore } from "./durable-customer-offboarding-request-store.js";
 
 /**
  * CUS-BACKUP-001 (AA-005 REV215 V2 floor slice continuation; canonical OS
@@ -42,6 +45,31 @@ import type { CustomerOffboardingRequest } from "./customer-offboarding.js";
  * exists for this customer; this module never looks it up itself, exactly
  * as `restoreOrganizationLifecycleFromSnapshot` never re-derives anything
  * beyond what its own caller supplies.
+ *
+ * `exportCustomerProjectsSnapshot` (E2, PR #170 comment `6354570236`
+ * reclassification, 2026-10-23): a non-destructive, read-only export of a
+ * customer's own `Project` records over the existing, unmodified
+ * `DurableProjectStore.listByCustomer`, gated identically to
+ * `exportCustomerLifecycleSnapshot` above (GRANTED access, same tenant, a
+ * real bound `OrganizationMembership`). It never deletes, updates, or
+ * marks anything - `listByCustomer` is itself read-only. This is the real
+ * export `CUS-OFFBOARD-002`'s `advanceCustomerOffboardingExecution`
+ * composes with (via a caller-supplied evidence pointer) to honestly
+ * record `PROJECT`'s disposition as `"EXPORTED"` rather than
+ * `"BLOCKED_UNSUPPORTED"`.
+ *
+ * `restoreCustomerLifecycleFromSnapshot`'s authoritative gate (E4, same
+ * reclassification): the original `relatedOffboardingRequest` parameter
+ * only closed "deleted customer reappears via restore" when the CALLER
+ * chose to supply it - a caller who simply omitted the parameter asserted
+ * (possibly wrongly) that no completed offboarding existed. The optional
+ * `offboardingRequestStore` parameter closes that gap authoritatively:
+ * when supplied, this function itself checks the durable store for any
+ * `COMPLETED` request for this customer, regardless of what
+ * `relatedOffboardingRequest` the caller did or didn't supply.
+ * `relatedOffboardingRequest` is preserved unchanged for callers who don't
+ * have the store available (backward-compatible; existing behavior is
+ * unaffected when `offboardingRequestStore` is omitted).
  */
 
 export class InvalidCustomerLifecycleSnapshotError extends Error {
@@ -127,6 +155,61 @@ export function exportCustomerLifecycleSnapshot(input: {
   };
 }
 
+/**
+ * Scope-limited, read-only projection of a customer's own `Project`
+ * records, over the existing `DurableProjectStore.listByCustomer`. Never
+ * deletes, updates, or marks anything.
+ */
+export interface CustomerProjectsExportSnapshot {
+  readonly tenantId: TenantScope["tenantId"];
+  readonly customerId: Customer["customerId"];
+  readonly projects: ReadonlyArray<Project>;
+  readonly exportedAt: string;
+  readonly exportedByPrincipalRef: string;
+}
+
+/**
+ * Pure read + projection: requires the caller's own current access to be
+ * GRANTED and bound to the SAME tenant being exported from - identical
+ * gating to `exportCustomerLifecycleSnapshot` above. Calls only
+ * `projectStore.listByCustomer`, the store's own existing read method;
+ * never `create`/`update`.
+ */
+export function exportCustomerProjectsSnapshot(input: {
+  tenantId: TenantScope["tenantId"];
+  customerId: Customer["customerId"];
+  currentAccess: EffectiveAccessResolution;
+  projectStore: DurableProjectStore;
+  exportedAt: unknown;
+}): CustomerProjectsExportSnapshot {
+  if (input.currentAccess.decision !== "GRANTED") {
+    throw new InvalidCustomerLifecycleSnapshotError(
+      "currentAccess must be a GRANTED EffectiveAccessResolution to export a customer's projects",
+    );
+  }
+  if (input.currentAccess.tenantId !== input.tenantId) {
+    throw new InvalidCustomerLifecycleSnapshotError(
+      "currentAccess does not belong to the given tenantId being exported from",
+    );
+  }
+  if (input.currentAccess.membershipId === undefined) {
+    throw new InvalidCustomerLifecycleSnapshotError(
+      "currentAccess must be bound to a real OrganizationMembership (a current authenticated principal) to export",
+    );
+  }
+  const exportedAt = requireValidTimestamp(input.exportedAt, "exportedAt");
+  const projects = input.projectStore
+    .listByCustomer(input.tenantId, input.customerId)
+    .map((stored) => stored.project);
+  return {
+    tenantId: input.tenantId,
+    customerId: input.customerId,
+    projects,
+    exportedAt,
+    exportedByPrincipalRef: input.currentAccess.membershipId,
+  };
+}
+
 export interface CustomerLifecycleRestoreResult {
   readonly customer: Customer;
   readonly migratedFrom?: {
@@ -154,6 +237,14 @@ export interface CustomerLifecycleRestoreResult {
  *    must not be `"COMPLETED"` — an already-offboarded customer can never
  *    be restored, mirroring `restoreOrganizationLifecycleFromSnapshot`'s
  *    own "an OFFBOARDED snapshot can never be restored" gate.
+ * 4. If `offboardingRequestStore` is supplied (E4, PR #170 comment
+ *    `6354570236` reclassification), this function itself authoritatively
+ *    checks the durable store for any `COMPLETED` request belonging to
+ *    this customer - regardless of what `relatedOffboardingRequest` the
+ *    caller did or didn't supply. This closes the gap where a caller could
+ *    omit/forge `relatedOffboardingRequest` and let a deleted customer
+ *    reappear. Omitting `offboardingRequestStore` preserves the original,
+ *    caller-supplied-only behavior exactly (backward-compatible).
  */
 export function restoreCustomerLifecycleFromSnapshot(input: {
   snapshot: CustomerLifecycleSnapshot;
@@ -161,6 +252,7 @@ export function restoreCustomerLifecycleFromSnapshot(input: {
   targetCustomerId: unknown;
   currentAccess: EffectiveAccessResolution;
   relatedOffboardingRequest?: CustomerOffboardingRequest;
+  offboardingRequestStore?: DurableCustomerOffboardingRequestStore;
 }): CustomerLifecycleRestoreResult {
   if (input.currentAccess.decision !== "GRANTED") {
     throw new CustomerLifecycleRestoreDeniedError(
@@ -192,6 +284,17 @@ export function restoreCustomerLifecycleFromSnapshot(input: {
     if (request.status === "COMPLETED") {
       throw new CustomerLifecycleRestoreDeniedError(
         "the related offboarding request already reached COMPLETED - an already-offboarded customer can never be restored, deleted data must never reappear",
+      );
+    }
+  }
+
+  if (input.offboardingRequestStore !== undefined) {
+    const hasCompletedOffboarding = input.offboardingRequestStore
+      .list(input.snapshot.tenantId)
+      .some((stored) => stored.request.customerId === input.snapshot.customerId && stored.request.status === "COMPLETED");
+    if (hasCompletedOffboarding) {
+      throw new CustomerLifecycleRestoreDeniedError(
+        "the durable CustomerOffboardingRequestStore records a COMPLETED offboarding request for this customer - an already-offboarded customer can never be restored, deleted data must never reappear, regardless of what the caller supplied for relatedOffboardingRequest",
       );
     }
   }

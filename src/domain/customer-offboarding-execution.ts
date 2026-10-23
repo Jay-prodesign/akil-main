@@ -10,30 +10,46 @@ import type { CustomerOffboardingRequest } from "./customer-offboarding.js";
  * smallest coherent dark/internal lifecycle-ENFORCEMENT package on top of
  * that decision: given an already-`COMPLETED` `CustomerOffboardingRequest`,
  * it drives a durable, idempotent, restart-safe execution record across an
- * exact inventory of the customer-scoped resource kinds that genuinely
- * exist in this repository today.
+ * inventory of the customer-scoped resource kinds that genuinely exist in
+ * this repository today.
  *
- * Resource inventory (verified by direct grep against current `main`
- * before writing this module, not assumed): exactly three domain types
- * carry a `customerId` field - `project.ts`'s `Project`, `customer-
- * evidence.ts`'s `CustomerEvidenceItem`, and `commercial-order.ts`'s
- * `CommercialOrder`. None of those three modules exports a delete, redact,
- * purge, or export function for the resource it defines - each exports
- * only its own `create*` constructor. (`organization-lifecycle-archive.ts`
- * has an export/restore pair, but that is Organization-scoped, not
- * Customer-scoped, and belongs to `OS-V1-04`.)
+ * Inventory correction (PR #170 comment `6354570236` reclassification,
+ * 2026-10-23): the original inventory's claim of "exactly three" domain
+ * types carrying `customerId` was false — re-verified by direct grep
+ * against current `main`, roughly thirty domain types carry `customerId`,
+ * including `OutcomeJob`, `OutcomeJobExecutionRunState`, plan-admission
+ * records, `EvidenceReference`, `AuditEvent`, and `BillingReferenceRecord`.
+ * The inventory below is widened to name the durable data classes that
+ * genuinely carry customer-scoped state at rest on `main` today (see the
+ * decision packet at `docs/exec-plans/active/CUS-OFFBOARD-002-DECISION-
+ * PACKET.md` for the full accounting) — still not exhaustive of every
+ * `customerId`-bearing type, but no longer falsely claiming completeness
+ * either. `PROJECT`, `CUSTOMER_EVIDENCE`, and `COMMERCIAL_ORDER` remain the
+ * original three; `OUTCOME_JOB`, `OUTCOME_JOB_EXECUTION`, `PLAN_ADMISSION`,
+ * `EVIDENCE_REFERENCE`, `AUDIT_EVENT`, and `BILLING_REFERENCE` are added.
+ * None of the underlying modules exports a delete, redact, or purge
+ * function for the resource it defines. (`organization-lifecycle-
+ * archive.ts` has an export/restore pair, but that is Organization-scoped,
+ * not Customer-scoped, and belongs to `OS-V1-04`.)
  *
- * Given that honest finding, `CustomerResourceDispositionStatus` declares
- * exactly one reachable literal, `"BLOCKED_UNSUPPORTED"` - mirroring this
- * repository's own established "NOT_ACTIVATED capability, never fabricated"
- * discipline (OS-V1-11's RC evidence index; `CommissionLedgerStatus`'s own
- * single-literal `"UNKNOWN"`). No guessed retention period is introduced
+ * `CustomerResourceDispositionStatus` declares two reachable literals:
+ * `"BLOCKED_UNSUPPORTED"` (the truthful default for every kind - no real
+ * delete/export/anonymization capability exists for it yet, mirroring this
+ * repository's own established "NOT_ACTIVATED capability, never
+ * fabricated" discipline) and `"EXPORTED"`, reachable ONLY for the
+ * `"PROJECT"` kind and only when the caller supplies real, already-
+ * produced export evidence from `customer-lifecycle-backup.ts`'s
+ * `exportCustomerProjectsSnapshot` (CUS-BACKUP-001) - this module never
+ * imports `project.ts`/`durable-project-store.ts` itself (preserved
+ * boundary-scan discipline below), so it cannot perform the export; it can
+ * only record, via a caller-supplied evidence pointer, that a real one
+ * already happened elsewhere. No guessed retention period is introduced
  * anywhere in this module - there is no field that could hold one. No
- * actual delete/export/anonymization effect is performed against any
- * customer-scoped resource; this module's own genuine contribution is the
- * durable, idempotent EXECUTION RECORD around that truthful disposition -
- * the part that, unlike the disposition itself, is not yet fabricated-free
- * if left unbuilt: without it, a caller retrying a crashed offboarding
+ * delete or anonymization effect is performed against any customer-scoped
+ * resource; this module's own genuine contribution is the durable,
+ * idempotent EXECUTION RECORD around these truthful dispositions - the
+ * part that, unlike the dispositions themselves, is not yet fabricated-
+ * free if left unbuilt: without it, a caller retrying a crashed offboarding
  * execution could not tell whether the first attempt's disposition record
  * (and its evidence) was ever actually produced, or double-produce a
  * second, differently-evidenced one for the same request.
@@ -74,28 +90,43 @@ function requireNonEmptyString(value: unknown, field: string): string {
 }
 
 /**
- * The exact, verified inventory of customer-scoped resource kinds that
- * exist in this repository today - see this module's own doc comment for
- * how this list was derived. Widen it only when a genuinely new
- * customer-scoped resource type is added to `src/domain`, never
- * speculatively.
+ * The verified inventory of customer-scoped resource kinds named in this
+ * module's own doc comment (widened 2026-10-23, see the inventory
+ * correction above). Widen it only when a genuinely new customer-scoped
+ * resource type is added to `src/domain`, never speculatively.
  */
-export type CustomerScopedResourceKind = "PROJECT" | "CUSTOMER_EVIDENCE" | "COMMERCIAL_ORDER";
+export type CustomerScopedResourceKind =
+  | "PROJECT"
+  | "CUSTOMER_EVIDENCE"
+  | "COMMERCIAL_ORDER"
+  | "OUTCOME_JOB"
+  | "OUTCOME_JOB_EXECUTION"
+  | "PLAN_ADMISSION"
+  | "EVIDENCE_REFERENCE"
+  | "AUDIT_EVENT"
+  | "BILLING_REFERENCE";
 
 const ALL_CUSTOMER_SCOPED_RESOURCE_KINDS: ReadonlyArray<CustomerScopedResourceKind> = [
   "PROJECT",
   "CUSTOMER_EVIDENCE",
   "COMMERCIAL_ORDER",
+  "OUTCOME_JOB",
+  "OUTCOME_JOB_EXECUTION",
+  "PLAN_ADMISSION",
+  "EVIDENCE_REFERENCE",
+  "AUDIT_EVENT",
+  "BILLING_REFERENCE",
 ];
 
 /**
- * No real delete/export/anonymization capability exists for any customer-
- * scoped resource kind in this repository yet - this is the only
- * reachable literal, never a fabricated numeric/boolean success. Widen
- * this union only when a real capability is introduced for a specific
- * kind, and only for that kind.
+ * `"BLOCKED_UNSUPPORTED"` is the truthful default for every kind - no real
+ * delete/export/anonymization capability exists for it yet, never a
+ * fabricated numeric/boolean success. `"EXPORTED"` is reachable ONLY for
+ * `"PROJECT"` (see `advanceCustomerOffboardingExecution`'s own structural
+ * enforcement below) - widen this union further only when a real
+ * capability is introduced for a specific kind, and only for that kind.
  */
-export type CustomerResourceDispositionStatus = "BLOCKED_UNSUPPORTED";
+export type CustomerResourceDispositionStatus = "BLOCKED_UNSUPPORTED" | "EXPORTED";
 
 export interface CustomerResourceDisposition {
   readonly kind: CustomerScopedResourceKind;
@@ -140,27 +171,57 @@ export function startCustomerOffboardingExecution(input: {
 /**
  * Advances a `NOT_STARTED` execution to `COMPLETED`, producing one
  * `CustomerResourceDisposition` per entry in `ALL_CUSTOMER_SCOPED_
- * RESOURCE_KINDS`, each truthfully `"BLOCKED_UNSUPPORTED"`. Idempotent and
- * restart-safe: calling this again on an already-`COMPLETED` state is an
- * exact no-op (the original state, including its original `evidenceRef`,
- * is returned unchanged) rather than re-computing a second, possibly
- * differently-evidenced disposition set for the same request.
+ * RESOURCE_KINDS`. Every kind is truthfully `"BLOCKED_UNSUPPORTED"`,
+ * except `"PROJECT"` becomes `"EXPORTED"` when (and only when) the caller
+ * supplies `projectExportEvidenceRef` - a non-empty evidence pointer
+ * proving a real `exportCustomerProjectsSnapshot` (CUS-BACKUP-001) export
+ * already happened elsewhere. This module never imports `project.ts`
+ * itself (preserved boundary-scan discipline), so it cannot perform or
+ * verify the export's content - it only records that the caller already
+ * did, exactly as `evidenceRef` already works for the rest of this module.
+ *
+ * Structural enforcement that `"EXPORTED"` is reachable for `"PROJECT"`
+ * ONLY: the ternary below is the single call site in this file that can
+ * ever produce the `"EXPORTED"` literal, and its condition is `kind ===
+ * "PROJECT"` literally - no other kind's branch in this map can reach it,
+ * regardless of what `projectExportEvidenceRef` is supplied. (Proven by
+ * this checkpoint's own guard-disable sanity check - see the exec-plan.)
+ *
+ * Idempotent and restart-safe: calling this again on an already-
+ * `COMPLETED` state is an exact no-op (the original state, including its
+ * original dispositions and evidence, is returned unchanged) rather than
+ * re-computing a second, possibly differently-evidenced disposition set
+ * for the same request.
  */
 export function advanceCustomerOffboardingExecution(input: {
   state: CustomerOffboardingExecutionState;
   evidenceRef: unknown;
+  projectExportEvidenceRef?: unknown;
 }): CustomerOffboardingExecutionState {
   if (input.state.status === "COMPLETED") {
     return input.state;
   }
   const evidenceRef = requireNonEmptyString(input.evidenceRef, "evidenceRef");
+  const projectExportEvidenceRef =
+    input.projectExportEvidenceRef === undefined
+      ? undefined
+      : requireNonEmptyString(input.projectExportEvidenceRef, "projectExportEvidenceRef");
   const resourceDispositions: ReadonlyArray<CustomerResourceDisposition> = ALL_CUSTOMER_SCOPED_RESOURCE_KINDS.map(
-    (kind) => ({
-      kind,
-      status: "BLOCKED_UNSUPPORTED",
-      reason: `no delete/export/anonymization capability exists for ${kind} resources in this repository yet`,
-      evidenceRef,
-    }),
+    (kind) =>
+      kind === "PROJECT" && projectExportEvidenceRef !== undefined
+        ? {
+            kind,
+            status: "EXPORTED",
+            reason:
+              "a real, caller-supplied PROJECT export snapshot (exportCustomerProjectsSnapshot, CUS-BACKUP-001) was produced for this customer",
+            evidenceRef: projectExportEvidenceRef,
+          }
+        : {
+            kind,
+            status: "BLOCKED_UNSUPPORTED",
+            reason: `no delete/export/anonymization capability exists for ${kind} resources in this repository yet`,
+            evidenceRef,
+          },
   );
   return {
     ...input.state,

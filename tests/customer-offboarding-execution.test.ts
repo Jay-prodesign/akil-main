@@ -107,14 +107,79 @@ test("E4: advancing a NOT_STARTED execution produces a truthful BLOCKED_UNSUPPOR
   const advanced = advanceCustomerOffboardingExecution({ state: started, evidenceRef: "internal://tests/cus-offboard-002/evidence-1" });
 
   assert.equal(advanced.status, "COMPLETED");
-  assert.equal(advanced.resourceDispositions.length, 3);
+  assert.equal(advanced.resourceDispositions.length, 9);
   const kinds = advanced.resourceDispositions.map((d) => d.kind).sort();
-  assert.deepEqual(kinds, ["COMMERCIAL_ORDER", "CUSTOMER_EVIDENCE", "PROJECT"]);
+  assert.deepEqual(kinds, [
+    "AUDIT_EVENT",
+    "BILLING_REFERENCE",
+    "COMMERCIAL_ORDER",
+    "CUSTOMER_EVIDENCE",
+    "EVIDENCE_REFERENCE",
+    "OUTCOME_JOB",
+    "OUTCOME_JOB_EXECUTION",
+    "PLAN_ADMISSION",
+    "PROJECT",
+  ]);
   for (const disposition of advanced.resourceDispositions) {
     assert.equal(disposition.status, "BLOCKED_UNSUPPORTED");
     assert.equal(disposition.evidenceRef, "internal://tests/cus-offboard-002/evidence-1");
     assert.ok(disposition.reason.length > 0);
   }
+});
+
+test("E7 (E2): supplying projectExportEvidenceRef makes PROJECT's disposition EXPORTED, with every other kind unaffected and still BLOCKED_UNSUPPORTED", () => {
+  const completedRequest = completedRequestFor("cust-e7");
+  const started = startCustomerOffboardingExecution({ completedRequest });
+  const advanced = advanceCustomerOffboardingExecution({
+    state: started,
+    evidenceRef: "internal://tests/cus-offboard-002/evidence-e7",
+    projectExportEvidenceRef: "internal://tests/cus-offboard-002/project-export-e7",
+  });
+
+  const byKind = new Map(advanced.resourceDispositions.map((d) => [d.kind, d]));
+  const project = byKind.get("PROJECT");
+  assert.equal(project?.status, "EXPORTED");
+  assert.equal(project?.evidenceRef, "internal://tests/cus-offboard-002/project-export-e7");
+
+  for (const [kind, disposition] of byKind) {
+    if (kind === "PROJECT") continue;
+    assert.equal(disposition.status, "BLOCKED_UNSUPPORTED", `${kind} must remain BLOCKED_UNSUPPORTED`);
+    assert.equal(disposition.evidenceRef, "internal://tests/cus-offboard-002/evidence-e7");
+  }
+});
+
+test("E8 (adversarial, structural): EXPORTED is never reachable for any kind other than PROJECT, even with projectExportEvidenceRef supplied", () => {
+  const completedRequest = completedRequestFor("cust-e8");
+  const started = startCustomerOffboardingExecution({ completedRequest });
+  const advanced = advanceCustomerOffboardingExecution({
+    state: started,
+    evidenceRef: "internal://tests/cus-offboard-002/evidence-e8",
+    projectExportEvidenceRef: "internal://tests/cus-offboard-002/project-export-e8",
+  });
+  const nonProjectExported = advanced.resourceDispositions.filter((d) => d.kind !== "PROJECT" && d.status === "EXPORTED");
+  assert.deepEqual(nonProjectExported, []);
+});
+
+test("E9 (adversarial): omitting projectExportEvidenceRef keeps PROJECT BLOCKED_UNSUPPORTED (backward-compatible default)", () => {
+  const completedRequest = completedRequestFor("cust-e9");
+  const started = startCustomerOffboardingExecution({ completedRequest });
+  const advanced = advanceCustomerOffboardingExecution({ state: started, evidenceRef: "internal://tests/cus-offboard-002/evidence-e9" });
+  const project = advanced.resourceDispositions.find((d) => d.kind === "PROJECT");
+  assert.equal(project?.status, "BLOCKED_UNSUPPORTED");
+});
+
+test("E10 (adversarial): a whitespace-only projectExportEvidenceRef is rejected fail-closed, same discipline as evidenceRef", () => {
+  const completedRequest = completedRequestFor("cust-e10");
+  const started = startCustomerOffboardingExecution({ completedRequest });
+  assert.throws(
+    () =>
+      advanceCustomerOffboardingExecution({
+        state: started,
+        evidenceRef: "internal://tests/cus-offboard-002/evidence-e10",
+        projectExportEvidenceRef: "   ",
+      }),
+    InvalidCustomerOffboardingExecutionError,
+  );
 });
 
 test("E5 (idempotency/restart-safety): advancing an already-COMPLETED execution is an exact no-op - a different evidenceRef on replay never overwrites the original evidence trail", () => {

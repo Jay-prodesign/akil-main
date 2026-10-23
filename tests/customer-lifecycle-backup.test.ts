@@ -16,10 +16,16 @@ import { resolveEffectiveOrganizationAccess } from "../src/domain/effective-orga
 import { requestCustomerOffboarding, completeCustomerOffboarding } from "../src/domain/customer-offboarding.js";
 import {
   exportCustomerLifecycleSnapshot,
+  exportCustomerProjectsSnapshot,
   restoreCustomerLifecycleFromSnapshot,
   InvalidCustomerLifecycleSnapshotError,
   CustomerLifecycleRestoreDeniedError,
 } from "../src/domain/customer-lifecycle-backup.js";
+import { createProject } from "../src/domain/project.js";
+import { FileDurableProjectStore } from "../src/domain/durable-project-store.js";
+import { FileDurableCustomerOffboardingRequestStore } from "../src/domain/durable-customer-offboarding-request-store.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 /**
  * CUS-BACKUP-001: proves the export -> restore lifecycle for a Customer
@@ -310,15 +316,226 @@ test("R7 (adversarial): a relatedOffboardingRequest for a DIFFERENT (tenantId, c
   );
 });
 
-test("boundary scan (structural): customer-lifecycle-backup.ts imports only tenant-scope.js, customer.js, effective-organization-access.js, and customer-offboarding.js (type-only) - no organization.ts/authority.ts coupling, no widening of Customer itself", () => {
+test("boundary scan (structural): customer-lifecycle-backup.ts imports only tenant-scope.js, customer.js, effective-organization-access.js, customer-offboarding.js, project.js, durable-project-store.js, and durable-customer-offboarding-request-store.js (all type-only except customer.js) - no organization.ts/authority.ts coupling, no widening of Customer itself", () => {
   const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
   const content = readFileSync(join(REPO_ROOT, "src/domain/customer-lifecycle-backup.ts"), "utf8");
   const importedModules = [...content.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]);
-  const allowed = new Set(["./tenant-scope.js", "./customer.js", "./effective-organization-access.js", "./customer-offboarding.js"]);
+  const allowed = new Set([
+    "./tenant-scope.js",
+    "./customer.js",
+    "./effective-organization-access.js",
+    "./customer-offboarding.js",
+    "./project.js",
+    "./durable-project-store.js",
+    "./durable-customer-offboarding-request-store.js",
+  ]);
   for (const specifier of importedModules) {
     assert.ok(allowed.has(specifier ?? ""), `unexpected import specifier: ${specifier}`);
   }
   assert.doesNotMatch(content, /from ["']\.\/organization\.js["']/);
   assert.doesNotMatch(content, /from ["']\.\/authority\.js["']/);
   assert.doesNotMatch(content, /from ["']\.\/organization-membership\.js["']/);
+});
+
+function tmpProjectDir(): string {
+  return mkdtempSync(join(tmpdir(), "cus-backup-001-project-export-"));
+}
+
+function tmpOffboardingRequestDir(): string {
+  return mkdtempSync(join(tmpdir(), "cus-backup-001-offboarding-restore-"));
+}
+
+test("P1 (E2): exportCustomerProjectsSnapshot is a read-only projection over DurableProjectStore.listByCustomer, scoped to exactly this customer's projects", () => {
+  const dir = tmpProjectDir();
+  try {
+    const store = new FileDurableProjectStore(dir);
+    const customer = createCustomer({ tenantScope: TENANT, customerId: "cust-p1", displayName: "Export Customer One" });
+    const otherCustomer = createCustomer({ tenantScope: TENANT, customerId: "cust-p1-other", displayName: "Export Customer Other" });
+    store.create({ tenantId: TENANT.tenantId, customerId: customer.customerId, projectId: "proj-a" as never, ownerRef: "owner-1", state: "ACTIVE" });
+    store.create({ tenantId: TENANT.tenantId, customerId: customer.customerId, projectId: "proj-b" as never, ownerRef: "owner-1", state: "ACTIVE" });
+    store.create({ tenantId: TENANT.tenantId, customerId: otherCustomer.customerId, projectId: "proj-c" as never, ownerRef: "owner-2", state: "ACTIVE" });
+
+    const access = grantedAccess(TENANT, "org-p1", "staff-p1");
+    const snapshot = exportCustomerProjectsSnapshot({
+      tenantId: TENANT.tenantId,
+      customerId: customer.customerId,
+      currentAccess: access,
+      projectStore: store,
+      exportedAt: "2026-10-23T00:00:00.000Z",
+    });
+    assert.equal(snapshot.customerId, "cust-p1");
+    assert.equal(snapshot.projects.length, 2);
+    assert.deepEqual(snapshot.projects.map((p) => p.projectId).sort(), ["proj-a", "proj-b"]);
+    assert.equal(snapshot.exportedByPrincipalRef, "staff-p1");
+
+    // Non-destructive: both projects still present afterward, unmodified.
+    assert.equal(store.listByCustomer(TENANT.tenantId, customer.customerId).length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P2 (adversarial): exportCustomerProjectsSnapshot is denied when currentAccess is not GRANTED", () => {
+  const dir = tmpProjectDir();
+  try {
+    const store = new FileDurableProjectStore(dir);
+    const customer = createCustomer({ tenantScope: TENANT, customerId: "cust-p2", displayName: "Export Customer Two" });
+    const readOnly = readOnlyAccess(TENANT, "org-p2", "staff-p2");
+    assert.throws(
+      () =>
+        exportCustomerProjectsSnapshot({
+          tenantId: TENANT.tenantId,
+          customerId: customer.customerId,
+          currentAccess: { ...readOnly, decision: "DENIED" as never },
+          projectStore: store,
+          exportedAt: "2026-10-23T00:00:00.000Z",
+        }),
+      InvalidCustomerLifecycleSnapshotError,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P3 (adversarial): exportCustomerProjectsSnapshot is denied when currentAccess belongs to a different tenant", () => {
+  const dir = tmpProjectDir();
+  try {
+    const store = new FileDurableProjectStore(dir);
+    const customer = createCustomer({ tenantScope: TENANT, customerId: "cust-p3", displayName: "Export Customer Three" });
+    const foreignAccess = grantedAccess(OTHER_TENANT, "org-p3-foreign", "staff-p3-foreign");
+    assert.throws(
+      () =>
+        exportCustomerProjectsSnapshot({
+          tenantId: TENANT.tenantId,
+          customerId: customer.customerId,
+          currentAccess: foreignAccess,
+          projectStore: store,
+          exportedAt: "2026-10-23T00:00:00.000Z",
+        }),
+      InvalidCustomerLifecycleSnapshotError,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P4 (adversarial): exportCustomerProjectsSnapshot is denied when currentAccess is GRANTED but has no bound membershipId", () => {
+  const dir = tmpProjectDir();
+  try {
+    const store = new FileDurableProjectStore(dir);
+    const customer = createCustomer({ tenantScope: TENANT, customerId: "cust-p4", displayName: "Export Customer Four" });
+    const grantedNoMembership = {
+      decision: "GRANTED" as const,
+      tenantId: TENANT.tenantId,
+      organizationId: "org-p4" as Organization["organizationId"],
+      permissions: new Set<never>(),
+      canPerformProtectedActions: true,
+      reasons: [],
+    };
+    assert.throws(
+      () =>
+        exportCustomerProjectsSnapshot({
+          tenantId: TENANT.tenantId,
+          customerId: customer.customerId,
+          currentAccess: grantedNoMembership,
+          projectStore: store,
+          exportedAt: "2026-10-23T00:00:00.000Z",
+        }),
+      InvalidCustomerLifecycleSnapshotError,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("S1 (E4): restore is denied when offboardingRequestStore records a COMPLETED request for this customer, EVEN IF the caller omits relatedOffboardingRequest entirely", () => {
+  const dir = tmpOffboardingRequestDir();
+  try {
+    const requestStore = new FileDurableCustomerOffboardingRequestStore(dir);
+    const customer = createCustomer({ tenantScope: TENANT, customerId: "cust-s1", displayName: "Restore Customer S1" });
+    const exportAccess = grantedAccess(TENANT, "org-s1", "staff-s1-export");
+    const snapshot = exportCustomerLifecycleSnapshot({ customer, currentAccess: exportAccess, exportedAt: "2026-10-23T00:00:00.000Z" });
+
+    const request = requestCustomerOffboarding({
+      requestId: "offboard-s1",
+      customer,
+      requestedByRef: "prospect:s1",
+      requestedAt: "2026-10-23T00:05:00.000Z",
+    });
+    const created = requestStore.createRequested(request);
+    const decideAccess = grantedAccess(TENANT, "org-s1", "staff-s1-decide");
+    const { completedRequest } = completeCustomerOffboarding({ request, customer, currentAccess: decideAccess, completedAt: "2026-10-23T00:10:00.000Z" });
+    requestStore.transitionToTerminal({ tenantId: TENANT.tenantId, requestId: "offboard-s1" as never, expectedVersion: created.version, next: completedRequest });
+
+    const restoreAccess = grantedAccess(TENANT, "org-s1", "staff-s1-restore");
+    // Caller supplies NO relatedOffboardingRequest - only the store, which must catch it anyway.
+    assert.throws(
+      () =>
+        restoreCustomerLifecycleFromSnapshot({
+          snapshot,
+          targetTenantScope: TENANT,
+          targetCustomerId: "cust-s1",
+          currentAccess: restoreAccess,
+          offboardingRequestStore: requestStore,
+        }),
+      CustomerLifecycleRestoreDeniedError,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("S2: restore succeeds when offboardingRequestStore is supplied but has no COMPLETED request for this customer", () => {
+  const dir = tmpOffboardingRequestDir();
+  try {
+    const requestStore = new FileDurableCustomerOffboardingRequestStore(dir);
+    const customer = createCustomer({ tenantScope: TENANT, customerId: "cust-s2", displayName: "Restore Customer S2" });
+    const exportAccess = grantedAccess(TENANT, "org-s2", "staff-s2-export");
+    const snapshot = exportCustomerLifecycleSnapshot({ customer, currentAccess: exportAccess, exportedAt: "2026-10-23T00:00:00.000Z" });
+
+    const restoreAccess = grantedAccess(TENANT, "org-s2", "staff-s2-restore");
+    const result = restoreCustomerLifecycleFromSnapshot({
+      snapshot,
+      targetTenantScope: TENANT,
+      targetCustomerId: "cust-s2",
+      currentAccess: restoreAccess,
+      offboardingRequestStore: requestStore,
+    });
+    assert.equal(result.customer.customerId, "cust-s2");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("S3 (backward-compatible): omitting offboardingRequestStore entirely preserves the original caller-supplied-only behavior exactly (restore succeeds with no relatedOffboardingRequest, even if a COMPLETED request exists in a store the caller didn't pass)", () => {
+  const dir = tmpOffboardingRequestDir();
+  try {
+    const requestStore = new FileDurableCustomerOffboardingRequestStore(dir);
+    const customer = createCustomer({ tenantScope: TENANT, customerId: "cust-s3", displayName: "Restore Customer S3" });
+    const exportAccess = grantedAccess(TENANT, "org-s3", "staff-s3-export");
+    const snapshot = exportCustomerLifecycleSnapshot({ customer, currentAccess: exportAccess, exportedAt: "2026-10-23T00:00:00.000Z" });
+
+    const request = requestCustomerOffboarding({
+      requestId: "offboard-s3",
+      customer,
+      requestedByRef: "prospect:s3",
+      requestedAt: "2026-10-23T00:05:00.000Z",
+    });
+    const created = requestStore.createRequested(request);
+    const decideAccess = grantedAccess(TENANT, "org-s3", "staff-s3-decide");
+    const { completedRequest } = completeCustomerOffboarding({ request, customer, currentAccess: decideAccess, completedAt: "2026-10-23T00:10:00.000Z" });
+    requestStore.transitionToTerminal({ tenantId: TENANT.tenantId, requestId: "offboard-s3" as never, expectedVersion: created.version, next: completedRequest });
+
+    const restoreAccess = grantedAccess(TENANT, "org-s3", "staff-s3-restore");
+    const result = restoreCustomerLifecycleFromSnapshot({
+      snapshot,
+      targetTenantScope: TENANT,
+      targetCustomerId: "cust-s3",
+      currentAccess: restoreAccess,
+      // offboardingRequestStore deliberately omitted
+    });
+    assert.equal(result.customer.customerId, "cust-s3");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
