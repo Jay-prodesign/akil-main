@@ -1,8 +1,10 @@
 import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, AdminResourceBindingViewState, OperationalObservabilityViewState, PendingOffboardingRequestsViewState, ConnectionsViewState, KnowledgeViewState, KnowledgeEvidenceEntry, AttentionViewState, AttentionCredentialAccessItem, AttentionCustomerApprovalItem, PeopleDirectoryEntry, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary } from "./internal-os-view-state.js";
 import type { ConnectionState } from "../domain/connection-authority.js";
 import type { IntegrationConnectionSummary } from "../domain/integration-admin-view.js";
+import type { ProtectedDecisionOutcome } from "../domain/protected-decision-record.js";
 import { renderOffboardingDecisionControls } from "./internal-os-offboarding-decision-controls.js";
 import { renderConnectorConnectionStateControls } from "./internal-os-connection-state-controls.js";
+import { renderAttentionDecisionControls } from "./internal-os-attention-decision-controls.js";
 
 export interface RenderedInternalOsPage {
   readonly status: number;
@@ -720,8 +722,39 @@ function renderCredentialAccessRow(item: AttentionCredentialAccessItem): string 
   return `<tr><td>${escapeHtml(item.connectionBindingId)}</td><td>${escapeHtml(item.connectorKind)}</td><td><span class="status status-${CONNECTION_STATE_TONE[item.connectionState]}" role="status">${escapeHtml(item.connectionState)}</span></td><td>${ownership}</td></tr>`;
 }
 
-function renderCustomerApprovalRow(item: AttentionCustomerApprovalItem): string {
-  return `<tr><td>${escapeHtml(item.waitRequestId)}</td><td>${escapeHtml(item.customerId)} / ${escapeHtml(item.projectId)}</td><td>${escapeHtml(item.jobId)}</td><td>${escapeHtml(item.decisionRef)}</td><td>${escapeHtml(item.effectRef)}</td><td>${escapeHtml(item.raisedAt)}</td></tr>`;
+/**
+ * C4 slice 3: status tone for a recorded decision outcome. `APPROVED` is
+ * `success`, `DENIED` is `danger`, `REVOKED` is `neutral` (it is a
+ * deliberate withdrawal of a prior approval, not itself a failure state).
+ */
+const DECISION_OUTCOME_TONE: Record<ProtectedDecisionOutcome, "neutral" | "warning" | "danger" | "success"> = {
+  APPROVED: "success",
+  DENIED: "danger",
+  REVOKED: "neutral",
+};
+
+/**
+ * C4 slice 3: `canDecide` mirrors `renderConnectionRow`'s own
+ * `canMutateState` parameter exactly - `true` only when the handler has the
+ * attention decision route wired AND the viewer's own current access
+ * permits it (`canDecideProtectedDecision`). `item.decisionStatus` is
+ * `undefined` when no `AttentionSource.getProtectedDecisionRecord` is
+ * wired, or when it is wired but genuinely has no record yet - both read
+ * as "Pending decision", since neither tells staff anything false (every
+ * row in this family is, by construction, a wait with no resume yet).
+ */
+function renderCustomerApprovalRow(item: AttentionCustomerApprovalItem, canDecide: boolean): string {
+  const statusCell =
+    item.decisionStatus === undefined
+      ? `<span class="status status-neutral" role="status">Pending decision</span>`
+      : `<span class="status status-${DECISION_OUTCOME_TONE[item.decisionStatus.outcome]}" role="status">${escapeHtml(item.decisionStatus.outcome)}</span>`;
+  const control = renderAttentionDecisionControls({
+    decisionRef: item.decisionRef,
+    canDecide,
+    ...(item.decisionStatus !== undefined ? { outcome: item.decisionStatus.outcome } : {}),
+  });
+  const controlsCell = control.length > 0 ? `<td>${control}</td>` : "<td></td>";
+  return `<tr><td>${escapeHtml(item.waitRequestId)}</td><td>${escapeHtml(item.customerId)} / ${escapeHtml(item.projectId)}</td><td>${escapeHtml(item.jobId)}</td><td>${escapeHtml(item.decisionRef)}</td><td>${escapeHtml(item.effectRef)}</td><td>${escapeHtml(item.raisedAt)}</td><td>${statusCell}</td>${controlsCell}</tr>`;
 }
 
 /**
@@ -758,14 +791,15 @@ function renderAttentionBody(view: Exclude<AttentionViewState, { kind: "NOT_ACTI
       ${view.credentialAccessProblems.map(renderCredentialAccessRow).join("\n      ")}
       </tbody>
     </table>`;
+  const canDecide = view.canDecide === true;
   const approvalSection =
     view.customerApprovalsRequired.length === 0
       ? `<p>No protected decision is waiting for approval.</p>`
       : `<p>Longest waiting first.</p>
     <table>
-      <thead><tr><th>Wait request</th><th>Customer / project</th><th>Job</th><th>Decision</th><th>Effect</th><th>Waiting since</th></tr></thead>
+      <thead><tr><th>Wait request</th><th>Customer / project</th><th>Job</th><th>Decision</th><th>Effect</th><th>Waiting since</th><th>Status</th><th>Actions</th></tr></thead>
       <tbody>
-      ${view.customerApprovalsRequired.map(renderCustomerApprovalRow).join("\n      ")}
+      ${view.customerApprovalsRequired.map((item) => renderCustomerApprovalRow(item, canDecide)).join("\n      ")}
       </tbody>
     </table>`;
   return `

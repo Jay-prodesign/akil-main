@@ -4,6 +4,8 @@ import type {
   DurableProtectedDecisionWaitListing,
   StoredProtectedDecisionWait,
 } from "../domain/durable-protected-decision-wait-store.js";
+import type { DurableProtectedDecisionRecordStore } from "../domain/durable-protected-decision-record-store.js";
+import type { ProtectedDecisionRecord } from "../domain/protected-decision-record.js";
 import type { AttentionSource } from "./internal-os-view-state.js";
 
 /**
@@ -31,10 +33,23 @@ import type { AttentionSource } from "./internal-os-view-state.js";
  * REVOKED, outstanding waits) and field selection happen in
  * `resolveAttentionView`, so they do not depend on any one source
  * implementation.
+ *
+ * C4 slice 3: `recordStore`, when given, backs the optional
+ * `getProtectedDecisionRecord` method - the SAME
+ * `DurableProtectedDecisionRecordStore` instance the attention decision
+ * POST route (`internal-os-attention-decision-route.ts`) writes through,
+ * so a decision just recorded through that route is immediately visible
+ * here on the next read (no cache on either side). Omitting `recordStore`
+ * keeps this source's pre-slice-3 shape exactly - every "customer approval
+ * required" row then renders with no decision status and no form, per
+ * `AttentionSource.getProtectedDecisionRecord`'s own optional-method
+ * contract. Like the other two reads, a lookup failure (for example
+ * `CorruptedProtectedDecisionRecordLineError`) propagates uncaught.
  */
 export function createDurableAttentionSource(
   connectionStore: DurableConnectorConnectionStore,
   waitStore: DurableProtectedDecisionWaitListing,
+  recordStore?: DurableProtectedDecisionRecordStore,
 ): AttentionSource {
   return {
     listConnections(organization: Organization): ReadonlyArray<StoredConnectorConnection> {
@@ -43,5 +58,12 @@ export function createDurableAttentionSource(
     listProtectedDecisionWaits(organization: Organization): ReadonlyArray<StoredProtectedDecisionWait> {
       return waitStore.listByTenant(organization.tenantId);
     },
+    ...(recordStore !== undefined
+      ? {
+          getProtectedDecisionRecord(organization: Organization, decisionRef: string): ProtectedDecisionRecord | undefined {
+            return recordStore.getDecisionRecord(organization.tenantId, decisionRef);
+          },
+        }
+      : {}),
   };
 }

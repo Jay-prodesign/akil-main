@@ -93,6 +93,14 @@ import type { StaffAccessGrant } from "../web/internal-os-access.js";
  *   `/os/connections`/`/os/admin`/`/os/attention` already read, via
  *   Rev188 F2's `connector-connection-admin-access.ts`. See
  *   `internal-os-connector-connection-decision-route.ts`.
+ * - **Protected-decision record create/revise (C4 slice 3, third `/os`
+ *   mutation).** `POST /os/attention/decisions/<decisionRef>` writes
+ *   through a newly composed `FileDurableProtectedDecisionRecordStore`
+ *   (its own `/health` probe), via Rev188 F3-item4's
+ *   `protected-decision-record-admin-access.ts`. `/os/attention`'s own
+ *   `getProtectedDecisionRecord` reads the SAME store instance, so a
+ *   decision just recorded is immediately reflected in that page's status
+ *   column. See `internal-os-attention-decision-route.ts`.
  * - **Routing.** One Node server dispatches `GET /health`, then `/os/*`
  *   (the staff surface), then everything else (the customer `/portal`
  *   surface) - see `createHttpServer`. Only an `/os` POST reads a request
@@ -234,12 +242,17 @@ export function createNodeRuntime(config: AppConfig, options: NodeRuntimeOptions
     connectionsSource: createDurableConnectionsSource(stores.connectorConnectionStore),
     peopleDirectorySource: createDurablePeopleDirectorySource(stores.organizationMembershipStore),
     knowledgeSource: createDurableKnowledgeSource(stores.evidenceReferenceStore),
-    attentionSource: createDurableAttentionSource(stores.connectorConnectionStore, stores.protectedDecisionWaitStore),
+    attentionSource: createDurableAttentionSource(
+      stores.connectorConnectionStore,
+      stores.protectedDecisionWaitStore,
+      stores.protectedDecisionRecordStore,
+    ),
     customerOffboardingDecision: {
       requestStore: stores.customerOffboardingRequestStore,
       customerRepository: stores.customerRepository,
     },
     connectorConnectionStateDecision: { store: stores.connectorConnectionStore },
+    attentionDecision: { store: stores.protectedDecisionRecordStore },
   });
 
   const server = createHttpServer({

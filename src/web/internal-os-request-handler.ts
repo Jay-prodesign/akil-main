@@ -20,6 +20,7 @@ import {
   canMutateConnectorConnectionState,
   resolveKnowledgeView,
   resolveAttentionView,
+  canDecideProtectedDecision,
   type DestinationKey,
   type AttentionSource,
   type ConnectionsSource,
@@ -57,6 +58,11 @@ import {
   parseConnectorConnectionStatePath,
   type ConnectorConnectionStateDecisionDeps,
 } from "./internal-os-connector-connection-decision-route.js";
+import {
+  handleAttentionDecisionPost,
+  parseAttentionDecisionPath,
+  type AttentionDecisionDeps,
+} from "./internal-os-attention-decision-route.js";
 
 /**
  * Rev168: distinct from the Client Portal's `x-akilta-session-token`
@@ -171,6 +177,19 @@ export interface InternalOsRequestHandlerDeps {
    * already reads.
    */
   readonly connectorConnectionStateDecision?: ConnectorConnectionStateDecisionDeps;
+  /**
+   * C4 slice 3 (gap scan 2026-10-23, third `/os` mutation): the durable
+   * store the protected-decision-record create/revise POST route writes
+   * through (`internal-os-attention-decision-route.ts`). Absent: that
+   * route answers exactly like every other POST did before this slice
+   * (501 UNSUPPORTED), and `/os/attention` renders its "customer approval
+   * required" rows with no decision status and no control - mirrors
+   * `connectorConnectionStateDecision`'s own optional-dependency pattern
+   * exactly. The deployable runtime wires a `FileDurableProtectedDecisionRecordStore`,
+   * the same instance `attentionSource`'s own `getProtectedDecisionRecord`
+   * reads.
+   */
+  readonly attentionDecision?: AttentionDecisionDeps;
 }
 
 function toResponse(rendered: RenderedInternalOsPage): OutgoingResponseLike {
@@ -287,6 +306,24 @@ export function createInternalOsRequestHandler(deps: InternalOsRequestHandlerDep
           decision: deps.connectorConnectionStateDecision,
         });
       }
+      /**
+       * C4 slice 3: the third `/os` mutation route, dispatched the same
+       * way as the two routes just above - a path match with no wired
+       * dependency still falls through to the generic 501 below,
+       * unchanged from before this slice.
+       */
+      const decisionRef = parseAttentionDecisionPath(request.path);
+      if (decisionRef !== undefined && deps.attentionDecision !== undefined) {
+        return handleAttentionDecisionPost({
+          request,
+          decisionRef,
+          sessionToken: request.headers[STAFF_SESSION_TOKEN_HEADER],
+          provider: deps.provider,
+          organization: deps.organization,
+          grants: deps.grants,
+          decision: deps.attentionDecision,
+        });
+      }
     }
 
     if (request.method !== "GET") {
@@ -392,7 +429,12 @@ export function createInternalOsRequestHandler(deps: InternalOsRequestHandlerDep
         content = attentionPageContent(
           nav,
           organizationName,
-          resolveAttentionView({ organization: deps.organization, context, source: deps.attentionSource }),
+          resolveAttentionView({
+            organization: deps.organization,
+            context,
+            source: deps.attentionSource,
+            canDecide: deps.attentionDecision !== undefined && canDecideProtectedDecision(context),
+          }),
         );
         break;
       case "ai-capabilities":

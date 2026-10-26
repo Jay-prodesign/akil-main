@@ -26,6 +26,7 @@ import type {
   ProtectedDecisionResumeAuthorization,
 } from "../src/domain/protected-decision-wait-gate.js";
 import type { TenantScope } from "../src/domain/tenant-scope.js";
+import type { ProtectedDecisionRecord } from "../src/domain/protected-decision-record.js";
 import { createDurableAttentionSource } from "../src/web/attention-durable-source.js";
 import {
   NAV_DESTINATIONS,
@@ -317,6 +318,91 @@ test("C3A-V4: a throwing PROTECTED-DECISION-WAIT source becomes ERROR and the ex
     },
   };
   assert.deepEqual(resolve(throwsString), { kind: "ERROR" });
+});
+
+/** `waitRequest`'s own default `decisionRef`, used by every C4S3 test below. */
+const DEFAULT_DECISION_REF = "decision:c3a-publish";
+
+function decisionRecord(overrides: Partial<ProtectedDecisionRecord> = {}): ProtectedDecisionRecord {
+  return {
+    decisionRef: DEFAULT_DECISION_REF,
+    tenantId: OWN_TENANT as TenantScope["tenantId"],
+    outcome: "APPROVED",
+    decidedByPrincipalRef: "membership-c3a-decider",
+    decidedAt: "2026-10-23T01:00:00.000Z",
+    evidenceRef: "evidence:c3a-decision-record",
+    ...overrides,
+  };
+}
+
+/** Like `source()`, but also implements the slice-3 `getProtectedDecisionRecord` optional method. */
+function sourceWithRecords(
+  connections: ReadonlyArray<StoredConnectorConnection>,
+  waits: ReadonlyArray<StoredProtectedDecisionWait>,
+  getProtectedDecisionRecord: Required<AttentionSource>["getProtectedDecisionRecord"],
+): AttentionSource {
+  return {
+    listConnections: () => connections,
+    listProtectedDecisionWaits: () => waits,
+    getProtectedDecisionRecord,
+  };
+}
+
+test("C4S3-V1: a getProtectedDecisionRecord result whose own tenantId does not match the Organization's becomes ERROR, not a silently-dropped or substituted row", () => {
+  let calls = 0;
+  const foreignTenantRecord: AttentionSource = sourceWithRecords(
+    [],
+    [{ request: waitRequest(OWN_TENANT, "wait-c4s3-v1") }],
+    () => {
+      calls += 1;
+      return decisionRecord({ tenantId: "foreign-tenant" as TenantScope["tenantId"] });
+    },
+  );
+  let view: AttentionViewState | undefined;
+  assert.doesNotThrow(() => {
+    view = resolve(foreignTenantRecord);
+  });
+  assert.deepEqual(view, { kind: "ERROR" });
+  assert.equal(calls, 1, "the record source was really invoked");
+});
+
+test("C4S3-V2: a getProtectedDecisionRecord result whose own decisionRef does not match the row it was looked up for becomes ERROR, not substituted onto that row", () => {
+  const mismatchedDecisionRef: AttentionSource = sourceWithRecords(
+    [],
+    [{ request: waitRequest(OWN_TENANT, "wait-c4s3-v2") }],
+    () => decisionRecord({ decisionRef: "decision:someone-elses-approval" }),
+  );
+  let view: AttentionViewState | undefined;
+  assert.doesNotThrow(() => {
+    view = resolve(mismatchedDecisionRef);
+  });
+  assert.deepEqual(view, { kind: "ERROR" });
+});
+
+test("C4S3-V3: a throwing getProtectedDecisionRecord becomes ERROR and the exception does NOT escape resolveAttentionView, even when both other sources read fine", () => {
+  const throwingRecordSource: AttentionSource = sourceWithRecords(
+    [],
+    [{ request: waitRequest(OWN_TENANT, "wait-c4s3-v3") }],
+    () => {
+      throw new Error("decision record store disk on fire");
+    },
+  );
+  let view: AttentionViewState | undefined;
+  assert.doesNotThrow(() => {
+    view = resolve(throwingRecordSource);
+  });
+  assert.deepEqual(view, { kind: "ERROR" });
+});
+
+test("C4S3-V4: a matching, correctly-scoped getProtectedDecisionRecord result is carried onto the row as decisionStatus, proving the ERROR cases above are a real tenant/ref check and not a path that always fails", () => {
+  const matching: AttentionSource = sourceWithRecords([], [{ request: waitRequest(OWN_TENANT, "wait-c4s3-v4") }], () =>
+    decisionRecord({ outcome: "DENIED" }),
+  );
+  const view = resolve(matching);
+  assert.equal(view.kind, "READY");
+  if (view.kind !== "READY") return;
+  assert.equal(view.customerApprovalsRequired.length, 1);
+  assert.deepEqual(view.customerApprovalsRequired[0]!.decisionStatus, { outcome: "DENIED" });
 });
 
 test("C3A-V5: READY carries exactly the allow-listed fields - no secretRef, no wait reason/fingerprint/run/attempt, no tenantId", () => {

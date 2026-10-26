@@ -59,6 +59,7 @@ export function createInternalOsHttpServer(
     ...(deps.connectorConnectionStateDecision !== undefined
       ? { connectorConnectionStateDecision: deps.connectorConnectionStateDecision }
       : {}),
+    ...(deps.attentionDecision !== undefined ? { attentionDecision: deps.attentionDecision } : {}),
   });
 
   return createServer((req, res) => {
