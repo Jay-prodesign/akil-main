@@ -56,6 +56,9 @@ export function createInternalOsHttpServer(
     ...(deps.customerOffboardingDecision !== undefined
       ? { customerOffboardingDecision: deps.customerOffboardingDecision }
       : {}),
+    ...(deps.connectorConnectionStateDecision !== undefined
+      ? { connectorConnectionStateDecision: deps.connectorConnectionStateDecision }
+      : {}),
   });
 
   return createServer((req, res) => {
