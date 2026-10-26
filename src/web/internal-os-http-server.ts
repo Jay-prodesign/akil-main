@@ -6,7 +6,7 @@ import {
   type InternalOsRequestHandlerDeps,
 } from "./internal-os-request-handler.js";
 import type { IncomingRequestLike } from "./request-handler.js";
-import { toIncomingRequestLikeFromNode } from "./http-server.js";
+import { toIncomingRequestLikeFromNode, serveWithBoundedRequestBody } from "./http-server.js";
 
 /**
  * Rev168 (mirrors `http-server.ts`'s own ADR 0001 discipline exactly, for
@@ -53,6 +53,9 @@ export function createInternalOsHttpServer(
     ...(deps.peopleDirectorySource !== undefined ? { peopleDirectorySource: deps.peopleDirectorySource } : {}),
     ...(deps.knowledgeSource !== undefined ? { knowledgeSource: deps.knowledgeSource } : {}),
     ...(deps.attentionSource !== undefined ? { attentionSource: deps.attentionSource } : {}),
+    ...(deps.customerOffboardingDecision !== undefined
+      ? { customerOffboardingDecision: deps.customerOffboardingDecision }
+      : {}),
   });
 
   return createServer((req, res) => {
@@ -67,6 +70,15 @@ export function createInternalOsHttpServer(
      * (`toIncomingRequestLikeFromNode`) instead of keeping a copy.
      */
     const request: IncomingRequestLike = toIncomingRequestLikeFromNode(req);
+
+    // C4: a POST is the only request that reads a body. It is buffered
+    // with the same hard cap as the deployable runtime's server
+    // (`serveWithBoundedRequestBody`). Every other method is dispatched
+    // synchronously, exactly as before.
+    if (request.method === "POST") {
+      serveWithBoundedRequestBody(req, res, request, handleRequest);
+      return;
+    }
 
     const response = handleRequest(request);
     res.writeHead(response.status, response.headers);

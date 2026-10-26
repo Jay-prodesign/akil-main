@@ -15,7 +15,9 @@ import type { CustomerOffboardingAdminSource } from "./internal-os-view-state.js
  * re-verifies every returned request's own `tenantId` and `status` before
  * ever rendering it (the Rev28 bounded-correction discipline this whole
  * corridor applies at the view-state boundary, not the source boundary).
- * This module adds no new mutation surface: it only ever reads.
+ * This module adds no new mutation surface: it only ever reads. (C4's
+ * decision routes write through the store directly, via
+ * `customer-offboarding-decision-access.ts`, never through this adapter.)
  *
  * C1 update: the deployable runtime's composition root
  * (`node-server-entrypoint.ts`) now wires this adapter into the live
@@ -27,6 +29,15 @@ export function createDurableCustomerOffboardingAdminSource(
   return {
     listPendingRequests(organization: Organization): ReadonlyArray<CustomerOffboardingRequest> {
       return store.listPending(organization.tenantId).map((stored) => stored.request);
+    },
+    /**
+     * C4: the same read, keeping each record's durable version so the
+     * `/os/admin` decision forms can carry it as their `expectedVersion`.
+     */
+    listPendingRequestsWithVersion(
+      organization: Organization,
+    ): ReadonlyArray<{ readonly request: CustomerOffboardingRequest; readonly version: number }> {
+      return store.listPending(organization.tenantId).map((stored) => ({ request: stored.request, version: stored.version }));
     },
   };
 }

@@ -46,6 +46,11 @@ import {
   type RenderedInternalOsPage,
 } from "./internal-os-render.js";
 import type { IncomingRequestLike, OutgoingResponseLike } from "./request-handler.js";
+import {
+  handleCustomerOffboardingDecisionPost,
+  parseOffboardingDecisionPath,
+  type CustomerOffboardingDecisionDeps,
+} from "./internal-os-offboarding-decision-route.js";
 
 /**
  * Rev168: distinct from the Client Portal's `x-akilta-session-token`
@@ -138,6 +143,16 @@ export interface InternalOsRequestHandlerDeps {
    * `createDurableAttentionSource` here.
    */
   readonly attentionSource?: AttentionSource;
+  /**
+   * C4 (gap scan 2026-10-23, first mutation slice): the durable stores the
+   * customer-offboarding deny/complete POST routes write through
+   * (`internal-os-offboarding-decision-route.ts`). Absent: those routes
+   * answer exactly like every other POST did before C4 (501 UNSUPPORTED),
+   * and `/os/admin` renders its pending list read-only, with no form. The
+   * deployable runtime wires the same `FileDurableCustomerOffboardingRequestStore`
+   * the admin list reads, plus a `FileDurableCustomerRepository`.
+   */
+  readonly customerOffboardingDecision?: CustomerOffboardingDecisionDeps;
 }
 
 function toResponse(rendered: RenderedInternalOsPage): OutgoingResponseLike {
@@ -217,6 +232,27 @@ export type InternalOsRequestHandler = (request: IncomingRequestLike) => Outgoin
  */
 export function createInternalOsRequestHandler(deps: InternalOsRequestHandlerDeps): InternalOsRequestHandler {
   return (request: IncomingRequestLike): OutgoingResponseLike => {
+    /**
+     * C4: the only POST routes are the two offboarding decisions, and only
+     * when their stores are wired. Every other POST, and every other
+     * non-GET method, gets the same 501 UNSUPPORTED page as before C4. The
+     * GET flow below is unchanged.
+     */
+    if (request.method === "POST") {
+      const decisionKind = parseOffboardingDecisionPath(request.path);
+      if (decisionKind !== undefined && deps.customerOffboardingDecision !== undefined) {
+        return handleCustomerOffboardingDecisionPost({
+          request,
+          decisionKind,
+          sessionToken: request.headers[STAFF_SESSION_TOKEN_HEADER],
+          provider: deps.provider,
+          organization: deps.organization,
+          grants: deps.grants,
+          decision: deps.customerOffboardingDecision,
+        });
+      }
+    }
+
     if (request.method !== "GET") {
       return toResponse(renderInternalOsPage({ kind: "UNSUPPORTED", reason: `method ${request.method} is not supported` }));
     }
@@ -369,6 +405,7 @@ export function createInternalOsRequestHandler(deps: InternalOsRequestHandlerDep
             ...(deps.customerOffboardingAdminSource !== undefined
               ? { customerOffboardingAdminSource: deps.customerOffboardingAdminSource }
               : {}),
+            ...(deps.customerOffboardingDecision !== undefined ? { offboardingDecisionEnabled: true } : {}),
           }),
         );
         break;

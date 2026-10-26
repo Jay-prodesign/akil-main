@@ -81,9 +81,16 @@ import type { StaffAccessGrant } from "../web/internal-os-access.js";
  *   WRITE on top of the destination's existing EXECUTE/protected-actions
  *   gate. A read failure in either store renders the OS ERROR page, not
  *   an empty list.
+ * - **Offboarding decisions (C4, first `/os` mutation).**
+ *   `POST /os/admin/offboarding/deny` and `.../complete` write through the
+ *   same `FileDurableCustomerOffboardingRequestStore` the `/os/admin`
+ *   pending list reads, via REV216's `customer-offboarding-decision-access.ts`.
+ *   Complete also reads the newly composed `FileDurableCustomerRepository`.
+ *   See `internal-os-offboarding-decision-route.ts`.
  * - **Routing.** One Node server dispatches `GET /health`, then `/os/*`
  *   (the staff surface), then everything else (the customer `/portal`
- *   surface) - see `createHttpServer`.
+ *   surface) - see `createHttpServer`. Only an `/os` POST reads a request
+ *   body (bounded, `INTERNAL_OS_MAX_REQUEST_BODY_BYTES`).
  * - **Health.** `/health` aggregates the existing `config` probe plus one
  *   critical store-readability probe per store.
  *
@@ -222,6 +229,10 @@ export function createNodeRuntime(config: AppConfig, options: NodeRuntimeOptions
     peopleDirectorySource: createDurablePeopleDirectorySource(stores.organizationMembershipStore),
     knowledgeSource: createDurableKnowledgeSource(stores.evidenceReferenceStore),
     attentionSource: createDurableAttentionSource(stores.connectorConnectionStore, stores.protectedDecisionWaitStore),
+    customerOffboardingDecision: {
+      requestStore: stores.customerOffboardingRequestStore,
+      customerRepository: stores.customerRepository,
+    },
   });
 
   const server = createHttpServer({

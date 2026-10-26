@@ -30,6 +30,15 @@ export interface IncomingRequestLike {
   readonly method: string;
   readonly path: string;
   readonly headers: Readonly<Record<string, string | undefined>>;
+  /**
+   * C4: the already-buffered, UTF-8-decoded request body. Optional and
+   * purely additive. Only the Node transport's `/os` POST path fills it in
+   * (`serveWithBoundedRequestBody` in `http-server.ts`, behind a hard size
+   * cap). Every GET, and every `/portal` request, is dispatched exactly as
+   * before C4, with no body read and this field absent. This handler (the
+   * customer portal) never reads it.
+   */
+  readonly body?: string;
 }
 
 export interface OutgoingResponseLike {
