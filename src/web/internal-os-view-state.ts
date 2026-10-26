@@ -17,6 +17,7 @@ import { buildConnectorCatalog } from "../domain/integration-connector-catalog.j
 import { buildIntegrationsAdminView, type IntegrationConnectionSummary } from "../domain/integration-admin-view.js";
 import type { EvidenceReference } from "../domain/evidence.js";
 import type { StoredProtectedDecisionWait } from "../domain/durable-protected-decision-wait-store.js";
+import type { ProtectedDecisionRecord, ProtectedDecisionOutcome } from "../domain/protected-decision-record.js";
 import {
   requireInternalOsProjectAccess,
   InternalOsAccessDeniedError,
@@ -658,6 +659,20 @@ export function resolveKnowledgeView(
 export interface AttentionSource {
   listConnections(organization: Organization): ReadonlyArray<StoredConnectorConnection>;
   listProtectedDecisionWaits(organization: Organization): ReadonlyArray<StoredProtectedDecisionWait>;
+  /**
+   * C4 slice 3: optional and additive, mirroring `CustomerOffboardingAdminSource`'s
+   * own `listPendingRequestsWithVersion?` precedent exactly - the existing
+   * single implementation (`createDurableAttentionSource`) and its existing
+   * tests keep working unchanged without this method. Returns the current
+   * `ProtectedDecisionRecord` for one `decisionRef` in the Organization's
+   * tenant, or `undefined` when none has been recorded yet. A source
+   * without this method still renders every "customer approval required"
+   * row exactly as it rendered before this slice - no decision status, no
+   * form. `createDurableAttentionSource` implements it over the same
+   * `DurableProtectedDecisionRecordStore` instance the attention decision
+   * POST route writes through.
+   */
+  getProtectedDecisionRecord?(organization: Organization, decisionRef: string): ProtectedDecisionRecord | undefined;
 }
 
 /**
@@ -709,6 +724,14 @@ export interface AttentionCustomerApprovalItem {
   readonly decisionRef: string;
   readonly effectRef: string;
   readonly raisedAt: string;
+  /**
+   * C4 slice 3: present only when the source reports `getProtectedDecisionRecord`
+   * AND a record exists for this row's `decisionRef`. Absent means "no
+   * decision-status known" - either no `AttentionSource.getProtectedDecisionRecord`
+   * is wired, or it is wired and genuinely has no record for this
+   * `decisionRef` yet (a pending decision).
+   */
+  readonly decisionStatus?: { readonly outcome: ProtectedDecisionOutcome };
 }
 
 /**
@@ -735,6 +758,14 @@ export type AttentionViewState =
       readonly kind: "READY";
       readonly credentialAccessProblems: ReadonlyArray<AttentionCredentialAccessItem>;
       readonly customerApprovalsRequired: ReadonlyArray<AttentionCustomerApprovalItem>;
+      /**
+       * C4 slice 3: present only when `true`. Says whether the viewer may
+       * see the per-row decide/revoke controls
+       * (`canDecideProtectedDecision` below). Absent is exactly the
+       * pre-slice-3 shape, so an existing caller/test that never asks for
+       * it is unaffected.
+       */
+      readonly canDecide?: boolean;
     };
 
 const ATTENTION_CONNECTION_STATE_ORDER: Readonly<Record<"DEGRADED" | "REVOKED", number>> = { REVOKED: 0, DEGRADED: 1 };
@@ -798,6 +829,14 @@ export function resolveAttentionView(input: {
   readonly organization: Organization;
   readonly context: InternalOsAccessContext;
   readonly source: AttentionSource | undefined;
+  /**
+   * C4 slice 3: pre-computed by the caller (`canDecideProtectedDecision`
+   * below, applied to the viewer's own current access, AND whether the
+   * handler has the attention decision route wired at all) - mirrors
+   * `resolveConnectionsView`'s own `canMutateState` pattern. `true` only
+   * when both hold; omitted/`false` renders the unchanged status-only rows.
+   */
+  readonly canDecide?: boolean;
 }): AttentionViewState {
   const { organization, source } = input;
   if (source === undefined || !input.context.access.permissions.has("WRITE")) {
@@ -854,7 +893,7 @@ export function resolveAttentionView(input: {
   }
   credentialAccessProblems.sort(compareCredentialAccessOrder);
 
-  const customerApprovalsRequired: AttentionCustomerApprovalItem[] = waits
+  const customerApprovalsRequiredBase: AttentionCustomerApprovalItem[] = waits
     .filter((wait) => wait.resume === undefined)
     .map(({ request }) => ({
       waitRequestId: request.waitRequestId,
@@ -867,10 +906,74 @@ export function resolveAttentionView(input: {
     }))
     .sort(compareCustomerApprovalOrder);
 
+  /**
+   * C4 slice 3: only attempted when `source.getProtectedDecisionRecord` is
+   * actually present (optional chaining, exactly like
+   * `listPendingRequestsWithVersion`'s own optional-call pattern). Tenant
+   * isolation follows every other read in this function: a returned
+   * record whose own `tenantId` does not match the Organization's, or
+   * whose own `decisionRef` does not match the row it was looked up for,
+   * makes the whole view `ERROR` instead of being silently dropped or
+   * substituted - dropping it could turn a contaminated read into a row
+   * that looks like a genuine pending decision. A lookup failure (thrown
+   * error) is the same `ERROR`, never relabeled as "no record".
+   */
+  let customerApprovalsRequired: ReadonlyArray<AttentionCustomerApprovalItem> = customerApprovalsRequiredBase;
+  if (source.getProtectedDecisionRecord !== undefined) {
+    const decisionRecords = new Map<string, ProtectedDecisionRecord>();
+    try {
+      for (const item of customerApprovalsRequiredBase) {
+        const record = source.getProtectedDecisionRecord(organization, item.decisionRef);
+        if (record !== undefined) {
+          decisionRecords.set(item.decisionRef, record);
+        }
+      }
+    } catch {
+      return { kind: "ERROR" };
+    }
+    if (
+      [...decisionRecords.entries()].some(
+        ([decisionRef, record]) => record.tenantId !== organization.tenantId || record.decisionRef !== decisionRef,
+      )
+    ) {
+      return { kind: "ERROR" };
+    }
+    customerApprovalsRequired = customerApprovalsRequiredBase.map((item) => {
+      const record = decisionRecords.get(item.decisionRef);
+      return record === undefined ? item : { ...item, decisionStatus: { outcome: record.outcome } };
+    });
+  }
+
   if (credentialAccessProblems.length === 0 && customerApprovalsRequired.length === 0) {
     return { kind: "EMPTY" };
   }
-  return { kind: "READY", credentialAccessProblems, customerApprovalsRequired };
+  return {
+    kind: "READY",
+    credentialAccessProblems,
+    customerApprovalsRequired,
+    ...(input.canDecide === true ? { canDecide: true } : {}),
+  };
+}
+
+/**
+ * C4 slice 3: `true` only when the viewer's own CURRENT access grants both
+ * EXECUTE permission and `canPerformProtectedActions === true` - the same
+ * floor `resolveAuthenticatedDecisionAccess`'s own domain gate applies
+ * (`createProtectedDecisionRecord`/`reviseProtectedDecisionRecord`), and
+ * mirrors `canMutateConnectorConnectionState` exactly in shape and
+ * doc-comment style. This decides ONLY whether the per-row decide/revoke
+ * controls are SHOWN; the POST route and the domain functions underneath
+ * it re-check every floor on every submit. Defensive `decision === "GRANTED"`
+ * check mirrors `isDestinationVisible`'s own style, even though a caller
+ * only ever has a `context` here after `requireInternalOsAccess` has
+ * already proven GRANTED.
+ */
+export function canDecideProtectedDecision(context: InternalOsAccessContext): boolean {
+  return (
+    context.access.decision === "GRANTED" &&
+    context.access.permissions.has("EXECUTE") &&
+    context.access.canPerformProtectedActions
+  );
 }
 
 /**

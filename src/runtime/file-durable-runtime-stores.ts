@@ -13,6 +13,7 @@ import { FileDurableEvidenceReferenceStore } from "../domain/durable-evidence-re
 import { FileDurableControlledOrganizationProvisioningStore } from "../domain/durable-controlled-organization-provisioning-store.js";
 import { FileDurableStaffAccessGrantStore } from "../domain/durable-staff-access-grant-store.js";
 import { FileDurableProtectedDecisionWaitStore } from "../domain/durable-protected-decision-wait-store.js";
+import { FileDurableProtectedDecisionRecordStore } from "../domain/durable-protected-decision-record-store.js";
 import { FileDurableCustomerRepository } from "../application/durable-customer-repository.js";
 import type { HealthProbeResult } from "./health-check.js";
 
@@ -44,6 +45,12 @@ import type { HealthProbeResult } from "./health-check.js";
  * (`completeCustomerOffboardingAsAuthenticatedStaff`). It adds one
  * `file-store:customers` health probe. No runtime path writes customers
  * yet, so until one does, completing a real request answers 404.
+ *
+ * C4 slice 3: the protected-decision RECORD store
+ * (`FileDurableProtectedDecisionRecordStore`) is now composed, because
+ * both the attention decision POST route and `/os/attention`'s own
+ * `getProtectedDecisionRecord` read/write it. It adds one
+ * `file-store:protected-decision-records` health probe.
  */
 export const FILE_DURABLE_RUNTIME_STORE_LAYOUT = {
   projects: "projects",
@@ -60,6 +67,7 @@ export const FILE_DURABLE_RUNTIME_STORE_LAYOUT = {
   staffAccessGrants: "staff-access-grants",
   protectedDecisionWaits: "protected-decision-waits",
   customers: "customers",
+  protectedDecisionRecords: "protected-decision-records",
 } as const;
 
 export type FileDurableRuntimeStoreKey = keyof typeof FILE_DURABLE_RUNTIME_STORE_LAYOUT;
@@ -83,6 +91,8 @@ export interface FileDurableRuntimeStores {
   readonly protectedDecisionWaitStore: FileDurableProtectedDecisionWaitStore;
   /** C4: customers, read by the offboarding COMPLETE route. */
   readonly customerRepository: FileDurableCustomerRepository;
+  /** C4 slice 3: protected-decision RECORDS (`/os/attention`'s decide/revoke route and status column). */
+  readonly protectedDecisionRecordStore: FileDurableProtectedDecisionRecordStore;
 }
 
 /** Absolute (or caller-relative) directory of one store under `dataDir`. */
@@ -117,6 +127,7 @@ export function createFileDurableRuntimeStores(dataDir: string): FileDurableRunt
     staffAccessGrantStore: new FileDurableStaffAccessGrantStore(dir("staffAccessGrants")),
     protectedDecisionWaitStore: new FileDurableProtectedDecisionWaitStore(dir("protectedDecisionWaits")),
     customerRepository: new FileDurableCustomerRepository(dir("customers")),
+    protectedDecisionRecordStore: new FileDurableProtectedDecisionRecordStore(dir("protectedDecisionRecords")),
   };
 }
 

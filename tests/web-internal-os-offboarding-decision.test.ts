@@ -308,13 +308,17 @@ test("C4: the dev-only standalone internal OS server also reads a bounded POST b
 
 // --- containment of the one write affordance ---
 
-test("C4: the offboarding controls module is one of exactly two src/web modules whose source contains a <form> or <button> (the other is the C4 slice 2 connection-state controls module), and its only forms POST to the two decision paths", () => {
+test("C4: the offboarding controls module is one of exactly three src/web modules whose source contains a <form> or <button> (the others are the C4 slice 2 connection-state controls module and the C4 slice 3 attention decision controls module), and its only forms POST to the two decision paths", () => {
   const webDir = join(REPO_ROOT, "src", "web");
   const withAffordance = readdirSync(webDir)
     .filter((name) => name.endsWith(".ts"))
     .filter((name) => /<form\b|<button/i.test(readFileSync(join(webDir, name), "utf8")))
     .sort();
-  assert.deepEqual(withAffordance, ["internal-os-connection-state-controls.ts", "internal-os-offboarding-decision-controls.ts"]);
+  assert.deepEqual(withAffordance, [
+    "internal-os-attention-decision-controls.ts",
+    "internal-os-connection-state-controls.ts",
+    "internal-os-offboarding-decision-controls.ts",
+  ]);
 
   const controls = readFileSync(join(webDir, "internal-os-offboarding-decision-controls.ts"), "utf8");
   const formTags = controls.match(/<form\b[^>]*>/g) ?? [];
