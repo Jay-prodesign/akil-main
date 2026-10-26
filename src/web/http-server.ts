@@ -1,4 +1,4 @@
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { SessionContext } from "./session-context.js";
 import { createProductionSessionProvider } from "./production-session-provider.js";
 import { createDevFixtureSessionProvider } from "./dev-fixture-session-provider.js";
@@ -88,6 +88,164 @@ const INTERNAL_ERROR_RESPONSE: OutgoingResponseLike = {
   body: "Internal Server Error",
 };
 
+/**
+ * C4 (first `/os` mutation route): the hard cap on a buffered `/os` POST
+ * body, in bytes. 8 KiB. The only POST forms on this surface are the
+ * customer-offboarding deny/complete forms: a request id, a version number
+ * and (for deny) a short free-text reason, URL-encoded. That is a few
+ * hundred bytes in practice, and even a long reason in a non-Latin script
+ * (URL-encoding can triple its byte size) stays far below 8 KiB.
+ *
+ * The cap exists because the body is buffered BEFORE the staff session is
+ * checked (see `serveWithBoundedRequestBody`), so an unauthenticated caller
+ * controls how much is held in memory. 8 KiB per in-flight request is the
+ * same order as what Node already holds per request for headers (its
+ * default `maxHeaderSize` is 16 KiB), so this adds no new class of memory
+ * exposure.
+ */
+export const INTERNAL_OS_MAX_REQUEST_BODY_BYTES = 8 * 1024;
+
+const PAYLOAD_TOO_LARGE_RESPONSE: OutgoingResponseLike = {
+  status: 413,
+  headers: { "content-type": "text/plain; charset=utf-8", connection: "close" },
+  body: "Payload Too Large",
+};
+
+export type BoundedRequestBodyOutcome =
+  | { readonly kind: "COMPLETE"; readonly body: string }
+  | { readonly kind: "TOO_LARGE" }
+  | { readonly kind: "ABORTED" };
+
+/**
+ * C4: reads a request body off the socket, holding at most `maxBytes` of it
+ * in memory, and reports exactly one outcome.
+ *
+ * - A declared `content-length` above `maxBytes` (or one that is not a
+ *   number) is `TOO_LARGE` at once, before a single body byte is read.
+ * - Without a usable declared length (for example a chunked upload), bytes
+ *   are counted as they arrive. The first chunk that takes the total over
+ *   `maxBytes` pauses the stream and reports `TOO_LARGE`. That chunk and
+ *   everything after it are never kept.
+ * - A request stream that errors or closes before `end` is `ABORTED`.
+ *
+ * Slow senders are bounded by Node's own `server.requestTimeout` (300 s by
+ * default), which covers receiving the whole request, body included.
+ */
+export function readBoundedRequestBody(
+  req: IncomingMessage,
+  maxBytes: number,
+  onDone: (outcome: BoundedRequestBodyOutcome) => void,
+): void {
+  let settled = false;
+  const chunks: Buffer[] = [];
+  let total = 0;
+
+  const settle = (outcome: BoundedRequestBodyOutcome): void => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    req.removeListener("data", onData);
+    req.removeListener("end", onEnd);
+    req.removeListener("close", onClose);
+    chunks.length = 0;
+    onDone(outcome);
+  };
+
+  function onData(chunk: Buffer | string): void {
+    const buffer = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+    total += buffer.length;
+    if (total > maxBytes) {
+      req.pause();
+      settle({ kind: "TOO_LARGE" });
+      return;
+    }
+    chunks.push(buffer);
+  }
+
+  function onEnd(): void {
+    const body = Buffer.concat(chunks, total).toString("utf8");
+    settle({ kind: "COMPLETE", body });
+  }
+
+  function onClose(): void {
+    settle({ kind: "ABORTED" });
+  }
+
+  // Kept for the request's whole lifetime, even after `settle`: an `error`
+  // event with no listener would be thrown and crash the process.
+  req.on("error", () => settle({ kind: "ABORTED" }));
+
+  const declared = req.headers["content-length"];
+  if (declared !== undefined) {
+    const declaredBytes = Number(declared);
+    if (!Number.isFinite(declaredBytes) || declaredBytes < 0 || declaredBytes > maxBytes) {
+      req.pause();
+      settle({ kind: "TOO_LARGE" });
+      return;
+    }
+  }
+
+  req.on("data", onData);
+  req.on("end", onEnd);
+  req.on("close", onClose);
+}
+
+function writeResponse(res: ServerResponse, response: OutgoingResponseLike, onFinished?: () => void): void {
+  res.writeHead(response.status, response.headers);
+  if (onFinished !== undefined) {
+    res.end(response.body, onFinished);
+  } else {
+    res.end(response.body);
+  }
+}
+
+/**
+ * C4: serves one request whose handler needs its body, used only for `/os`
+ * POST requests (both `createHttpServer` below and the dev-only
+ * `internal-os-http-server.ts`). Every other request in both servers is
+ * still dispatched synchronously with no body read, exactly as before C4.
+ *
+ * Order: the body is buffered first (bounded by `maxBytes`), and only then
+ * is the handler called, which checks the staff session before it parses
+ * the body. Checking the session before buffering would mean resolving the
+ * organization, the grants and the session here in the transport, which
+ * ADR 0001 keeps out of this file, or calling the handler twice. With an
+ * 8 KiB cap, buffering first costs at most 8 KiB per in-flight request.
+ *
+ * - `TOO_LARGE`: a plain 413 with `connection: close`, then the socket is
+ *   destroyed once the response is flushed. The handler is never called.
+ * - `ABORTED`: the client is gone. Nothing is written and the handler is
+ *   never called.
+ * - `COMPLETE`: the handler gets the request with `body` set. If it
+ *   throws, the response is the same generic 500 as the synchronous path.
+ */
+export function serveWithBoundedRequestBody(
+  req: IncomingMessage,
+  res: ServerResponse,
+  request: IncomingRequestLike,
+  handler: RequestHandler,
+  maxBytes: number = INTERNAL_OS_MAX_REQUEST_BODY_BYTES,
+): void {
+  readBoundedRequestBody(req, maxBytes, (outcome) => {
+    if (outcome.kind === "ABORTED") {
+      req.destroy();
+      return;
+    }
+    if (outcome.kind === "TOO_LARGE") {
+      writeResponse(res, PAYLOAD_TOO_LARGE_RESPONSE, () => req.destroy());
+      return;
+    }
+    let response: OutgoingResponseLike;
+    try {
+      response = handler({ ...request, body: outcome.body });
+    } catch {
+      response = INTERNAL_ERROR_RESPONSE;
+    }
+    writeResponse(res, response);
+  });
+}
+
 export function createHttpServer(deps: {
   isProduction: boolean;
   devSessionFixtures?: ReadonlyMap<string, SessionContext>;
@@ -174,6 +332,13 @@ export function createHttpServer(deps: {
           body: probe.body,
         };
       } else if (deps.internalOsHandler !== undefined && isInternalOsPath(request.path)) {
+        // C4: only an `/os` POST reads a body, asynchronously and bounded.
+        // Every other `/os` method, and every `/portal` request below,
+        // stays on the synchronous path exactly as before.
+        if (request.method === "POST") {
+          serveWithBoundedRequestBody(req, res, request, deps.internalOsHandler);
+          return;
+        }
         response = deps.internalOsHandler(request);
       } else {
         response = handleRequest(request);

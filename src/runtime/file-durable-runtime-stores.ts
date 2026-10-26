@@ -13,6 +13,7 @@ import { FileDurableEvidenceReferenceStore } from "../domain/durable-evidence-re
 import { FileDurableControlledOrganizationProvisioningStore } from "../domain/durable-controlled-organization-provisioning-store.js";
 import { FileDurableStaffAccessGrantStore } from "../domain/durable-staff-access-grant-store.js";
 import { FileDurableProtectedDecisionWaitStore } from "../domain/durable-protected-decision-wait-store.js";
+import { FileDurableCustomerRepository } from "../application/durable-customer-repository.js";
 import type { HealthProbeResult } from "./health-check.js";
 
 /**
@@ -36,6 +37,13 @@ import type { HealthProbeResult } from "./health-check.js";
  * (per-tenant `.wait.jsonl`/`.resume.jsonl` logs plus its lock
  * directories), and it adds one `file-store:protected-decision-waits`
  * health probe.
+ *
+ * C4 (first `/os` mutation slice): the durable `CustomerRepository`
+ * (`FileDurableCustomerRepository`) is now composed, because the
+ * offboarding COMPLETE route reads the customer a request names
+ * (`completeCustomerOffboardingAsAuthenticatedStaff`). It adds one
+ * `file-store:customers` health probe. No runtime path writes customers
+ * yet, so until one does, completing a real request answers 404.
  */
 export const FILE_DURABLE_RUNTIME_STORE_LAYOUT = {
   projects: "projects",
@@ -51,6 +59,7 @@ export const FILE_DURABLE_RUNTIME_STORE_LAYOUT = {
   controlledOrganizationProvisioning: "controlled-organization-provisioning",
   staffAccessGrants: "staff-access-grants",
   protectedDecisionWaits: "protected-decision-waits",
+  customers: "customers",
 } as const;
 
 export type FileDurableRuntimeStoreKey = keyof typeof FILE_DURABLE_RUNTIME_STORE_LAYOUT;
@@ -72,6 +81,8 @@ export interface FileDurableRuntimeStores {
   readonly staffAccessGrantStore: FileDurableStaffAccessGrantStore;
   /** C3 Attention: protected-decision WAIT/resume logs (`/os/attention` "customer approval required"). */
   readonly protectedDecisionWaitStore: FileDurableProtectedDecisionWaitStore;
+  /** C4: customers, read by the offboarding COMPLETE route. */
+  readonly customerRepository: FileDurableCustomerRepository;
 }
 
 /** Absolute (or caller-relative) directory of one store under `dataDir`. */
@@ -105,6 +116,7 @@ export function createFileDurableRuntimeStores(dataDir: string): FileDurableRunt
     ),
     staffAccessGrantStore: new FileDurableStaffAccessGrantStore(dir("staffAccessGrants")),
     protectedDecisionWaitStore: new FileDurableProtectedDecisionWaitStore(dir("protectedDecisionWaits")),
+    customerRepository: new FileDurableCustomerRepository(dir("customers")),
   };
 }
 

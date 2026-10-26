@@ -1,6 +1,7 @@
 import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, AdminResourceBindingViewState, OperationalObservabilityViewState, PendingOffboardingRequestsViewState, ConnectionsViewState, KnowledgeViewState, KnowledgeEvidenceEntry, AttentionViewState, AttentionCredentialAccessItem, AttentionCustomerApprovalItem, PeopleDirectoryEntry, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary } from "./internal-os-view-state.js";
 import type { ConnectionState } from "../domain/connection-authority.js";
 import type { IntegrationConnectionSummary } from "../domain/integration-admin-view.js";
+import { renderOffboardingDecisionControls } from "./internal-os-offboarding-decision-controls.js";
 
 export interface RenderedInternalOsPage {
   readonly status: number;
@@ -410,6 +411,14 @@ function renderOperationalObservabilityCard(view: OperationalObservabilityViewSt
  * authenticated admin-mutation boundary or durable store for this request
  * type exists yet - see `resolvePendingOffboardingRequestsView`'s own doc
  * comment for why that is deliberate, not an oversight.
+ *
+ * C4: that boundary now exists and has a POST route. When the view carries
+ * `decisionControls` (the handler has the route wired) and a row carries
+ * its stored version, the row gets the deny/complete controls from
+ * `internal-os-offboarding-decision-controls.ts`, limited to the decisions
+ * the viewer's own access permits. This module still renders no form
+ * itself. Without `decisionControls` the card is byte-for-byte the
+ * pre-C4 read-only list.
  */
 function renderPendingOffboardingRequestsCard(view: PendingOffboardingRequestsViewState): string {
   if (view.kind === "NOT_ACTIVE") {
@@ -423,10 +432,19 @@ function renderPendingOffboardingRequestsCard(view: PendingOffboardingRequestsVi
   const itemsHtml =
     view.requests.length > 0
       ? `<ul>\n      ${view.requests
-          .map(
-            (request) =>
-              `<li>${escapeHtml(request.customerId)}: <span class="status status-warning" role="status">REQUESTED</span> by ${escapeHtml(request.requestedByRef)} at ${escapeHtml(request.requestedAt)}</li>`,
-          )
+          .map((request) => {
+            const controls =
+              view.decisionControls !== undefined && request.version !== undefined
+                ? renderOffboardingDecisionControls({
+                    requestId: request.requestId,
+                    version: request.version,
+                    canDeny: view.decisionControls.canDeny,
+                    canComplete: view.decisionControls.canComplete,
+                  })
+                : "";
+            const controlsHtml = controls.length > 0 ? `\n      <div class="decision-controls">${controls}</div>\n      ` : "";
+            return `<li>${escapeHtml(request.customerId)}: <span class="status status-warning" role="status">REQUESTED</span> by ${escapeHtml(request.requestedByRef)} at ${escapeHtml(request.requestedAt)}${controlsHtml}</li>`;
+          })
           .join("\n      ")}\n    </ul>`
       : `<p>No pending offboarding requests.</p>`;
   return `
@@ -473,6 +491,14 @@ export type InternalOsPageContent =
   | { readonly kind: "NOT_FOUND" }
   | { readonly kind: "ERROR"; readonly reason: string }
   | { readonly kind: "UNSUPPORTED"; readonly reason: string }
+  /**
+   * C4: outcomes of the offboarding decision POST route. Like `ERROR`,
+   * neither renders the underlying error's message or any request data.
+   * Both say that nothing was changed, which is true for every path that
+   * reaches them (each one fails before the store's write).
+   */
+  | { readonly kind: "BAD_REQUEST" }
+  | { readonly kind: "CONFLICT" }
   | {
       readonly kind: "DESTINATION";
       readonly nav: ReadonlyArray<NavDestination>;
@@ -863,6 +889,31 @@ export function renderInternalOsPage(content: InternalOsPageContent): RenderedIn
           statusLabel: "Not supported",
           statusTone: "neutral",
           bodyHtml: `<p>${escapeHtml(content.reason)}</p>`,
+        }),
+      };
+    case "BAD_REQUEST":
+      return {
+        status: 400,
+        contentType: "text/html; charset=utf-8",
+        html: renderPage({
+          chrome: { nav: [], activeKey: undefined },
+          title: "Invalid submission",
+          statusLabel: "Invalid submission",
+          statusTone: "warning",
+          bodyHtml: "<p>The submitted form was incomplete or malformed. Nothing was changed.</p>",
+        }),
+      };
+    case "CONFLICT":
+      return {
+        status: 409,
+        contentType: "text/html; charset=utf-8",
+        html: renderPage({
+          chrome: { nav: [], activeKey: undefined },
+          title: "Decision not applied",
+          statusLabel: "Decision not applied",
+          statusTone: "warning",
+          bodyHtml:
+            "<p>This decision could not be applied. The request may already have been decided or changed since the page was loaded. Nothing was changed. Reload the admin page and try again.</p>",
         }),
       };
     case "DESTINATION":

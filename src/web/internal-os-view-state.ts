@@ -1144,6 +1144,16 @@ export function resolveOperationalObservabilityView(
  */
 export interface CustomerOffboardingAdminSource {
   listPendingRequests(organization: Organization): ReadonlyArray<CustomerOffboardingRequest>;
+  /**
+   * C4: optional and additive. The same pending requests, each with the
+   * durable store version it was read at. A decision form needs that
+   * version as its `expectedVersion`, so a source without this method still
+   * renders the read-only list but never a decision form.
+   * `createDurableCustomerOffboardingAdminSource` implements it.
+   */
+  listPendingRequestsWithVersion?(
+    organization: Organization,
+  ): ReadonlyArray<{ readonly request: CustomerOffboardingRequest; readonly version: number }>;
 }
 
 export interface PendingOffboardingRequestSummary {
@@ -1151,11 +1161,29 @@ export interface PendingOffboardingRequestSummary {
   readonly customerId: Customer["customerId"];
   readonly requestedByRef: string;
   readonly requestedAt: string;
+  /** C4: present only when the source reported a valid stored version (positive integer). */
+  readonly version?: number;
+}
+
+/**
+ * C4: which offboarding decisions the current viewer may submit from
+ * `/os/admin`, derived from the viewer's own current `EffectiveAccessResolution`.
+ * Present only when the handler has a decision route wired. This only
+ * decides which controls are shown. The POST route and the domain
+ * functions re-check authority on every submit.
+ */
+export interface OffboardingDecisionControls {
+  readonly canDeny: boolean;
+  readonly canComplete: boolean;
 }
 
 export type PendingOffboardingRequestsViewState =
   | { readonly kind: "NOT_ACTIVE" }
-  | { readonly kind: "READY"; readonly requests: ReadonlyArray<PendingOffboardingRequestSummary> };
+  | {
+      readonly kind: "READY";
+      readonly requests: ReadonlyArray<PendingOffboardingRequestSummary>;
+      readonly decisionControls?: OffboardingDecisionControls;
+    };
 
 /**
  * Tenant isolation fails closed exactly like `resolveResourceBindingView`:
@@ -1172,25 +1200,41 @@ export type PendingOffboardingRequestsViewState =
 export function resolvePendingOffboardingRequestsView(
   organization: Organization,
   source: CustomerOffboardingAdminSource | undefined,
+  decisionControls?: OffboardingDecisionControls,
 ): PendingOffboardingRequestsViewState {
   if (source === undefined) {
     return { kind: "NOT_ACTIVE" };
   }
-  let requests: ReadonlyArray<CustomerOffboardingRequest>;
+  /**
+   * C4: when the source can report versions, the versioned listing is used
+   * instead of `listPendingRequests` (one read, not two). The same tenant
+   * and status re-verification applies to both. A version that is not a
+   * positive integer is dropped, so that row renders without a decision
+   * form rather than with a version the store would never accept.
+   */
+  let entries: ReadonlyArray<{ readonly request: CustomerOffboardingRequest; readonly version?: number }>;
   try {
-    requests = source.listPendingRequests(organization);
+    entries =
+      source.listPendingRequestsWithVersion !== undefined
+        ? source.listPendingRequestsWithVersion(organization)
+        : source.listPendingRequests(organization).map((request) => ({ request }));
   } catch {
     return { kind: "NOT_ACTIVE" };
   }
-  const summaries: PendingOffboardingRequestSummary[] = requests
-    .filter((request) => request.tenantId === organization.tenantId && request.status === "REQUESTED")
-    .map((request) => ({
+  const summaries: PendingOffboardingRequestSummary[] = entries
+    .filter(({ request }) => request.tenantId === organization.tenantId && request.status === "REQUESTED")
+    .map(({ request, version }) => ({
       requestId: request.requestId,
       customerId: request.customerId,
       requestedByRef: request.requestedByRef,
       requestedAt: request.requestedAt,
+      ...(version !== undefined && Number.isInteger(version) && version >= 1 ? { version } : {}),
     }));
-  return { kind: "READY", requests: summaries };
+  return {
+    kind: "READY",
+    requests: summaries,
+    ...(decisionControls !== undefined ? { decisionControls } : {}),
+  };
 }
 
 export interface AdminViewState {
@@ -1224,6 +1268,11 @@ const ADMIN_NOT_ACTIVE_CONCEPTS: ReadonlyArray<string> = [
  * write/execute affordances of any kind, so "ADMIN label + READ-only
  * authority exposes no active write/execute CTA" holds by construction
  * (see `os-v0-08-boundary-scan.test.ts`).
+ *
+ * C4 exception, one only: with `offboardingDecisionEnabled`, a pending
+ * offboarding row can carry deny/complete forms. They are shown only for
+ * the authority the viewer actually holds (see `OffboardingDecisionControls`),
+ * so "READ-only authority exposes no active write CTA" still holds.
  */
 export function resolveAdminView(input: {
   organization: Organization;
@@ -1231,14 +1280,35 @@ export function resolveAdminView(input: {
   resourceBindingSource?: OrganizationResourceBindingSource;
   operationalObservabilitySource?: OperationalObservabilitySource;
   customerOffboardingAdminSource?: CustomerOffboardingAdminSource;
+  /**
+   * C4: true only when the request handler has the offboarding decision
+   * route wired. The controls shown are then derived from the viewer's own
+   * current access: deny needs WRITE (`denyCustomerOffboarding`'s own
+   * floor); complete also needs `canPerformProtectedActions`
+   * (`completeCustomerOffboarding`'s own floor). Absent or false keeps the
+   * list read-only, exactly as before C4.
+   */
+  offboardingDecisionEnabled?: boolean;
 }): AdminViewState {
+  const access = input.context.access;
+  const decisionControls: OffboardingDecisionControls | undefined =
+    input.offboardingDecisionEnabled === true && access.decision === "GRANTED"
+      ? {
+          canDeny: access.permissions.has("WRITE"),
+          canComplete: access.permissions.has("WRITE") && access.canPerformProtectedActions,
+        }
+      : undefined;
   return {
     kind: "READY",
     organization: summarizeOrganization(input.organization),
     access: summarizeAccess(input.context.access),
     resourceBinding: resolveResourceBindingView(input.organization, input.resourceBindingSource),
     operationalObservability: resolveOperationalObservabilityView(input.organization, input.operationalObservabilitySource),
-    pendingOffboardingRequests: resolvePendingOffboardingRequestsView(input.organization, input.customerOffboardingAdminSource),
+    pendingOffboardingRequests: resolvePendingOffboardingRequestsView(
+      input.organization,
+      input.customerOffboardingAdminSource,
+      decisionControls,
+    ),
     notActiveConcepts: ADMIN_NOT_ACTIVE_CONCEPTS,
   };
 }
