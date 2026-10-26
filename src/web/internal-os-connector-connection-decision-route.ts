@@ -186,13 +186,19 @@ const STATE_CHANGE_APPLIED_REDIRECT: OutgoingResponseLike = {
  *   OWNER-or-ADMIN curated access role" (an authorization failure) AND "no
  *   current connection exists for this connectionBindingId" (a not-found
  *   case) - distinguished only by the thrown error's own message text.
- *   Branching the HTTP status on that text (403 vs 404) would hand an
- *   unauthenticated-for-this-connection caller a existence-enumeration
- *   oracle: probing connectionBindingIds and reading 403-vs-404 off the
- *   response would reveal which ids exist in this tenant, independent of
- *   whether the caller may ever act on them. Collapsing both cases to the
- *   same 403 is intentionally MORE secure than a message-sniffing 404
- *   split, not a shortcut - a future reader should not "fix" this into one.
+ *   Branching the HTTP status on that text (403 vs 404) would otherwise hand
+ *   a caller an existence-enumeration oracle via this route alone. In
+ *   today's system every caller who can reach this route already cleared
+ *   the `/os/connections` destination's own WRITE gate, and that page's GET
+ *   listing already discloses every real connectionBindingId in the tenant
+ *   in plaintext - so for the current caller population this unification
+ *   is real defense-in-depth, not a working exploit it closes today.
+ *   Collapsing both cases to the same 403 still costs nothing and protects
+ *   any future caller population that might reach this POST gate without
+ *   that same GET visibility - a future reader should not "fix" this into a
+ *   message-sniffing 404 split on the theory that the oracle is harmless,
+ *   since that depends on GET's own exposure staying exactly as broad as it
+ *   is today.
  * - 409: `InvalidConnectionTransitionError` - the requested `to` state is
  *   not a legal transition from the connection's actual current state (see
  *   `CONNECTION_MAIN_TRANSITIONS` in `connection-authority.ts`, the sole
