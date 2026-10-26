@@ -2,6 +2,7 @@ import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, Work
 import type { ConnectionState } from "../domain/connection-authority.js";
 import type { IntegrationConnectionSummary } from "../domain/integration-admin-view.js";
 import { renderOffboardingDecisionControls } from "./internal-os-offboarding-decision-controls.js";
+import { renderConnectorConnectionStateControls } from "./internal-os-connection-state-controls.js";
 
 export interface RenderedInternalOsPage {
   readonly status: number;
@@ -571,13 +572,18 @@ const CONNECTION_STATE_TONE: Record<ConnectionState, "neutral" | "warning" | "da
   HANDOVER_COMPLETE: "neutral",
 };
 
-function renderConnectionRow(connection: IntegrationConnectionSummary): string {
+function renderConnectionRow(connection: IntegrationConnectionSummary, canMutateState: boolean): string {
   const ownership = `${escapeHtml(connection.ownership.customerId)} / ${escapeHtml(connection.ownership.projectId)}${
     connection.ownership.serviceRef !== undefined ? ` / ${escapeHtml(connection.ownership.serviceRef)}` : ""
   }`;
   const evidence =
     connection.verificationEvidenceRef !== undefined ? escapeHtml(connection.verificationEvidenceRef) : "none";
-  return `<tr><td>${escapeHtml(connection.connectionBindingId)}</td><td>${escapeHtml(connection.connectorKind)}</td><td>${escapeHtml(connection.authMode)}</td><td><span class="status status-${CONNECTION_STATE_TONE[connection.connectionState]}" role="status">${escapeHtml(connection.connectionState)}</span></td><td>${ownership}</td><td>${escapeHtml(connection.workspaceRef)}</td><td>${escapeHtml(connection.integrationInstanceRef)}</td><td>${evidence}</td></tr>`;
+  const control = renderConnectorConnectionStateControls({
+    connectionBindingId: connection.connectionBindingId,
+    canMutateState,
+  });
+  const actionsCell = control.length > 0 ? `<td>${control}</td>` : "<td></td>";
+  return `<tr><td>${escapeHtml(connection.connectionBindingId)}</td><td>${escapeHtml(connection.connectorKind)}</td><td>${escapeHtml(connection.authMode)}</td><td><span class="status status-${CONNECTION_STATE_TONE[connection.connectionState]}" role="status">${escapeHtml(connection.connectionState)}</span></td><td>${ownership}</td><td>${escapeHtml(connection.workspaceRef)}</td><td>${escapeHtml(connection.integrationInstanceRef)}</td><td>${evidence}</td>${actionsCell}</tr>`;
 }
 
 /**
@@ -585,7 +591,16 @@ function renderConnectionRow(connection: IntegrationConnectionSummary): string {
  * `IntegrationConnectionSummary` (CONN-001's secret-masked read model), so
  * there is no secret reference here to escape or omit. Like every other
  * card in this module, it renders escaped text only and no mutation
- * control.
+ * control of its own.
+ *
+ * C4 slice 2 exception, one only: when `view.canMutateState` is `true`
+ * (the handler has the state-mutation route wired AND the viewer's own
+ * current access permits it - see `canMutateConnectorConnectionState`),
+ * each row additionally carries the state-mutation control from
+ * `internal-os-connection-state-controls.ts`. This module still renders no
+ * form itself. Without `canMutateState`, the table is byte-for-byte the
+ * pre-slice-2 read-only table (the extra "Actions" column header stays,
+ * but every cell in it is empty).
  */
 function renderConnectionsBody(view: Exclude<ConnectionsViewState, { kind: "NOT_ACTIVE" } | { kind: "ERROR" }>): string {
   if (view.kind === "EMPTY") {
@@ -595,13 +610,14 @@ function renderConnectionsBody(view: Exclude<ConnectionsViewState, { kind: "NOT_
     <p>No connections are configured for this organization yet.</p>
   </section>`;
   }
-  const rows = view.connections.map(renderConnectionRow).join("\n      ");
+  const canMutateState = view.canMutateState === true;
+  const rows = view.connections.map((connection) => renderConnectionRow(connection, canMutateState)).join("\n      ");
   return `
   <section aria-labelledby="connections-heading" class="card">
     <h2 id="connections-heading">Connections</h2>
     <p>Read-only. Credentials are never shown on this page.</p>
     <table>
-      <thead><tr><th>Connection</th><th>Connector</th><th>Auth mode</th><th>State</th><th>Customer / project</th><th>Workspace</th><th>Instance</th><th>Verification evidence</th></tr></thead>
+      <thead><tr><th>Connection</th><th>Connector</th><th>Auth mode</th><th>State</th><th>Customer / project</th><th>Workspace</th><th>Instance</th><th>Verification evidence</th><th>Actions</th></tr></thead>
       <tbody>
       ${rows}
       </tbody>

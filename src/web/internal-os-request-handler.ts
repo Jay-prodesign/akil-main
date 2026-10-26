@@ -17,6 +17,7 @@ import {
   resolveProductsView,
   resolveAdminView,
   resolveConnectionsView,
+  canMutateConnectorConnectionState,
   resolveKnowledgeView,
   resolveAttentionView,
   type DestinationKey,
@@ -51,6 +52,11 @@ import {
   parseOffboardingDecisionPath,
   type CustomerOffboardingDecisionDeps,
 } from "./internal-os-offboarding-decision-route.js";
+import {
+  handleConnectorConnectionStatePost,
+  parseConnectorConnectionStatePath,
+  type ConnectorConnectionStateDecisionDeps,
+} from "./internal-os-connector-connection-decision-route.js";
 
 /**
  * Rev168: distinct from the Client Portal's `x-akilta-session-token`
@@ -153,6 +159,18 @@ export interface InternalOsRequestHandlerDeps {
    * the admin list reads, plus a `FileDurableCustomerRepository`.
    */
   readonly customerOffboardingDecision?: CustomerOffboardingDecisionDeps;
+  /**
+   * C4 slice 2 (gap scan 2026-10-23, second `/os` mutation): the durable
+   * store the connector-connection state-mutation POST route writes
+   * through (`internal-os-connector-connection-decision-route.ts`).
+   * Absent: that route answers exactly like every other POST did before
+   * this slice (501 UNSUPPORTED), and `/os/connections` renders its table
+   * read-only, with no control - mirrors `customerOffboardingDecision`'s
+   * own optional-dependency pattern exactly. The deployable runtime wires
+   * the same `FileDurableConnectorConnectionStore` the connections list
+   * already reads.
+   */
+  readonly connectorConnectionStateDecision?: ConnectorConnectionStateDecisionDeps;
 }
 
 function toResponse(rendered: RenderedInternalOsPage): OutgoingResponseLike {
@@ -249,6 +267,24 @@ export function createInternalOsRequestHandler(deps: InternalOsRequestHandlerDep
           organization: deps.organization,
           grants: deps.grants,
           decision: deps.customerOffboardingDecision,
+        });
+      }
+      /**
+       * C4 slice 2: the second `/os` mutation route, dispatched the same
+       * way as the offboarding decision route just above - a path match
+       * with no wired dependency still falls through to the generic 501
+       * below, unchanged from before this slice.
+       */
+      const connectionBindingId = parseConnectorConnectionStatePath(request.path);
+      if (connectionBindingId !== undefined && deps.connectorConnectionStateDecision !== undefined) {
+        return handleConnectorConnectionStatePost({
+          request,
+          connectionBindingId,
+          sessionToken: request.headers[STAFF_SESSION_TOKEN_HEADER],
+          provider: deps.provider,
+          organization: deps.organization,
+          grants: deps.grants,
+          decision: deps.connectorConnectionStateDecision,
         });
       }
     }
@@ -373,7 +409,11 @@ export function createInternalOsRequestHandler(deps: InternalOsRequestHandlerDep
         content = connectionsPageContent(
           nav,
           organizationName,
-          resolveConnectionsView(deps.organization, deps.connectionsSource),
+          resolveConnectionsView(
+            deps.organization,
+            deps.connectionsSource,
+            deps.connectorConnectionStateDecision !== undefined && canMutateConnectorConnectionState(context),
+          ),
         );
         break;
       case "people":

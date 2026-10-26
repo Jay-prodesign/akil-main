@@ -410,7 +410,18 @@ export type ConnectionsViewState =
   | { readonly kind: "NOT_ACTIVE" }
   | { readonly kind: "ERROR" }
   | { readonly kind: "EMPTY" }
-  | { readonly kind: "READY"; readonly connections: ReadonlyArray<IntegrationConnectionSummary> };
+  | {
+      readonly kind: "READY";
+      readonly connections: ReadonlyArray<IntegrationConnectionSummary>;
+      /**
+       * C4 slice 2: present only when `true`. Says whether the viewer may
+       * see the per-row connection-state-mutation control
+       * (`canMutateConnectorConnectionState` below). Absent is exactly the
+       * pre-slice-2 shape, so an existing caller/test that never asks for
+       * it is unaffected.
+       */
+      readonly canMutateState?: boolean;
+    };
 
 /**
  * `buildIntegrationsAdminView` also lists the connector catalog. This
@@ -437,6 +448,15 @@ const NO_CONNECTOR_CATALOG = buildConnectorCatalog([]);
 export function resolveConnectionsView(
   organization: Organization,
   source: ConnectionsSource | undefined,
+  /**
+   * C4 slice 2: pre-computed by the caller (`canMutateConnectorConnectionState`
+   * below, applied to the viewer's own current access, AND whether the
+   * handler has the state-mutation route wired at all) - mirrors
+   * `resolveAdminView`'s own `offboardingDecisionEnabled` pattern. `true`
+   * only when both hold; omitted/`false` renders the unchanged read-only
+   * table.
+   */
+  canMutateState?: boolean,
 ): ConnectionsViewState {
   if (source === undefined) {
     return { kind: "NOT_ACTIVE" };
@@ -458,7 +478,29 @@ export function resolveConnectionsView(
     return { kind: "EMPTY" };
   }
   const { connections } = buildIntegrationsAdminView({ catalog: NO_CONNECTOR_CATALOG, connections: stored });
-  return { kind: "READY", connections };
+  return { kind: "READY", connections, ...(canMutateState === true ? { canMutateState: true } : {}) };
+}
+
+/**
+ * C4 slice 2: `true` only when the viewer's own CURRENT access grants both
+ * EXECUTE permission and `canPerformProtectedActions === true` - the same
+ * floor `mutateConnectorConnectionStateAsAdmin`'s own domain gate applies,
+ * except for the OWNER/ADMIN curated access role, which this function
+ * cannot see (`InternalOsAccessContext`/`EffectiveAccessResolution` do not
+ * expose it to this read-only view layer) and does not attempt to predict.
+ * This decides ONLY whether the per-row state-mutation control is SHOWN;
+ * the POST route and the domain function underneath it re-check every
+ * floor - including the role this function cannot see - on every submit.
+ * Defensive `decision === "GRANTED"` check mirrors `isDestinationVisible`'s
+ * own style, even though a caller only ever has a `context` here after
+ * `requireInternalOsAccess` has already proven GRANTED.
+ */
+export function canMutateConnectorConnectionState(context: InternalOsAccessContext): boolean {
+  return (
+    context.access.decision === "GRANTED" &&
+    context.access.permissions.has("EXECUTE") &&
+    context.access.canPerformProtectedActions
+  );
 }
 
 /**

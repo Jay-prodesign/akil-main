@@ -308,13 +308,13 @@ test("C4: the dev-only standalone internal OS server also reads a bounded POST b
 
 // --- containment of the one write affordance ---
 
-test("C4: the offboarding controls module is the ONLY src/web module whose source contains a <form> or <button>, and its only forms POST to the two decision paths", () => {
+test("C4: the offboarding controls module is one of exactly two src/web modules whose source contains a <form> or <button> (the other is the C4 slice 2 connection-state controls module), and its only forms POST to the two decision paths", () => {
   const webDir = join(REPO_ROOT, "src", "web");
   const withAffordance = readdirSync(webDir)
     .filter((name) => name.endsWith(".ts"))
     .filter((name) => /<form\b|<button/i.test(readFileSync(join(webDir, name), "utf8")))
     .sort();
-  assert.deepEqual(withAffordance, ["internal-os-offboarding-decision-controls.ts"]);
+  assert.deepEqual(withAffordance, ["internal-os-connection-state-controls.ts", "internal-os-offboarding-decision-controls.ts"]);
 
   const controls = readFileSync(join(webDir, "internal-os-offboarding-decision-controls.ts"), "utf8");
   const formTags = controls.match(/<form\b[^>]*>/g) ?? [];
@@ -323,4 +323,16 @@ test("C4: the offboarding controls module is the ONLY src/web module whose sourc
     '<form method="post" action="${OFFBOARDING_DENY_PATH}" class="decision-form">',
   ]);
   assert.doesNotMatch(controls, new RegExp(STAFF_SESSION_TOKEN_HEADER), "a form must never carry the staff session token");
+
+  // C4 slice 2: the sibling connection-state controls module carries the
+  // same containment guarantee - exactly one form shape, and it never
+  // carries the staff session token either.
+  const connectionStateControls = readFileSync(join(webDir, "internal-os-connection-state-controls.ts"), "utf8");
+  const connectionStateFormTags = connectionStateControls.match(/<form\b[^>]*>/g) ?? [];
+  assert.deepEqual(connectionStateFormTags, ['<form method="post" action="${escapeHtml(path)}" class="connection-state-form">']);
+  assert.doesNotMatch(
+    connectionStateControls,
+    new RegExp(STAFF_SESSION_TOKEN_HEADER),
+    "a form must never carry the staff session token",
+  );
 });

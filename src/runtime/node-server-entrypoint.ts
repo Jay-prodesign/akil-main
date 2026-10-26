@@ -87,6 +87,12 @@ import type { StaffAccessGrant } from "../web/internal-os-access.js";
  *   pending list reads, via REV216's `customer-offboarding-decision-access.ts`.
  *   Complete also reads the newly composed `FileDurableCustomerRepository`.
  *   See `internal-os-offboarding-decision-route.ts`.
+ * - **Connector-connection state mutation (C4 slice 2, second `/os`
+ *   mutation).** `POST /os/connections/<connectionBindingId>/state` writes
+ *   through the same `FileDurableConnectorConnectionStore` instance
+ *   `/os/connections`/`/os/admin`/`/os/attention` already read, via
+ *   Rev188 F2's `connector-connection-admin-access.ts`. See
+ *   `internal-os-connector-connection-decision-route.ts`.
  * - **Routing.** One Node server dispatches `GET /health`, then `/os/*`
  *   (the staff surface), then everything else (the customer `/portal`
  *   surface) - see `createHttpServer`. Only an `/os` POST reads a request
@@ -233,6 +239,7 @@ export function createNodeRuntime(config: AppConfig, options: NodeRuntimeOptions
       requestStore: stores.customerOffboardingRequestStore,
       customerRepository: stores.customerRepository,
     },
+    connectorConnectionStateDecision: { store: stores.connectorConnectionStore },
   });
 
   const server = createHttpServer({
