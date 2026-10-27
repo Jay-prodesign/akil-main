@@ -121,10 +121,37 @@ test("E4: advancing a NOT_STARTED execution produces a truthful BLOCKED_UNSUPPOR
     "PROJECT",
   ]);
   for (const disposition of advanced.resourceDispositions) {
-    assert.equal(disposition.status, "BLOCKED_UNSUPPORTED");
+    assert.equal(
+      disposition.status,
+      disposition.kind === "CUSTOMER_EVIDENCE" ? "NO_AKILTA_DURABLE_RECORD" : "BLOCKED_UNSUPPORTED",
+    );
     assert.equal(disposition.evidenceRef, "internal://tests/cus-offboard-002/evidence-1");
     assert.ok(disposition.reason.length > 0);
   }
+});
+
+test("E11 (E3 truthful interim): CUSTOMER_EVIDENCE is always NO_AKILTA_DURABLE_RECORD, never BLOCKED_UNSUPPORTED, and the separate durable EVIDENCE_REFERENCE kind is unaffected", () => {
+  const completedRequest = completedRequestFor("cust-e11");
+  const started = startCustomerOffboardingExecution({ completedRequest });
+  const advanced = advanceCustomerOffboardingExecution({ state: started, evidenceRef: "internal://tests/cus-offboard-002/evidence-e11" });
+
+  const byKind = new Map(advanced.resourceDispositions.map((d) => [d.kind, d]));
+  assert.equal(byKind.get("CUSTOMER_EVIDENCE")?.status, "NO_AKILTA_DURABLE_RECORD");
+  assert.equal(byKind.get("EVIDENCE_REFERENCE")?.status, "BLOCKED_UNSUPPORTED");
+});
+
+test("E12 (adversarial, structural): NO_AKILTA_DURABLE_RECORD is never reachable for any kind other than CUSTOMER_EVIDENCE", () => {
+  const completedRequest = completedRequestFor("cust-e12");
+  const started = startCustomerOffboardingExecution({ completedRequest });
+  const advanced = advanceCustomerOffboardingExecution({
+    state: started,
+    evidenceRef: "internal://tests/cus-offboard-002/evidence-e12",
+    projectExportEvidenceRef: "internal://tests/cus-offboard-002/project-export-e12",
+  });
+  const misplaced = advanced.resourceDispositions.filter(
+    (d) => d.kind !== "CUSTOMER_EVIDENCE" && d.status === "NO_AKILTA_DURABLE_RECORD",
+  );
+  assert.deepEqual(misplaced, []);
 });
 
 test("E7 (E2): supplying projectExportEvidenceRef makes PROJECT's disposition EXPORTED, with every other kind unaffected and still BLOCKED_UNSUPPORTED", () => {
@@ -143,7 +170,11 @@ test("E7 (E2): supplying projectExportEvidenceRef makes PROJECT's disposition EX
 
   for (const [kind, disposition] of byKind) {
     if (kind === "PROJECT") continue;
-    assert.equal(disposition.status, "BLOCKED_UNSUPPORTED", `${kind} must remain BLOCKED_UNSUPPORTED`);
+    if (kind === "CUSTOMER_EVIDENCE") {
+      assert.equal(disposition.status, "NO_AKILTA_DURABLE_RECORD");
+    } else {
+      assert.equal(disposition.status, "BLOCKED_UNSUPPORTED", `${kind} must remain BLOCKED_UNSUPPORTED`);
+    }
     assert.equal(disposition.evidenceRef, "internal://tests/cus-offboard-002/evidence-e7");
   }
 });

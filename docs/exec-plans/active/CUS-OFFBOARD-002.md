@@ -29,7 +29,7 @@
 ## Architecture / semantic invariants (verified by test)
 
 - Execution can never start from a request that hasn't passed through `CUS-OFFBOARD-001`'s own `completeCustomerOffboarding` decision gate (E2–E3).
-- Every resource disposition this checkpoint can produce is the single truthful `BLOCKED_UNSUPPORTED` literal — never a fabricated delete/export success (E4).
+- Every resource disposition this checkpoint can produce is a truthful literal (`BLOCKED_UNSUPPORTED` by default, `EXPORTED` for `PROJECT` only when real export evidence is supplied, `NO_AKILTA_DURABLE_RECORD` for `CUSTOMER_EVIDENCE` only) — never a fabricated delete/export success (E4, E11/E12).
 - A completed execution's disposition set and evidence trail are immutable under replay — advancing twice can never silently replace or duplicate the original evidence (E5).
 - Both guards independently confirmed load-bearing via guard-disable sanity, then restored.
 
@@ -63,6 +63,10 @@ Three items were genuinely delegated, dependency-safe, and implemented without a
 11 new tests: E7–E10 (customer-offboarding-execution.test.ts — EXPORTED-for-PROJECT-only behavior, structural non-reachability for other kinds, backward-compatible default, whitespace-rejection), P1–P4 (customer-lifecycle-backup.test.ts — export happy path + 3 adversarial access-denial cases), S1–S3 (restore-gate authoritative-denial, no-completed-request-allows-restore, and backward-compatible omission). One pre-existing composition test (`v2-floor-int-002-full-lifecycle.test.ts`'s `FULL1`) updated from asserting 3 dispositions to 9, matching the corrected inventory — not a behavior change, a count correction.
 
 Guard-disable sanity: disabling the `kind === "PROJECT"` restriction broke exactly E7/E8, nothing else; disabling the `offboardingRequestStore` check broke exactly S1, nothing else. Both restored byte-identical.
+
+## E3 — truthful interim status for CUSTOMER_EVIDENCE (fresh gap-scan N3, 2026-10-27)
+
+The decision packet's §3.2 "truthful interim" option, left optional/undone when E1/E2/E4 landed: `CustomerResourceDispositionStatus` widened with `"NO_AKILTA_DURABLE_RECORD"`, reachable structurally ONLY for `"CUSTOMER_EVIDENCE"` (mirroring E2's own `kind ===` single-branch enforcement for `"EXPORTED"`/`"PROJECT"`). `BLOCKED_UNSUPPORTED` was never an honest description of `CUSTOMER_EVIDENCE`'s own state — it implies a capability exists to build but isn't admitted yet, but the raw material `CUSTOMER_EVIDENCE` names lives entirely behind an external `sourceLocator` this repository never persists; there is nothing in AKILTA to block or unblock. The durable record that genuinely exists (`EvidenceReference`, carrying its own `customerId`) keeps its own separate `EVIDENCE_REFERENCE` kind (added by E1) and correctly stays `BLOCKED_UNSUPPORTED`. This is a truth-surface refinement only, not a retention/erasure policy decision — it must never be read as "deleted". 2 new tests (E11/E12 in `customer-offboarding-execution.test.ts`); 1 pre-existing test (`v2-floor-int-002-full-lifecycle.test.ts`'s `FULL1`) updated for the corrected per-kind status, not a behavior change beyond the one kind this task targets. Full regression: 3516/3516 passing (3514 pre-existing + 2 new).
 
 Full regression after this correction: **3109/3109 passing** (3098 pre-existing + 11 new), clean strict typecheck, zero new runtime dependency.
 

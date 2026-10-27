@@ -32,18 +32,21 @@ import type { CustomerOffboardingRequest } from "./customer-offboarding.js";
  * archive.ts` has an export/restore pair, but that is Organization-scoped,
  * not Customer-scoped, and belongs to `OS-V1-04`.)
  *
- * `CustomerResourceDispositionStatus` declares two reachable literals:
+ * `CustomerResourceDispositionStatus` declares three reachable literals:
  * `"BLOCKED_UNSUPPORTED"` (the truthful default for every kind - no real
  * delete/export/anonymization capability exists for it yet, mirroring this
  * repository's own established "NOT_ACTIVATED capability, never
- * fabricated" discipline) and `"EXPORTED"`, reachable ONLY for the
+ * fabricated" discipline); `"EXPORTED"`, reachable ONLY for the
  * `"PROJECT"` kind and only when the caller supplies real, already-
  * produced export evidence from `customer-lifecycle-backup.ts`'s
  * `exportCustomerProjectsSnapshot` (CUS-BACKUP-001) - this module never
  * imports `project.ts`/`durable-project-store.ts` itself (preserved
  * boundary-scan discipline below), so it cannot perform the export; it can
  * only record, via a caller-supplied evidence pointer, that a real one
- * already happened elsewhere. No guessed retention period is introduced
+ * already happened elsewhere; and `"NO_AKILTA_DURABLE_RECORD"`, reachable
+ * ONLY for `"CUSTOMER_EVIDENCE"` (decision packet §3.2 "truthful interim",
+ * E3) - a truth-surface refinement, not a retention/erasure decision. No
+ * guessed retention period is introduced
  * anywhere in this module - there is no field that could hold one. No
  * delete or anonymization effect is performed against any customer-scoped
  * resource; this module's own genuine contribution is the durable,
@@ -125,8 +128,20 @@ const ALL_CUSTOMER_SCOPED_RESOURCE_KINDS: ReadonlyArray<CustomerScopedResourceKi
  * `"PROJECT"` (see `advanceCustomerOffboardingExecution`'s own structural
  * enforcement below) - widen this union further only when a real
  * capability is introduced for a specific kind, and only for that kind.
+ *
+ * `"NO_AKILTA_DURABLE_RECORD"` (decision packet §3.2 "truthful interim",
+ * E3) is reachable ONLY for `"CUSTOMER_EVIDENCE"`. `BLOCKED_UNSUPPORTED`
+ * says "a capability to act on this exists to build but isn't admitted
+ * yet" - false for `CUSTOMER_EVIDENCE`, since the raw material it names
+ * lives behind an external `sourceLocator` this repository never persists
+ * at all; there is nothing in AKILTA to block or unblock. The durable
+ * record that genuinely exists (`EvidenceReference`, carrying its own
+ * `customerId`) already has its own separate `"EVIDENCE_REFERENCE"` kind
+ * (inventory correction above), which correctly stays `BLOCKED_UNSUPPORTED`
+ * - this is a truth-surface refinement for `CUSTOMER_EVIDENCE` alone, not a
+ * retention/erasure policy decision, and must never be read as "deleted".
  */
-export type CustomerResourceDispositionStatus = "BLOCKED_UNSUPPORTED" | "EXPORTED";
+export type CustomerResourceDispositionStatus = "BLOCKED_UNSUPPORTED" | "EXPORTED" | "NO_AKILTA_DURABLE_RECORD";
 
 export interface CustomerResourceDisposition {
   readonly kind: CustomerScopedResourceKind;
@@ -171,21 +186,24 @@ export function startCustomerOffboardingExecution(input: {
 /**
  * Advances a `NOT_STARTED` execution to `COMPLETED`, producing one
  * `CustomerResourceDisposition` per entry in `ALL_CUSTOMER_SCOPED_
- * RESOURCE_KINDS`. Every kind is truthfully `"BLOCKED_UNSUPPORTED"`,
- * except `"PROJECT"` becomes `"EXPORTED"` when (and only when) the caller
- * supplies `projectExportEvidenceRef` - a non-empty evidence pointer
- * proving a real `exportCustomerProjectsSnapshot` (CUS-BACKUP-001) export
- * already happened elsewhere. This module never imports `project.ts`
- * itself (preserved boundary-scan discipline), so it cannot perform or
- * verify the export's content - it only records that the caller already
- * did, exactly as `evidenceRef` already works for the rest of this module.
+ * RESOURCE_KINDS`. Every kind is truthfully `"BLOCKED_UNSUPPORTED"`, except
+ * `"PROJECT"` becomes `"EXPORTED"` when (and only when) the caller supplies
+ * `projectExportEvidenceRef` - a non-empty evidence pointer proving a real
+ * `exportCustomerProjectsSnapshot` (CUS-BACKUP-001) export already happened
+ * elsewhere - and `"CUSTOMER_EVIDENCE"` is always `"NO_AKILTA_DURABLE_
+ * RECORD"` (E3 truthful interim, see that status literal's own doc comment
+ * above). This module never imports `project.ts` itself (preserved
+ * boundary-scan discipline), so it cannot perform or verify the export's
+ * content - it only records that the caller already did, exactly as
+ * `evidenceRef` already works for the rest of this module.
  *
  * Structural enforcement that `"EXPORTED"` is reachable for `"PROJECT"`
- * ONLY: the ternary below is the single call site in this file that can
- * ever produce the `"EXPORTED"` literal, and its condition is `kind ===
- * "PROJECT"` literally - no other kind's branch in this map can reach it,
- * regardless of what `projectExportEvidenceRef` is supplied. (Proven by
- * this checkpoint's own guard-disable sanity check - see the exec-plan.)
+ * ONLY, and `"NO_AKILTA_DURABLE_RECORD"` for `"CUSTOMER_EVIDENCE"` ONLY:
+ * the two literal `kind ===` conditions below are each the single call
+ * site in this file that can ever produce their respective status - no
+ * other kind's branch in this map can reach either, regardless of what
+ * `projectExportEvidenceRef` is supplied. (Proven by this checkpoint's own
+ * guard-disable sanity check - see the exec-plan.)
  *
  * Idempotent and restart-safe: calling this again on an already-
  * `COMPLETED` state is an exact no-op (the original state, including its
@@ -207,21 +225,32 @@ export function advanceCustomerOffboardingExecution(input: {
       ? undefined
       : requireNonEmptyString(input.projectExportEvidenceRef, "projectExportEvidenceRef");
   const resourceDispositions: ReadonlyArray<CustomerResourceDisposition> = ALL_CUSTOMER_SCOPED_RESOURCE_KINDS.map(
-    (kind) =>
-      kind === "PROJECT" && projectExportEvidenceRef !== undefined
-        ? {
-            kind,
-            status: "EXPORTED",
-            reason:
-              "a real, caller-supplied PROJECT export snapshot (exportCustomerProjectsSnapshot, CUS-BACKUP-001) was produced for this customer",
-            evidenceRef: projectExportEvidenceRef,
-          }
-        : {
-            kind,
-            status: "BLOCKED_UNSUPPORTED",
-            reason: `no delete/export/anonymization capability exists for ${kind} resources in this repository yet`,
-            evidenceRef,
-          },
+    (kind) => {
+      if (kind === "PROJECT" && projectExportEvidenceRef !== undefined) {
+        return {
+          kind,
+          status: "EXPORTED",
+          reason:
+            "a real, caller-supplied PROJECT export snapshot (exportCustomerProjectsSnapshot, CUS-BACKUP-001) was produced for this customer",
+          evidenceRef: projectExportEvidenceRef,
+        };
+      }
+      if (kind === "CUSTOMER_EVIDENCE") {
+        return {
+          kind,
+          status: "NO_AKILTA_DURABLE_RECORD",
+          reason:
+            "CUSTOMER_EVIDENCE names material behind an external sourceLocator that this repository never persists - there is no AKILTA durable record to block or unblock (the durable EvidenceReference is its own separate kind)",
+          evidenceRef,
+        };
+      }
+      return {
+        kind,
+        status: "BLOCKED_UNSUPPORTED",
+        reason: `no delete/export/anonymization capability exists for ${kind} resources in this repository yet`,
+        evidenceRef,
+      };
+    },
   );
   return {
     ...input.state,
