@@ -18,6 +18,7 @@ import { createDurableKnowledgeSource } from "../web/knowledge-durable-source.js
 import { createDurableAttentionSource } from "../web/attention-durable-source.js";
 import { createDurablePeopleDirectorySource } from "../web/people-directory-durable-source.js";
 import { createDurableCustomerOffboardingAdminSource } from "../web/customer-offboarding-admin-source.js";
+import { createDurableCustomerLifecycleReadinessSource } from "../web/customer-lifecycle-readiness-durable-source.js";
 import { createDurableOrganizationResourceBindingSource } from "../web/organization-resource-binding-durable-source.js";
 import { createDurableInternalOsOrganizationSource } from "../web/internal-os-organization-durable-source.js";
 import {
@@ -101,6 +102,13 @@ import type { StaffAccessGrant } from "../web/internal-os-access.js";
  *   `getProtectedDecisionRecord` reads the SAME store instance, so a
  *   decision just recorded is immediately reflected in that page's status
  *   column. See `internal-os-attention-decision-route.ts`.
+ * - **Customer lifecycle readiness (gap scan N1, read-only).** `/portal`'s
+ *   lifecycle-readiness section now reads the real
+ *   `FileDurableCustomerRepository` and
+ *   `FileDurableCustomerOffboardingRequestStore` instances already composed
+ *   for the offboarding-decision path, via
+ *   `createDurableCustomerLifecycleReadinessSource`. No new store, no new
+ *   mutation surface.
  * - **Break-glass support access (C7, read-only).** `GET /os/admin` with
  *   an `x-akilta-break-glass-grant-id` header reads a newly composed
  *   `FileDurableBreakGlassAccessGrantStore` and appends one record per
@@ -120,9 +128,8 @@ import type { StaffAccessGrant } from "../web/internal-os-access.js";
  * this repository, so they stay unwired and render their existing honest
  * "Unavailable"/`NOT_ACTIVE` states:
  *
- * - `teamAttentionSource`, `commercialStatusSource`,
- *   `billingReferenceStatusSource` and `lifecycleReadinessSource` (gap
- *   scan C9).
+ * - `teamAttentionSource`, `commercialStatusSource` and
+ *   `billingReferenceStatusSource` (gap scan C9).
  *
  * This wires real DATA sources, not real AUTHENTICATION. No identity
  * verifier and no staff-session-provider override is passed. In
@@ -271,6 +278,7 @@ export function createNodeRuntime(config: AppConfig, options: NodeRuntimeOptions
     isProduction,
     devSessionFixtures: options.devSessionFixtures ?? WEB_SHELL_DEV_SESSION_FIXTURES,
     snapshotSource,
+    lifecycleReadinessSource: createDurableCustomerLifecycleReadinessSource(stores.customerRepository, stores.customerOffboardingRequestStore),
     internalOsHandler,
     healthCheck: () => {
       const result = health(config, stores);
