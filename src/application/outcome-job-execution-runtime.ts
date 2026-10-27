@@ -684,9 +684,11 @@ export interface DispatchOutcomeJobExecutionResult {
    * successful admit (the key is then absent entirely, never `undefined`),
    * and never set by `dispatchOutcomeJobExecutionRun` at all (which never
    * computes a disposition: its only attempt is attempt 1, which the gate's
-   * own rule always admits).
+   * own rule always admits). Typed to the `BLOCKED` variant only, matching
+   * this - an `ADMIT` disposition is never stored here, so a caller never
+   * needs to narrow it back out.
    */
-  readonly containment?: RetryContainmentDisposition;
+  readonly containment?: Extract<RetryContainmentDisposition, { readonly outcome: "BLOCKED" }>;
 }
 
 /**
@@ -1016,7 +1018,10 @@ const RETRYABLE_ATTEMPT_STATUSES: ReadonlySet<string> = new Set([
  * with that recommendation. Omitting the policy leaves behavior exactly
  * unchanged. `dispatchOutcomeJobExecutionRun` is deliberately not wired: it
  * only ever starts attempt 1 of a run whose `currentAttempt` is 0, which the
- * gate always admits, so a call there would be a permanent no-op.
+ * gate always admits, so a call there would be a no-op on every reachable
+ * path - its own Rev177 F7 guard already stops the one case (a repeat
+ * dispatch after attempt 1 has started) where `currentAttempt` could be
+ * nonzero, before this gate would ever be reached anyway.
  */
 export async function retryOutcomeJobExecutionAttempt(
   input: ScopeInput &
