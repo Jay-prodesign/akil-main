@@ -2824,3 +2824,277 @@ test("QI-F14-recover-persist-then-throw (Rev180 F14, load-bearing): the economic
   assert.equal(invokeCount, 1, "the worker must never be invoked a second time for an attempt that already genuinely ran");
   assert.equal(economics.ledgerSnapshot().events.length, 1, "the recovery retry must recognize the already-durably-recorded event (differing only by capturedAt) as a safe no-op, never a second ledger entry");
 });
+
+// ---------------------------------------------------------------------------
+// OS-V1-07 follow-on (gap scan C6): `resolveRetryContainmentDisposition` wired
+// into `retryOutcomeJobExecutionAttempt` behind the optional
+// `retryContainmentPolicy` parameter. A BLOCKED disposition must return
+// before quota admission and before any ATTEMPT_STARTED is constructed, with
+// zero durable mutation and zero worker effect; an ADMIT (or an omitted
+// policy) must leave the retry path exactly as it was.
+// ---------------------------------------------------------------------------
+
+/**
+ * Mirrors `PersistThenThrowOnceQuotaAdmission`'s thin-wrapper style, but only
+ * counts calls - used to prove the containment gate runs strictly before
+ * quota admission is ever consulted.
+ */
+class CountingQuotaAdmission {
+  admitCalls = 0;
+  constructor(private readonly inner: InMemoryQuotaAdmissionStore) {}
+
+  admit(input: {
+    envelope: QuotaEnvelope;
+    identity: QuotaReservationIdentity;
+    idempotencyKey: unknown;
+    requestedAmount: { presence: unknown; amountMinorUnits?: unknown; currency?: unknown };
+    occurredAt: unknown;
+  }): QuotaAdmissionOutcome {
+    this.admitCalls += 1;
+    return this.inner.admit(input);
+  }
+
+  commit(input: {
+    identity: QuotaReservationIdentity;
+    idempotencyKey: unknown;
+    actualAmount: { presence: unknown; amountMinorUnits?: unknown; currency?: unknown };
+    occurredAt: unknown;
+  }): QuotaCommitOutcome {
+    return this.inner.commit(input);
+  }
+
+  release(input: {
+    identity: QuotaReservationIdentity;
+    idempotencyKey: unknown;
+    occurredAt: unknown;
+    reason?: unknown;
+  }): QuotaReleaseOutcome {
+    return this.inner.release(input);
+  }
+
+  peekSettlement(input: { identity: QuotaReservationIdentity; idempotencyKey: unknown }): QuotaSettlementPeek {
+    return this.inner.peekSettlement(input);
+  }
+}
+
+function countingInvoker(accepted: boolean): WorkerInvoker & { calls: number } {
+  const invoker = {
+    role: "CLAUDE_PRIMARY_ENGINEER" as const,
+    calls: 0,
+    async invoke() {
+      invoker.calls += 1;
+      return { accepted };
+    },
+  };
+  return invoker;
+}
+
+test("RC-W1 (OS-V1-07 follow-on, RETRY_STORM): a retry whose run is already at the policy's maxAttempts ceiling is BLOCKED before any effect - no ATTEMPT_STARTED, no quota admission, no worker invocation", async () => {
+  const job = freshJob("job-rc-w1");
+  const store = new InMemoryExecutionEventStore();
+  const runId = "run-rc-w1";
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId, correlationId: "corr-rc-w1", store, invoker: rejectingInvoker(),
+    quotaAdmission: new InMemoryQuotaAdmissionStore(),
+  });
+  assert.equal(dispatched.state.status, "FAILED");
+  assert.equal(dispatched.state.currentAttempt, 1);
+
+  const invoker = countingInvoker(true);
+  const retried = await retryOutcomeJobExecutionAttempt({
+    ...baseDispatch, job, authority, currentState: dispatched.state, store, invoker,
+    now: "2026-09-26T01:00:00.000Z",
+    quotaAdmission: new NeverCalledQuotaAdmission(),
+    retryContainmentPolicy: { maxAttempts: 1, minAttemptIntervalMs: 1_000, crashLoopWindowMs: 1_000, maxAttemptsWithinCrashLoopWindow: 10 },
+  });
+
+  assert.equal(retried.invoked, false);
+  assert.deepEqual(retried.containment, {
+    outcome: "BLOCKED",
+    classification: "RETRY_STORM",
+    reason: "run has already accumulated 1 attempt(s); the next attempt (2) would exceed the absolute cap of 1",
+  });
+  assert.equal("invocationOutcome" in retried, false);
+  assert.equal(invoker.calls, 0, "the worker must never be invoked for a contained retry");
+  assert.equal(retried.state.currentAttempt, 1);
+  const reread = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, runId);
+  assert.equal(reread?.currentAttempt, 1, "no ATTEMPT_STARTED for attempt 2 may ever be durably appended");
+  assert.equal(reread?.status, "FAILED", "the run's durable status is untouched");
+  assert.equal(reread, dispatched.state, "the durable run state is exactly the pre-retry state - nothing was appended");
+});
+
+test("RC-W2 (OS-V1-07 follow-on, CRASH_LOOP too fast): a retry within minAttemptIntervalMs of the current attempt's startedAt is BLOCKED before any effect", async () => {
+  const job = freshJob("job-rc-w2");
+  const store = new InMemoryExecutionEventStore();
+  const runId = "run-rc-w2";
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId, correlationId: "corr-rc-w2", store, invoker: rejectingInvoker(),
+    quotaAdmission: new InMemoryQuotaAdmissionStore(),
+  });
+  assert.equal(dispatched.state.status, "FAILED");
+
+  const invoker = countingInvoker(true);
+  const retried = await retryOutcomeJobExecutionAttempt({
+    ...baseDispatch, job, authority, currentState: dispatched.state, store, invoker,
+    // 500ms after attempt 1 started (baseDispatch.now), below the 60s floor.
+    now: "2026-09-26T00:00:00.500Z",
+    quotaAdmission: new NeverCalledQuotaAdmission(),
+    retryContainmentPolicy: { maxAttempts: 10, minAttemptIntervalMs: 60_000, crashLoopWindowMs: 1_000, maxAttemptsWithinCrashLoopWindow: 10 },
+  });
+
+  assert.equal(retried.invoked, false);
+  assert.deepEqual(retried.containment, {
+    outcome: "BLOCKED",
+    classification: "CRASH_LOOP",
+    reason: "only 500ms elapsed since attempt 1 started, below the minimum inter-attempt interval of 60000ms",
+  });
+  assert.equal(invoker.calls, 0);
+  const reread = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, runId);
+  assert.equal(reread?.currentAttempt, 1, "no ATTEMPT_STARTED for attempt 2 may ever be durably appended");
+  assert.equal(reread, dispatched.state);
+});
+
+test("RC-W3 (OS-V1-07 follow-on, CRASH_LOOP too dense): once enough prior attempts started within crashLoopWindowMs, the next retry is BLOCKED before any effect even though no single gap was too short", async () => {
+  const job = freshJob("job-rc-w3");
+  const store = new InMemoryExecutionEventStore();
+  const runId = "run-rc-w3";
+  const quota = new InMemoryQuotaAdmissionStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId, correlationId: "corr-rc-w3", store, invoker: rejectingInvoker(), quotaAdmission: quota,
+  });
+  // Attempts 2 and 3 run (and fail) through the unchanged, policy-less path,
+  // 10s apart - building a dense-but-not-instantaneous crash loop.
+  const second = await retryOutcomeJobExecutionAttempt({
+    ...baseDispatch, job, authority, currentState: dispatched.state, store, invoker: rejectingInvoker(), quotaAdmission: quota,
+    now: "2026-09-26T00:00:10.000Z",
+  });
+  assert.equal(second.state.currentAttempt, 2);
+  assert.equal(second.state.status, "FAILED");
+  const third = await retryOutcomeJobExecutionAttempt({
+    ...baseDispatch, job, authority, currentState: second.state, store, invoker: rejectingInvoker(), quotaAdmission: quota,
+    now: "2026-09-26T00:00:20.000Z",
+  });
+  assert.equal(third.state.currentAttempt, 3);
+  assert.equal(third.state.status, "FAILED");
+
+  const invoker = countingInvoker(true);
+  const retried = await retryOutcomeJobExecutionAttempt({
+    ...baseDispatch, job, authority, currentState: third.state, store, invoker,
+    // 10s after attempt 3 (above the 5s interval floor), but all 3 attempts
+    // fall within the 60s window, hitting the density threshold of 3.
+    now: "2026-09-26T00:00:30.000Z",
+    quotaAdmission: new NeverCalledQuotaAdmission(),
+    retryContainmentPolicy: { maxAttempts: 10, minAttemptIntervalMs: 5_000, crashLoopWindowMs: 60_000, maxAttemptsWithinCrashLoopWindow: 3 },
+  });
+
+  assert.equal(retried.invoked, false);
+  assert.deepEqual(retried.containment, {
+    outcome: "BLOCKED",
+    classification: "CRASH_LOOP",
+    reason: "3 attempt(s) already started within the last 60000ms, at or above the crash-loop density threshold of 3",
+  });
+  assert.equal(invoker.calls, 0);
+  const reread = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, runId);
+  assert.equal(reread?.currentAttempt, 3, "no ATTEMPT_STARTED for attempt 4 may ever be durably appended");
+  assert.equal(reread, third.state);
+});
+
+test("RC-W4 (OS-V1-07 follow-on, ADMIT): a supplied policy the run satisfies lets the retry proceed exactly as with no policy - worker invoked, ATTEMPT_STARTED appended, and no containment key on the result", async () => {
+  const job = freshJob("job-rc-w4");
+  const store = new InMemoryExecutionEventStore();
+  const runId = "run-rc-w4";
+  const quota = new CountingQuotaAdmission(new InMemoryQuotaAdmissionStore());
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId, correlationId: "corr-rc-w4", store, invoker: rejectingInvoker(), quotaAdmission: quota,
+  });
+  assert.equal(dispatched.state.status, "FAILED");
+  assert.equal(quota.admitCalls, 1);
+
+  const invoker = countingInvoker(true);
+  const retried = await retryOutcomeJobExecutionAttempt({
+    ...baseDispatch, job, authority, currentState: dispatched.state, store, invoker, quotaAdmission: quota,
+    now: "2026-09-26T01:00:00.000Z",
+    retryContainmentPolicy: { maxAttempts: 10, minAttemptIntervalMs: 1_000, crashLoopWindowMs: 1_000, maxAttemptsWithinCrashLoopWindow: 10 },
+  });
+
+  assert.equal(retried.invoked, true);
+  assert.equal("containment" in retried, false, "an admitted retry must not carry a containment key at all");
+  assert.equal(retried.containment, undefined);
+  assert.equal(retried.invocationOutcome?.status, "ACCEPTED");
+  assert.equal(invoker.calls, 1);
+  assert.equal(quota.admitCalls, 2, "an admitted retry still goes through quota admission exactly as before");
+  assert.equal(retried.state.currentAttempt, 2);
+  assert.equal(retried.state.status, "RUNNING");
+  const reread = store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, runId);
+  assert.equal(reread?.currentAttempt, 2, "ATTEMPT_STARTED for attempt 2 must be durably appended");
+});
+
+test("RC-W5 (OS-V1-07 follow-on, backward compatibility): omitting retryContainmentPolicy applies no containment gate at all - a retry a policy would contain as a crash loop still proceeds exactly as before", async () => {
+  const job = freshJob("job-rc-w5");
+  const store = new InMemoryExecutionEventStore();
+  const quota = new InMemoryQuotaAdmissionStore();
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, job, authority, runId: "run-rc-w5", correlationId: "corr-rc-w5", store, invoker: rejectingInvoker(),
+    quotaAdmission: quota,
+  });
+  // Same instant as attempt 1 (any interval policy would call this a crash
+  // loop) - with no policy supplied, nothing contains it.
+  const invoker = countingInvoker(true);
+  const retried = await retryOutcomeJobExecutionAttempt({
+    ...baseDispatch, job, authority, currentState: dispatched.state, store, invoker, quotaAdmission: quota,
+  });
+  assert.equal(retried.invoked, true);
+  assert.equal("containment" in retried, false);
+  assert.equal(invoker.calls, 1);
+  assert.equal(retried.state.currentAttempt, 2);
+});
+
+test("RC-W6 (OS-V1-07 follow-on, ordering): when containment would block AND quota would separately reject, containment wins first and quota admission is never consulted", async () => {
+  const job = freshJob("job-rc-w6");
+  const store = new InMemoryExecutionEventStore();
+  const runId = "run-rc-w6";
+  const { store: innerQuota, envelope: smallEnvelope, resolver: smallEnvelopeResolver } = smallLimitQuota(100);
+  const quota = new CountingQuotaAdmission(innerQuota);
+  const quotaOverrides = {
+    quotaAdmission: quota, quotaEnvelope: smallEnvelope, quotaEnvelopeResolver: smallEnvelopeResolver,
+    estimatedCost: { presence: "REPORTED", amountMinorUnits: 100, currency: "USD" },
+  };
+  // Attempt 1 consumes the entire allowance and fails (retryable) - exactly
+  // QI2's setup, so a retry's own quota admission would be REJECTED.
+  const dispatched = await dispatchOutcomeJobExecutionRun({
+    ...baseDispatch, ...quotaOverrides, job, authority, runId, correlationId: "corr-rc-w6", store, invoker: rejectingInvoker(),
+  });
+  assert.equal(dispatched.state.status, "FAILED");
+  assert.equal(quota.admitCalls, 1);
+
+  const invoker = countingInvoker(true);
+  const contained = await retryOutcomeJobExecutionAttempt({
+    ...baseDispatch, ...quotaOverrides, job, authority, currentState: dispatched.state, store, invoker,
+    now: "2026-09-26T01:00:00.000Z",
+    retryContainmentPolicy: { maxAttempts: 1, minAttemptIntervalMs: 1_000, crashLoopWindowMs: 1_000, maxAttemptsWithinCrashLoopWindow: 10 },
+  });
+  assert.equal(contained.invoked, false);
+  assert.equal(contained.containment?.outcome, "BLOCKED");
+  assert.equal(contained.containment?.outcome === "BLOCKED" ? contained.containment.classification : undefined, "RETRY_STORM");
+  assert.equal(quota.admitCalls, 1, "quota admission must never be consulted for a contained retry");
+  const attempt2QuotaEvents = innerQuota.ledgerSnapshot().events.filter(
+    (e) => e.identity.jobId === job.jobId && e.identity.runId === runId && e.identity.attemptRef === "2",
+  );
+  assert.deepEqual(attempt2QuotaEvents, [], "no quota event of any kind may exist for the contained attempt 2");
+
+  // Control: the identical retry without a policy reaches quota admission and
+  // is REJECTED there - proving quota really would have rejected separately.
+  const uncontained = await retryOutcomeJobExecutionAttempt({
+    ...baseDispatch, ...quotaOverrides, job, authority, currentState: dispatched.state, store, invoker,
+    now: "2026-09-26T01:00:00.000Z",
+  });
+  assert.equal(uncontained.invoked, false);
+  assert.equal("containment" in uncontained, false);
+  assert.equal(quota.admitCalls, 2);
+  const rejected = innerQuota.ledgerSnapshot().events.find(
+    (e) => e.identity.jobId === job.jobId && e.identity.runId === runId && e.identity.attemptRef === "2",
+  );
+  assert.equal(rejected?.type, "REJECTED");
+  assert.equal(invoker.calls, 0);
+  assert.equal(store.getState(tenantScope.tenantId, customer.customerId, project.projectId, job.jobId, runId)?.currentAttempt, 1);
+});
