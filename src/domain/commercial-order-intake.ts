@@ -34,6 +34,20 @@ export class InvalidCommercialOrderIntakeError extends Error {
  * `NOT_ADMITTED` (declared-resolvable, no backing admission) and
  * `UNRESOLVED_SERVICE` both fail closed.
  *
+ * `TrustedServiceResolution` is a plain structural type, not a branded or
+ * otherwise unforgeable one - a caller could hand-build a `RESOLVED` value
+ * wrapping an `admission` whose own `status` is no longer `"ADMITTED"` (for
+ * example, one already revoked via `revokeServiceCatalogAdmission` since it
+ * was first resolved, or simply never genuinely admitted at all). This
+ * function therefore re-checks `admission.status === "ADMITTED"` itself,
+ * exactly mirroring `bindAdmittedRecipeToPlan`
+ * (`delivery-recipe-plan-binding.ts`) and
+ * `admitManualExecutionAllowedFromServiceCatalogAdmission`
+ * (`outcome-job-routing-execution.ts`) - this repository's own established
+ * convention that every consumer of a `ServiceCatalogAdmission` re-proves
+ * its current status itself, never trusting that a `RESOLVED` disposition
+ * computed earlier is still true now.
+ *
  * The supplied `blueprint`'s identity/version must then exactly match the
  * admission's own `blueprintId`/`blueprintVersion` (same "exact-version
  * validation" discipline already established by the Rev62 batch1
@@ -57,6 +71,11 @@ export function intakeSoldScopeFromResolution(input: {
     );
   }
   const { admission } = input.resolution;
+  if (admission.status !== "ADMITTED") {
+    throw new InvalidCommercialOrderIntakeError(
+      `the resolution's own ServiceCatalogAdmission for serviceRef "${admission.serviceRef}" is no longer ADMITTED (status "${admission.status}") - a RESOLVED TrustedServiceResolution is not itself a live guarantee once the underlying admission has since been revoked`,
+    );
+  }
   if (input.blueprint.blueprintId !== admission.blueprintId) {
     throw new InvalidCommercialOrderIntakeError(
       `blueprint "${input.blueprint.blueprintId}" does not match the admitted service resolution's blueprintId "${admission.blueprintId}"`,

@@ -11,6 +11,7 @@ import {
 import type { ServiceCatalogEntry } from "../src/domain/commercial-order.js";
 import {
   admitServiceCatalogEntry,
+  revokeServiceCatalogAdmission,
   type TrustedServiceResolution,
 } from "../src/domain/service-catalog-admission.js";
 import type { AdmittedWorker } from "../src/domain/worker-routing-policy.js";
@@ -129,6 +130,37 @@ test("rejects intake for a NOT_ADMITTED resolution (declared-resolvable service 
         tenantScope,
         project,
         resolution: notAdmitted,
+        blueprint: WEBSITE_BUILD_V1_BLUEPRINT,
+        soldScopeId: "scope-1",
+        outcomeContractRef: "contract-1",
+      }),
+    InvalidCommercialOrderIntakeError,
+  );
+});
+
+test("rejects intake for a RESOLVED resolution whose own admission has since been revoked - a RESOLVED disposition computed earlier is never itself a live guarantee", () => {
+  // TrustedServiceResolution is a plain structural type, not branded: a
+  // caller can hand-build a RESOLVED value wrapping an admission whose own
+  // status has moved on since the resolution was computed. Proves C8's
+  // real gap - not just that the type system now requires a
+  // TrustedServiceResolution shape, but that intake re-checks the
+  // admission's own CURRENT status, exactly like every other consumer of
+  // a ServiceCatalogAdmission in this repository.
+  const revoked = revokeServiceCatalogAdmission({
+    admission,
+    revokedAt: "2026-01-02T00:00:00.000Z",
+    reason: "catalog entry withdrawn",
+  });
+  const resolvedWithRevokedAdmission: TrustedServiceResolution = {
+    status: "RESOLVED",
+    admission: revoked,
+  };
+  assert.throws(
+    () =>
+      intakeSoldScopeFromResolution({
+        tenantScope,
+        project,
+        resolution: resolvedWithRevokedAdmission,
         blueprint: WEBSITE_BUILD_V1_BLUEPRINT,
         soldScopeId: "scope-1",
         outcomeContractRef: "contract-1",
