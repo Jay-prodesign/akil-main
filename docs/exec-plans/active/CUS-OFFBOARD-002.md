@@ -29,7 +29,7 @@
 ## Architecture / semantic invariants (verified by test)
 
 - Execution can never start from a request that hasn't passed through `CUS-OFFBOARD-001`'s own `completeCustomerOffboarding` decision gate (E2–E3).
-- Every resource disposition this checkpoint can produce is the single truthful `BLOCKED_UNSUPPORTED` literal — never a fabricated delete/export success (E4).
+- Every resource disposition this checkpoint can produce is a truthful literal (`BLOCKED_UNSUPPORTED` by default, `EXPORTED` for `PROJECT` only when real export evidence is supplied, `NO_AKILTA_DURABLE_RECORD` for `CUSTOMER_EVIDENCE` only) — never a fabricated delete/export success (E4, E11/E12).
 - A completed execution's disposition set and evidence trail are immutable under replay — advancing twice can never silently replace or duplicate the original evidence (E5).
 - Both guards independently confirmed load-bearing via guard-disable sanity, then restored.
 
@@ -68,6 +68,12 @@ Full regression after this correction: **3109/3109 passing** (3098 pre-existing 
 
 Not implemented (remains the real owner gate, §5 D1–D6 of the decision packet, untouched): any `delete`/`purge`/`anonymize` write path, any retention timer/period, any read-gate behavior change beyond the two additive, backward-compatible parameters above, and any external connector deletion effect.
 
+## E3 — truthful interim status for CUSTOMER_EVIDENCE (fresh gap-scan N3, 2026-10-27)
+
+The decision packet's §3.2 "truthful interim" option, left optional/undone when E1/E2/E4 landed: `CustomerResourceDispositionStatus` widened with `"NO_AKILTA_DURABLE_RECORD"`, reachable structurally ONLY for `"CUSTOMER_EVIDENCE"` (mirroring E2's own `kind ===` single-branch enforcement for `"EXPORTED"`/`"PROJECT"`). `BLOCKED_UNSUPPORTED` was never an honest description of `CUSTOMER_EVIDENCE`'s own state — it implies a capability exists to build but isn't admitted yet, but the raw material `CUSTOMER_EVIDENCE` names lives entirely behind an external `sourceLocator` this repository never persists; there is nothing in AKILTA to block or unblock. The durable record that genuinely exists (`EvidenceReference`, carrying its own `customerId`) keeps its own separate `EVIDENCE_REFERENCE` kind (added by E1) and correctly stays `BLOCKED_UNSUPPORTED`. This is a truth-surface refinement only, not a retention/erasure policy decision — it must never be read as "deleted". 2 new tests (E11/E12 in `customer-offboarding-execution.test.ts`); 1 pre-existing test (`v2-floor-int-002-full-lifecycle.test.ts`'s `FULL1`) updated for the corrected per-kind status, not a behavior change beyond the one kind this task targets.
+
+Full regression after this correction: **3516/3516 passing** (3514 pre-existing + 2 new), clean strict typecheck, zero new runtime dependency.
+
 ## Status
 
-**IMPLEMENTED / SELF-VALIDATED (corrected, E1/E2/E4)** — pending Brain/Founder independent review per `AGENTS.md` §10; Claude's authority ends at this status. `MERGE_DISPOSITION: HOLD_MERGE` — stacked on PR #149's range; merge requires PR #149 merged first, plus its own separately-granted protected owner-gate, never inferred from any other PR's grant. Risk classification: LOW, pure/dark-internal — no live platform install/config, credentials, payment, actual data deletion, or MAIN mutation. Per Brain's own reconciliation, V2 is not treated as exhausted by this checkpoint's completion — the next action is a fresh current-main + canonical-blueprint dependency scan (see CURRENT_STATE.md), not a stop.
+**IMPLEMENTED / SELF-VALIDATED (corrected, E1/E2/E3/E4)** — pending Brain/Founder independent review per `AGENTS.md` §10; Claude's authority ends at this status. `MERGE_DISPOSITION: HOLD_MERGE` — stacked on PR #149's range; merge requires PR #149 merged first, plus its own separately-granted protected owner-gate, never inferred from any other PR's grant. Risk classification: LOW, pure/dark-internal — no live platform install/config, credentials, payment, actual data deletion, or MAIN mutation. Per Brain's own reconciliation, V2 is not treated as exhausted by this checkpoint's completion — the next action is a fresh current-main + canonical-blueprint dependency scan (see CURRENT_STATE.md), not a stop.

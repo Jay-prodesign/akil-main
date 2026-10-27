@@ -241,7 +241,10 @@ test("FULL1: an admitted Organization's own Customer can be subscribed/entitled,
   assert.equal(executionDone.status, "COMPLETED");
   assert.equal(executionDone.resourceDispositions.length, 9);
   for (const disposition of executionDone.resourceDispositions) {
-    assert.equal(disposition.status, "BLOCKED_UNSUPPORTED");
+    assert.equal(
+      disposition.status,
+      disposition.kind === "CUSTOMER_EVIDENCE" ? "NO_AKILTA_DURABLE_RECORD" : "BLOCKED_UNSUPPORTED",
+    );
   }
 });
 

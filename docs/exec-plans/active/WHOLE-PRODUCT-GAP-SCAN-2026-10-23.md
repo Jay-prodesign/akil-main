@@ -4,7 +4,7 @@ Status: RESEARCH / NON_SELECTOR. This document only proposes candidates. It chan
 
 ## Scope and exclusions
 
-Excluded on purpose, because they are already known and exhausted: `CUS-OFFBOARD-002` (decision packet D1-D6), `currentWorkerRouteDecisions` / worker-admission authority (another agent has this), and `LOCAL-EXEC-007` safe-switch preflight.
+Excluded on purpose, because they are already known and exhausted: `CUS-OFFBOARD-002` (decision packet D1-D6; its own small non-D-class remainder, E3's truthful-interim status for `CUSTOMER_EVIDENCE`, was found dependency-safe and merged 2026-10-27 — see `CUS-OFFBOARD-002.md`'s own "E3" section), `currentWorkerRouteDecisions` / worker-admission authority (recorded as **D15** after the 2026-10-27 re-triage — see D-class table below), and `LOCAL-EXEC-007` safe-switch preflight.
 
 ## Canonical sources read (Drive `modifiedTime` checked first)
 
