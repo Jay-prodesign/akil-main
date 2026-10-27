@@ -1,6 +1,5 @@
 import { createProjectOwnershipRef, type ProjectOwnershipRef } from "../domain/project-ownership.js";
-import { admitServiceCatalogEntry, type ServiceCatalogAdmission } from "../domain/service-catalog-admission.js";
-import type { AdmittedWorker } from "../domain/worker-routing-policy.js";
+import type { ServiceCatalogAdmission } from "../domain/service-catalog-admission.js";
 import { deriveOutcomeJobSpecs, type OutcomeJobSpec } from "../domain/outcome-job-spec.js";
 import { bindAdmittedRecipeToPlan, type DeliveryRecipePlanBinding } from "../domain/delivery-recipe-plan-binding.js";
 import type { OutcomeJob } from "../domain/outcome-job.js";
@@ -26,7 +25,7 @@ import {
 import { createCapabilityAdmission, type CapabilityAdmission } from "../domain/capability-admission.js";
 import {
   buildWebsiteBuildV1ColdStartFixture,
-  WEBSITE_BUILD_V1_SERVICE_CATALOG,
+  WEBSITE_BUILD_V1_SERVICE_CATALOG_ADMISSION,
 } from "./website-build-v1-commercial-order.js";
 import { WEBSITE_BUILD_V1_BLUEPRINT } from "./website-build-v1.js";
 import { WEBSITE_BUILD_V1_RECIPE } from "./website-build-v1-recipe.js";
@@ -50,42 +49,21 @@ export const WEBSITE_BUILD_V1_RECIPE_BINDING_OWNERSHIP: ProjectOwnershipRef = cr
   projectId: coldStart.project.projectId,
 });
 
-function elevatedWorker(): AdmittedWorker {
-  return {
-    workerId: "authority-website-build-v1-recipe-binding",
-    declaredCapabilityRefs: [],
-    declaredToolRefs: [],
-    declaredPolicyConstraintRefs: [],
-    trustStatus: "ADMITTED",
-    availability: "AVAILABLE",
-    maxRiskLevel: "STANDARD",
-    authorityLevel: "ELEVATED",
-    costWeight: 0,
-    evaluationEvidenceRef: "evidence:website-build-v1-recipe-binding-worker-eval",
-  };
-}
-
-const catalogEntry = WEBSITE_BUILD_V1_SERVICE_CATALOG.find(
-  (entry) => entry.serviceRef === "service:website-build",
-);
-if (catalogEntry === undefined) {
-  throw new Error("expected WEBSITE_BUILD_V1_SERVICE_CATALOG to contain a service:website-build entry");
-}
-
-export const WEBSITE_BUILD_V1_RECIPE_ADMISSION: ServiceCatalogAdmission = admitServiceCatalogEntry({
-  catalogEntry,
-  recipe: WEBSITE_BUILD_V1_RECIPE,
-  authorizingWorker: elevatedWorker(),
-  evidenceRef: "evidence:website-build-v1-recipe-binding-catalog-review",
-  admittedAt: "2026-09-09T00:00:00.000Z",
-});
+/**
+ * C8: the service-catalog admission is now built once, upstream, in
+ * `website-build-v1-commercial-order.ts` (so the Cold-Start fixture's own
+ * intake is bound to a real admission-checked `TrustedServiceResolution`).
+ * This name is kept as an alias of that same admission because
+ * `tests/cxp-001a-composed-lifecycle.test.ts` imports it directly.
+ */
+export const WEBSITE_BUILD_V1_RECIPE_ADMISSION: ServiceCatalogAdmission = WEBSITE_BUILD_V1_SERVICE_CATALOG_ADMISSION;
 
 export const WEBSITE_BUILD_V1_RECIPE_BINDING_SPECS: ReadonlyArray<OutcomeJobSpec> = deriveOutcomeJobSpecs(
   coldStart.plan,
 );
 
 export const WEBSITE_BUILD_V1_RECIPE_PLAN_BINDING: DeliveryRecipePlanBinding = bindAdmittedRecipeToPlan({
-  admission: WEBSITE_BUILD_V1_RECIPE_ADMISSION,
+  admission: WEBSITE_BUILD_V1_SERVICE_CATALOG_ADMISSION,
   recipe: WEBSITE_BUILD_V1_RECIPE,
   plan: coldStart.plan,
   specs: WEBSITE_BUILD_V1_RECIPE_BINDING_SPECS,

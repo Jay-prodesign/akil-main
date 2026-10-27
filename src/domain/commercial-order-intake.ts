@@ -2,7 +2,7 @@ import type { TenantScope } from "./tenant-scope.js";
 import type { Project } from "./project.js";
 import type { OfferBlueprintVersion } from "./offer-blueprint.js";
 import { createSoldScope, type SoldScope } from "./sold-scope.js";
-import type { DeclaredServiceLookupResult } from "./commercial-order.js";
+import type { TrustedServiceResolution } from "./service-catalog-admission.js";
 
 export class InvalidCommercialOrderIntakeError extends Error {
   constructor(reason: string) {
@@ -17,19 +17,48 @@ export class InvalidCommercialOrderIntakeError extends Error {
  * order-driven intake compiler." Nothing previously bound a resolved
  * `CommercialOrder` to the `SoldScope` built from it - a caller could
  * construct a `SoldScope` against any blueprint regardless of what the
- * order actually resolved to (`resolveDeclaredServiceFromOrder`,
- * `commercial-order.ts`). This function is that missing binding: it fails
- * closed unless the supplied `blueprint`'s identity/version exactly
- * matches the order's own resolution (same "exact-version validation"
- * discipline already established by the Rev62 batch1 blueprint-binding
- * correction), then delegates entirely to the already-verified
- * `createSoldScope` - no sold-scope construction/validation logic is
- * duplicated here.
+ * order actually resolved to. This function is that missing binding.
+ *
+ * C8 (whole-product gap scan; AUD-V5-GAP-02 "trusted service-resolution
+ * provenance ... explicitly OPEN"; the follow-up composition SVC-ADM-001
+ * names): this boundary previously accepted the raw, caller-self-declared
+ * `DeclaredServiceLookupResult` (`resolveDeclaredServiceFromOrder`,
+ * `commercial-order.ts`), which proves only that the caller's own supplied
+ * catalog declares one matching entry - a sold scope could therefore be
+ * intaken for a service that was merely declared-resolvable, with no
+ * `ServiceCatalogAdmission` backing it at all. It now requires the
+ * admission-catalog-checked `TrustedServiceResolution` produced by
+ * `resolveTrustedServiceForOrder` (`service-catalog-admission.ts`): only a
+ * `RESOLVED` variant - which by construction carries the one matching,
+ * currently-`ADMITTED` `ServiceCatalogAdmission` - may be intaken.
+ * `NOT_ADMITTED` (declared-resolvable, no backing admission) and
+ * `UNRESOLVED_SERVICE` both fail closed.
+ *
+ * `TrustedServiceResolution` is a plain structural type, not a branded or
+ * otherwise unforgeable one - a caller could hand-build a `RESOLVED` value
+ * wrapping an `admission` whose own `status` is no longer `"ADMITTED"` (for
+ * example, one already revoked via `revokeServiceCatalogAdmission` since it
+ * was first resolved, or simply never genuinely admitted at all). This
+ * function therefore re-checks `admission.status === "ADMITTED"` itself,
+ * exactly mirroring `bindAdmittedRecipeToPlan`
+ * (`delivery-recipe-plan-binding.ts`) and
+ * `admitManualExecutionAllowedFromServiceCatalogAdmission`
+ * (`outcome-job-routing-execution.ts`) - this repository's own established
+ * convention that every consumer of a `ServiceCatalogAdmission` re-proves
+ * its current status itself, never trusting that a `RESOLVED` disposition
+ * computed earlier is still true now.
+ *
+ * The supplied `blueprint`'s identity/version must then exactly match the
+ * admission's own `blueprintId`/`blueprintVersion` (same "exact-version
+ * validation" discipline already established by the Rev62 batch1
+ * blueprint-binding correction), after which this delegates entirely to
+ * the already-verified `createSoldScope` - no sold-scope
+ * construction/validation logic is duplicated here.
  */
 export function intakeSoldScopeFromResolution(input: {
   tenantScope: TenantScope;
   project: Project;
-  resolution: DeclaredServiceLookupResult;
+  resolution: TrustedServiceResolution;
   blueprint: OfferBlueprintVersion;
   soldScopeId: unknown;
   outcomeContractRef: unknown;
@@ -38,17 +67,23 @@ export function intakeSoldScopeFromResolution(input: {
 }): SoldScope {
   if (input.resolution.status !== "RESOLVED") {
     throw new InvalidCommercialOrderIntakeError(
-      "cannot intake a commercial order whose service resolution is not RESOLVED",
+      `cannot intake a commercial order whose service resolution is not a trust-admitted RESOLVED TrustedServiceResolution (got "${input.resolution.status}") - a declared-resolvable service with no currently-ADMITTED ServiceCatalogAdmission backing it is never intake-eligible`,
     );
   }
-  if (input.blueprint.blueprintId !== input.resolution.blueprintId) {
+  const { admission } = input.resolution;
+  if (admission.status !== "ADMITTED") {
     throw new InvalidCommercialOrderIntakeError(
-      `blueprint "${input.blueprint.blueprintId}" does not match the order's resolved blueprintId "${input.resolution.blueprintId}"`,
+      `the resolution's own ServiceCatalogAdmission for serviceRef "${admission.serviceRef}" is no longer ADMITTED (status "${admission.status}") - a RESOLVED TrustedServiceResolution is not itself a live guarantee once the underlying admission has since been revoked`,
     );
   }
-  if (input.blueprint.version !== input.resolution.blueprintVersion) {
+  if (input.blueprint.blueprintId !== admission.blueprintId) {
     throw new InvalidCommercialOrderIntakeError(
-      `blueprint version "${input.blueprint.version}" does not match the order's resolved blueprintVersion "${input.resolution.blueprintVersion}"`,
+      `blueprint "${input.blueprint.blueprintId}" does not match the admitted service resolution's blueprintId "${admission.blueprintId}"`,
+    );
+  }
+  if (input.blueprint.version !== admission.blueprintVersion) {
+    throw new InvalidCommercialOrderIntakeError(
+      `blueprint version "${input.blueprint.version}" does not match the admitted service resolution's blueprintVersion "${admission.blueprintVersion}"`,
     );
   }
   return createSoldScope({
