@@ -13,6 +13,13 @@ import {
   type DeclaredServiceLookupResult,
 } from "../domain/commercial-order.js";
 import { intakeSoldScopeFromResolution } from "../domain/commercial-order-intake.js";
+import {
+  admitServiceCatalogEntry,
+  resolveTrustedServiceForOrder,
+  type ServiceCatalogAdmission,
+  type TrustedServiceResolution,
+} from "../domain/service-catalog-admission.js";
+import type { AdmittedWorker } from "../domain/worker-routing-policy.js";
 import { WEBSITE_BUILD_V1_BLUEPRINT } from "./website-build-v1.js";
 import { WEBSITE_BUILD_V1_RECIPE } from "./website-build-v1-recipe.js";
 
@@ -30,6 +37,47 @@ export const WEBSITE_BUILD_V1_SERVICE_CATALOG: ReadonlyArray<ServiceCatalogEntry
     executionRoutingPolicy: "MANUAL_EXECUTION_ALLOWED",
   },
 ];
+
+function elevatedCatalogAuthorityWorker(): AdmittedWorker {
+  return {
+    workerId: "authority-website-build-v1-service-catalog",
+    declaredCapabilityRefs: [],
+    declaredToolRefs: [],
+    declaredPolicyConstraintRefs: [],
+    trustStatus: "ADMITTED",
+    availability: "AVAILABLE",
+    maxRiskLevel: "STANDARD",
+    authorityLevel: "ELEVATED",
+    costWeight: 0,
+    evaluationEvidenceRef: "evidence:website-build-v1-service-catalog-worker-eval",
+  };
+}
+
+const websiteBuildCatalogEntry = WEBSITE_BUILD_V1_SERVICE_CATALOG.find(
+  (entry) => entry.serviceRef === "service:website-build",
+);
+if (websiteBuildCatalogEntry === undefined) {
+  throw new Error("expected WEBSITE_BUILD_V1_SERVICE_CATALOG to contain a service:website-build entry");
+}
+
+/**
+ * C8 (AUD-V5-GAP-02 trusted service-resolution provenance): the one
+ * canonical `ServiceCatalogAdmission` for this fixture family, built via
+ * the real `admitServiceCatalogEntry` gate against
+ * `WEBSITE_BUILD_V1_SERVICE_CATALOG`'s single entry. It lives here - the
+ * earliest point in the fixture dependency chain - so the Cold-Start
+ * fixture's own intake can be bound to a real admission-checked
+ * `TrustedServiceResolution`, and downstream fixtures
+ * (`website-build-v1-recipe-binding.ts`) reuse this same admission rather
+ * than constructing a second one.
+ */
+export const WEBSITE_BUILD_V1_SERVICE_CATALOG_ADMISSION: ServiceCatalogAdmission = admitServiceCatalogEntry({
+  catalogEntry: websiteBuildCatalogEntry,
+  recipe: WEBSITE_BUILD_V1_RECIPE,
+  authorizingWorker: elevatedCatalogAuthorityWorker(),
+  evidenceRef: "evidence:website-build-v1-service-catalog-admission",
+  admittedAt: "2026-09-09T00:00:00.000Z",
+});
 
 export interface WebsiteBuildV1CommercialOrderFixture {
   readonly tenantScope: TenantScope;
@@ -70,7 +118,7 @@ export interface WebsiteBuildV1ColdStartFixture {
   readonly tenantScope: TenantScope;
   readonly customer: Customer;
   readonly order: CommercialOrder;
-  readonly resolution: DeclaredServiceLookupResult;
+  readonly resolution: TrustedServiceResolution;
   readonly project: Project;
   readonly soldScope: SoldScope;
   readonly plan: ProjectPlanVersion;
@@ -79,7 +127,8 @@ export interface WebsiteBuildV1ColdStartFixture {
 
 /**
  * The full Rev62 AUD-V5-GAP-02 Cold-Start chain proven end to end from one
- * zero-history order: order -> canonical service resolution -> intake
+ * zero-history order: order -> declared service resolution -> trusted
+ * (catalog-admission-checked) service resolution -> intake
  * (order-driven `SoldScope` compilation, fail-closed bound to the resolved
  * blueprint identity) -> plan compilation -> structural completeness
  * ("Brief Completeness / Readiness"). Project creation itself is not
@@ -108,6 +157,11 @@ export function buildWebsiteBuildV1ColdStartFixture(): WebsiteBuildV1ColdStartFi
     placedAt: "2026-09-09T00:00:00.000Z",
   });
   const resolution = resolveDeclaredServiceFromOrder(order, WEBSITE_BUILD_V1_SERVICE_CATALOG);
+  const trustedResolution = resolveTrustedServiceForOrder({
+    order,
+    declaredLookup: resolution,
+    admittedCatalog: [WEBSITE_BUILD_V1_SERVICE_CATALOG_ADMISSION],
+  });
   const project = createProject({
     tenantScope,
     customer,
@@ -118,7 +172,7 @@ export function buildWebsiteBuildV1ColdStartFixture(): WebsiteBuildV1ColdStartFi
   const soldScope = intakeSoldScopeFromResolution({
     tenantScope,
     project,
-    resolution,
+    resolution: trustedResolution,
     blueprint: WEBSITE_BUILD_V1_BLUEPRINT,
     soldScopeId: "sold-scope-website-build-v1-cold-start",
     outcomeContractRef: "outcome-contract-website-build-v1-cold-start",
@@ -134,5 +188,14 @@ export function buildWebsiteBuildV1ColdStartFixture(): WebsiteBuildV1ColdStartFi
     now: "2026-09-09T00:00:00.000Z",
   });
   const planValidation = validatePlan(plan, WEBSITE_BUILD_V1_BLUEPRINT);
-  return { tenantScope, customer, order, resolution, project, soldScope, plan, planValidation };
+  return {
+    tenantScope,
+    customer,
+    order,
+    resolution: trustedResolution,
+    project,
+    soldScope,
+    plan,
+    planValidation,
+  };
 }

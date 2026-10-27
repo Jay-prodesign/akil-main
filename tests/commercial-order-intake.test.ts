@@ -8,7 +8,12 @@ import {
   intakeSoldScopeFromResolution,
   InvalidCommercialOrderIntakeError,
 } from "../src/domain/commercial-order-intake.js";
-import type { DeclaredServiceLookupResult } from "../src/domain/commercial-order.js";
+import type { ServiceCatalogEntry } from "../src/domain/commercial-order.js";
+import {
+  admitServiceCatalogEntry,
+  type TrustedServiceResolution,
+} from "../src/domain/service-catalog-admission.js";
+import type { AdmittedWorker } from "../src/domain/worker-routing-policy.js";
 import { WEBSITE_BUILD_V1_BLUEPRINT } from "../src/fixtures/website-build-v1.js";
 import {
   buildWebsiteBuildV1ColdStartFixture,
@@ -27,11 +32,41 @@ const project = createProject({
   state: "active",
 });
 
-const resolvedForBlueprint: DeclaredServiceLookupResult = {
-  status: "RESOLVED",
+const elevatedWorker: AdmittedWorker = {
+  workerId: "authority-intake-test",
+  declaredCapabilityRefs: [],
+  declaredToolRefs: [],
+  declaredPolicyConstraintRefs: [],
+  trustStatus: "ADMITTED",
+  availability: "AVAILABLE",
+  maxRiskLevel: "STANDARD",
+  authorityLevel: "ELEVATED",
+  costWeight: 0,
+  evaluationEvidenceRef: "evidence:intake-test-worker-eval",
+};
+
+const catalogEntry: ServiceCatalogEntry = {
+  serviceRef: "service:website-build",
   blueprintId: WEBSITE_BUILD_V1_BLUEPRINT.blueprintId,
   blueprintVersion: WEBSITE_BUILD_V1_BLUEPRINT.version,
   recipeId: WEBSITE_BUILD_V1_RECIPE.recipeId,
+  executionRoutingPolicy: "MANUAL_EXECUTION_ALLOWED",
+};
+
+// Built through the real `admitServiceCatalogEntry` gate (never a
+// hand-built literal), so every RESOLVED case below is proven against a
+// structurally-reachable admission.
+const admission = admitServiceCatalogEntry({
+  catalogEntry,
+  recipe: WEBSITE_BUILD_V1_RECIPE,
+  authorizingWorker: elevatedWorker,
+  evidenceRef: "evidence:intake-test-catalog-admission",
+  admittedAt: "2026-01-01T00:00:00.000Z",
+});
+
+const resolvedForBlueprint: TrustedServiceResolution = {
+  status: "RESOLVED",
+  admission,
 };
 
 test("intakeSoldScopeFromResolution builds a SoldScope when the blueprint matches the resolution exactly", () => {
@@ -64,7 +99,7 @@ test("intakeSoldScopeFromResolution forwards included/excludedRequirementIds unc
 });
 
 test("rejects intake for an UNRESOLVED_SERVICE resolution", () => {
-  const unresolved: DeclaredServiceLookupResult = {
+  const unresolved: TrustedServiceResolution = {
     status: "UNRESOLVED_SERVICE",
     reason: "no catalog entry",
   };
@@ -82,10 +117,31 @@ test("rejects intake for an UNRESOLVED_SERVICE resolution", () => {
   );
 });
 
-test("rejects intake when the supplied blueprint's blueprintId does not match the resolution", () => {
+test("rejects intake for a NOT_ADMITTED resolution (declared-resolvable service with no backing catalog admission)", () => {
+  const notAdmitted: TrustedServiceResolution = {
+    status: "NOT_ADMITTED",
+    serviceRef: "service:website-build",
+    reason: "no currently-ADMITTED ServiceCatalogAdmission covers this service",
+  };
+  assert.throws(
+    () =>
+      intakeSoldScopeFromResolution({
+        tenantScope,
+        project,
+        resolution: notAdmitted,
+        blueprint: WEBSITE_BUILD_V1_BLUEPRINT,
+        soldScopeId: "scope-1",
+        outcomeContractRef: "contract-1",
+      }),
+    InvalidCommercialOrderIntakeError,
+  );
+});
+
+test("rejects intake when the supplied blueprint's blueprintId does not match the resolution's admission", () => {
+  assert.notEqual("other-blueprint", admission.blueprintId);
   const otherBlueprint = createOfferBlueprintVersion({
     blueprintId: "other-blueprint",
-    version: WEBSITE_BUILD_V1_BLUEPRINT.version,
+    version: admission.blueprintVersion,
     requirements: [
       { requirementId: "r1", description: "r1", necessity: "REQUIRED", dependsOn: [] },
     ],
@@ -104,9 +160,10 @@ test("rejects intake when the supplied blueprint's blueprintId does not match th
   );
 });
 
-test("rejects intake when the supplied blueprint's version does not match the resolution's resolved version", () => {
+test("rejects intake when the supplied blueprint's version does not match the resolution's admitted blueprintVersion", () => {
+  assert.notEqual("999.0.0", admission.blueprintVersion);
   const wrongVersionBlueprint = createOfferBlueprintVersion({
-    blueprintId: WEBSITE_BUILD_V1_BLUEPRINT.blueprintId,
+    blueprintId: admission.blueprintId,
     version: "999.0.0",
     requirements: [
       { requirementId: "r1", description: "r1", necessity: "REQUIRED", dependsOn: [] },
