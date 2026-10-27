@@ -10,6 +10,7 @@ import type {
   OrganizationResourceBindingStatus,
 } from "../domain/organization-resource-binding.js";
 import type { OperationalObservabilityView } from "../domain/operational-observability-view.js";
+import type { BreakGlassSupportViewKind } from "../domain/break-glass-support-access.js";
 import type { Customer } from "../domain/customer.js";
 import type { CustomerOffboardingRequest, CustomerOffboardingRequestId } from "../domain/customer-offboarding.js";
 import type { StoredConnectorConnection } from "../domain/durable-connector-connection-store.js";
@@ -1260,6 +1261,87 @@ export function resolveOperationalObservabilityView(
     return { kind: "NOT_ACTIVE" };
   }
   return { kind: "READY", view: source.resolveView(organization) };
+}
+
+/**
+ * C7: every `BreakGlassSupportViewKind`, in a fixed display order. Pinned
+ * to the frozen domain union at compile time (`satisfies
+ * Record<BreakGlassSupportViewKind, true>` fails to compile if a kind is
+ * missing or an unknown one is added), so this list can never drift from
+ * `break-glass-support-access.ts` - that module exports the type only, not
+ * a runtime list. The `/os/admin` break-glass branch calls the domain gate
+ * once for each entry.
+ */
+const BREAK_GLASS_SUPPORT_VIEW_KIND_SET = {
+  TASK: true,
+  CONNECTION: true,
+  QUOTA: true,
+  APPROVALS: true,
+  AUDIT_EVIDENCE: true,
+} as const satisfies Record<BreakGlassSupportViewKind, true>;
+
+export const BREAK_GLASS_SUPPORT_VIEW_KINDS: ReadonlyArray<BreakGlassSupportViewKind> = Object.freeze(
+  Object.keys(BREAK_GLASS_SUPPORT_VIEW_KIND_SET) as BreakGlassSupportViewKind[],
+);
+
+/**
+ * C7: what a break-glass support principal sees on `/os/admin`. Deliberately
+ * NOT `AdminViewState`: a break-glass grant's `scope` only ever admits
+ * `BreakGlassSupportViewKind` values, and those map onto
+ * `OperationalObservabilityView`'s fields alone (TASK -> `task`, CONNECTION
+ * -> `connections`, QUOTA -> `quota`, APPROVALS -> `pendingApprovals`,
+ * AUDIT_EVIDENCE -> `auditEvidence`). `AdminViewState` also carries the
+ * organization/access summary, resource binding and pending offboarding
+ * requests, none of which any grant admits - so none of them exists here.
+ *
+ * `grantedKinds` lists only the kinds whose own domain-gate call came back
+ * `GRANTED` (and was audited). In `READY`, `view` populates only those
+ * kinds' fields; every other field holds the value an empty dimension
+ * already has (`task`/`quota` absent, `connections`/`pendingApprovals`/
+ * `auditEvidence` empty) - and the renderer shows only the `grantedKinds`
+ * sections, so a non-granted kind is never displayed, not even as "none".
+ * `NOT_ACTIVE` mirrors `resolveOperationalObservabilityView`'s own
+ * convention: no observability source is wired, so there is no data to show.
+ */
+export type BreakGlassObservabilityViewState =
+  | { readonly kind: "NOT_ACTIVE"; readonly grantedKinds: ReadonlyArray<BreakGlassSupportViewKind> }
+  | {
+      readonly kind: "READY";
+      readonly grantedKinds: ReadonlyArray<BreakGlassSupportViewKind>;
+      readonly view: OperationalObservabilityView;
+    };
+
+/**
+ * C7: resolves the source once and copies across ONLY the fields named in
+ * `grantedKinds` into a new object. The source's own result is never
+ * returned or spread whole, so a field a grant did not admit cannot reach
+ * the page even if the source returns more than expected. `grantedKinds` is
+ * normalized to the fixed `BREAK_GLASS_SUPPORT_VIEW_KINDS` order, without
+ * duplicates or unrecognized values.
+ */
+export function resolveBreakGlassObservabilityView(input: {
+  organization: Organization;
+  grantedKinds: ReadonlyArray<BreakGlassSupportViewKind>;
+  source: OperationalObservabilitySource | undefined;
+}): BreakGlassObservabilityViewState {
+  const requested = new Set<string>(input.grantedKinds);
+  const grantedKinds = BREAK_GLASS_SUPPORT_VIEW_KINDS.filter((kind) => requested.has(kind));
+  if (input.source === undefined) {
+    return { kind: "NOT_ACTIVE", grantedKinds };
+  }
+  const granted = new Set<BreakGlassSupportViewKind>(grantedKinds);
+  const full = input.source.resolveView(input.organization);
+  return {
+    kind: "READY",
+    grantedKinds,
+    view: {
+      ...(granted.has("TASK") && full.task !== undefined ? { task: full.task } : {}),
+      connections: granted.has("CONNECTION") ? full.connections : [],
+      ...(granted.has("QUOTA") && full.quota !== undefined ? { quota: full.quota } : {}),
+      pendingApprovals: granted.has("APPROVALS") ? full.pendingApprovals : [],
+      auditEvidence: granted.has("AUDIT_EVIDENCE") ? full.auditEvidence : [],
+    },
+  };
 }
 
 /**

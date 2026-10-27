@@ -15,6 +15,8 @@ import { FileDurableStaffAccessGrantStore } from "../domain/durable-staff-access
 import { FileDurableProtectedDecisionWaitStore } from "../domain/durable-protected-decision-wait-store.js";
 import { FileDurableProtectedDecisionRecordStore } from "../domain/durable-protected-decision-record-store.js";
 import { FileDurableCustomerRepository } from "../application/durable-customer-repository.js";
+import { FileDurableBreakGlassAccessGrantStore } from "../domain/durable-break-glass-access-grant-store.js";
+import { FileDurableBreakGlassSupportAccessAuditStore } from "../domain/durable-break-glass-support-access-audit-store.js";
 import type { HealthProbeResult } from "./health-check.js";
 
 /**
@@ -51,6 +53,16 @@ import type { HealthProbeResult } from "./health-check.js";
  * both the attention decision POST route and `/os/attention`'s own
  * `getProtectedDecisionRecord` read/write it. It adds one
  * `file-store:protected-decision-records` health probe.
+ *
+ * C7: the break-glass GRANT store (`FileDurableBreakGlassAccessGrantStore`)
+ * and break-glass AUDIT store (`FileDurableBreakGlassSupportAccessAuditStore`)
+ * are now composed, because the read-only break-glass branch of
+ * `GET /os/admin` reads the first and appends to the second. Each adds one
+ * health probe (`file-store:break-glass-access-grants`,
+ * `file-store:break-glass-support-access-audits`). No runtime path WRITES
+ * grants yet (minting/revoking a grant needs its own task contract), so
+ * until one does, every break-glass request answers 403 - the honest,
+ * fail-closed default.
  */
 export const FILE_DURABLE_RUNTIME_STORE_LAYOUT = {
   projects: "projects",
@@ -68,6 +80,8 @@ export const FILE_DURABLE_RUNTIME_STORE_LAYOUT = {
   protectedDecisionWaits: "protected-decision-waits",
   customers: "customers",
   protectedDecisionRecords: "protected-decision-records",
+  breakGlassAccessGrants: "break-glass-access-grants",
+  breakGlassSupportAccessAudits: "break-glass-support-access-audits",
 } as const;
 
 export type FileDurableRuntimeStoreKey = keyof typeof FILE_DURABLE_RUNTIME_STORE_LAYOUT;
@@ -93,6 +107,10 @@ export interface FileDurableRuntimeStores {
   readonly customerRepository: FileDurableCustomerRepository;
   /** C4 slice 3: protected-decision RECORDS (`/os/attention`'s decide/revoke route and status column). */
   readonly protectedDecisionRecordStore: FileDurableProtectedDecisionRecordStore;
+  /** C7: break-glass access grants, read by the break-glass branch of `GET /os/admin`. */
+  readonly breakGlassAccessGrantStore: FileDurableBreakGlassAccessGrantStore;
+  /** C7: break-glass support-access audits, one appended per GRANTED view kind on that branch. */
+  readonly breakGlassSupportAccessAuditStore: FileDurableBreakGlassSupportAccessAuditStore;
 }
 
 /** Absolute (or caller-relative) directory of one store under `dataDir`. */
@@ -128,6 +146,8 @@ export function createFileDurableRuntimeStores(dataDir: string): FileDurableRunt
     protectedDecisionWaitStore: new FileDurableProtectedDecisionWaitStore(dir("protectedDecisionWaits")),
     customerRepository: new FileDurableCustomerRepository(dir("customers")),
     protectedDecisionRecordStore: new FileDurableProtectedDecisionRecordStore(dir("protectedDecisionRecords")),
+    breakGlassAccessGrantStore: new FileDurableBreakGlassAccessGrantStore(dir("breakGlassAccessGrants")),
+    breakGlassSupportAccessAuditStore: new FileDurableBreakGlassSupportAccessAuditStore(dir("breakGlassSupportAccessAudits")),
   };
 }
 
