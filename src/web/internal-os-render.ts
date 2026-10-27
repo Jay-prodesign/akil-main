@@ -752,8 +752,20 @@ export function connectionsPageContent(
   }
 }
 
+/**
+ * Gap scan N2: same discipline as `MEMBERSHIP_STATE_TONE` (the identical
+ * `"ACTIVE" | "REVOKED"` shape this roster's `lifecycleState` reuses) - the
+ * visible state text is always rendered next to the tone, and the `Record`
+ * makes a new lifecycle state a compile error here until it is given a
+ * tone.
+ */
+const SERVICE_PRINCIPAL_LIFECYCLE_TONE: Record<WorkersRosterEntry["lifecycleState"], "neutral" | "danger"> = {
+  ACTIVE: "neutral",
+  REVOKED: "danger",
+};
+
 function renderWorkersRosterRow(entry: WorkersRosterEntry): string {
-  return `<tr><td>${escapeHtml(entry.servicePrincipalId)}</td><td>${escapeHtml(entry.workerRef)}</td><td><span class="status status-${entry.lifecycleState === "ACTIVE" ? "success" : "neutral"}" role="status">${escapeHtml(entry.lifecycleState)}</span></td></tr>`;
+  return `<tr><td>${escapeHtml(entry.servicePrincipalId)}</td><td>${escapeHtml(entry.workerRef)}</td><td><span class="status status-${SERVICE_PRINCIPAL_LIFECYCLE_TONE[entry.lifecycleState]}" role="status">${escapeHtml(entry.lifecycleState)}</span></td></tr>`;
 }
 
 /**

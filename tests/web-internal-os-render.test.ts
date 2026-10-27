@@ -147,8 +147,8 @@ test("N2-R4: workersRosterPageContent READY renders the roster table (escaped) p
   assert.match(rendered.html, /&lt;1&gt;/);
   assert.doesNotMatch(rendered.html, /sp-<1>/);
   assert.match(rendered.html, /worker-&quot;alpha&quot;/);
-  assert.match(rendered.html, /<span class="status status-success" role="status">ACTIVE<\/span>/);
-  assert.match(rendered.html, /<span class="status status-neutral" role="status">REVOKED<\/span>/);
+  assert.match(rendered.html, /<span class="status status-neutral" role="status">ACTIVE<\/span>/);
+  assert.match(rendered.html, /<span class="status status-danger" role="status">REVOKED<\/span>/);
   assert.match(
     rendered.html,
     /This roster shows identity and lifecycle state only\. Capability, maturity, trust, and AI-worker routing authority are not shown here and remain NOT_ACTIVE — a service principal appearing here is not an admitted or routable AI worker\./,

@@ -143,7 +143,7 @@ test("N2-RT1: the composed runtime renders a real roster written through a separ
       const body = await response.text();
       assert.match(body, /sp-n2-rt1/);
       assert.match(body, /worker-n2-rt1/);
-      assert.match(body, /<span class="status status-success" role="status">ACTIVE<\/span>/);
+      assert.match(body, /<span class="status status-neutral" role="status">ACTIVE<\/span>/);
       assert.match(body, /AKILTA Zero \(N2\)/);
       assert.doesNotMatch(body, /sp-n2-foreign|worker-n2-foreign/);
 
