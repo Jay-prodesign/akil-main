@@ -498,6 +498,12 @@ test("C7-R3: a fully-active grant naming all five kinds -> 200 read-only break-g
       }
       assert.equal(new Set(audits.map((audit) => audit.auditRef)).size, 5, "every audit record has its own auditRef");
       assert.equal(new Set(audits.map((audit) => audit.decidedAt)).size, 1, "all five decisions share one server-clock instant");
+      // Only this deployment's own tenant file (plus the global auditRef
+      // index) ever exists - no third, foreign-tenant file was ever created.
+      assert.deepEqual(
+        [...auditStoreDataFiles(dataDir)].sort(),
+        [`${Buffer.from(OS_TENANT, "utf8").toString("base64url")}.json`, "__global-audit-ref-index__.json"].sort(),
+      );
 
       // A second request appends five MORE records - one audit per access, never deduplicated away.
       assert.equal((await getAdmin(port, breakGlassHeaders(SUPPORT_TOKEN, "bg-c7-full"))).status, 200);
@@ -525,6 +531,10 @@ test("C7-R4: a partial-scope grant (QUOTA, TASK) -> 200 showing ONLY task and qu
       const audits = auditsFor(dataDir);
       assert.equal(audits.length, 2);
       assert.deepEqual(audits.map((audit) => audit.requestedView), ["TASK", "QUOTA"]);
+      assert.deepEqual(
+        [...auditStoreDataFiles(dataDir)].sort(),
+        [`${Buffer.from(OS_TENANT, "utf8").toString("base64url")}.json`, "__global-audit-ref-index__.json"].sort(),
+      );
     },
     (dataDir) => seedGrant(dataDir, grantFor("bg-c7-partial", { scope: ["QUOTA", "TASK"] })),
   );
@@ -664,16 +674,25 @@ test("C7-R8: a consent-required grant -> 403 with zero audits when no consent he
 
 // --- C7-R9: unauthenticated ---
 
-test("C7-R9: the grant header is present but the staff session is absent or forged -> 401 (not 403, not a crash) - identically for a real grant id and an unknown one, so 401/403 is never a grant-existence oracle - and nothing is audited", async () => {
+test("C7-R9: the grant header is present but the staff session is absent or forged -> 401 (not 403, not a crash) - byte-identically for a real grant id and an unknown one, so 401/403 is never a grant-existence oracle - and nothing is audited", async () => {
   await withRuntime(
     async ({ port, dataDir }) => {
+      const responses: Array<{ status: number; body: string; contentType: string | undefined }> = [];
       for (const grantId of ["bg-c7-unauth", "bg-c7-unknown"]) {
         for (const token of [undefined, "not-a-real-token"]) {
           const response = await getAdmin(port, breakGlassHeaders(token, grantId));
           assert.equal(response.status, 401, `${grantId} / ${String(token)}`);
           assert.ok(response.body.includes("Sign-in required"));
           assertNoLeak(response, grantId);
+          responses.push({ status: response.status, body: response.body, contentType: response.headers["content-type"] });
         }
+      }
+      // Not just "every status is 401": every response (real grant id and
+      // unknown grant id alike) must be byte-identical, or the status/body
+      // pair itself becomes a side-channel distinguishing a real grant id
+      // from an unknown one even though both already return 401.
+      for (const response of responses.slice(1)) {
+        assert.deepEqual(response, responses[0], "every unauthenticated break-glass response must be indistinguishable, regardless of grant id");
       }
       assert.deepEqual(auditStoreDataFiles(dataDir), []);
     },
