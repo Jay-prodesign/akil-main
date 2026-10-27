@@ -9,9 +9,11 @@ import {
   peoplePageContent,
   productsPageContent,
   adminPageContent,
+  workersRosterPageContent,
 } from "../src/web/internal-os-render.js";
 import { NAV_DESTINATIONS } from "../src/web/internal-os-view-state.js";
-import type { HomeViewState, WorkViewState, PeopleViewState, ProductsViewState, AdminViewState, PendingOffboardingRequestSummary } from "../src/web/internal-os-view-state.js";
+import type { HomeViewState, WorkViewState, PeopleViewState, ProductsViewState, AdminViewState, PendingOffboardingRequestSummary, WorkersRosterViewState } from "../src/web/internal-os-view-state.js";
+import type { OrganizationServicePrincipal } from "../src/domain/organization-service-principal.js";
 
 const ORG_NAME = "AKILTA <Test> & \"Org\"";
 
@@ -111,6 +113,49 @@ test("attention/ai-capabilities/connections/knowledge all render a truthful NOT 
     const rendered = renderInternalOsPage(notActiveDestinationPageContent(NAV_DESTINATIONS, "Org", key));
     assert.match(rendered.html, /NOT ACTIVE/);
   }
+});
+
+test("N2-R1: workersRosterPageContent NOT_ACTIVE is byte-identical to the pre-N2 notActiveDestinationPageContent('ai-capabilities') page", () => {
+  const before = renderInternalOsPage(notActiveDestinationPageContent(NAV_DESTINATIONS, "Org", "ai-capabilities"));
+  const after = renderInternalOsPage(workersRosterPageContent(NAV_DESTINATIONS, "Org", { kind: "NOT_ACTIVE" }));
+  assert.equal(after.status, before.status);
+  assert.equal(after.html, before.html);
+});
+
+test("N2-R2: workersRosterPageContent ERROR renders the OS ERROR page (500), never a fabricated empty roster", () => {
+  const rendered = renderInternalOsPage(workersRosterPageContent(NAV_DESTINATIONS, "Org", { kind: "ERROR" }));
+  assert.equal(rendered.status, 500);
+  assert.doesNotMatch(rendered.html, /No AI\/automation service principals/);
+});
+
+test("N2-R3: workersRosterPageContent EMPTY renders a truthful no-service-principals message", () => {
+  const rendered = renderInternalOsPage(workersRosterPageContent(NAV_DESTINATIONS, "Org", { kind: "EMPTY" }));
+  assert.equal(rendered.status, 200);
+  assert.match(rendered.html, /No AI\/automation service principals are registered for this organization yet/);
+});
+
+test("N2-R4: workersRosterPageContent READY renders the roster table (escaped) plus the mandatory disclosure, and never a capability/trust/maturity/admission concept", () => {
+  const view: WorkersRosterViewState = {
+    kind: "READY",
+    servicePrincipals: [
+      { servicePrincipalId: "sp-<1>" as OrganizationServicePrincipal["servicePrincipalId"], workerRef: "worker-\"alpha\"", lifecycleState: "ACTIVE" },
+      { servicePrincipalId: "sp-2" as OrganizationServicePrincipal["servicePrincipalId"], workerRef: "worker-beta", lifecycleState: "REVOKED" },
+    ],
+  };
+  const rendered = renderInternalOsPage(workersRosterPageContent(NAV_DESTINATIONS, "Org", view));
+  assert.equal(rendered.status, 200);
+  assert.match(rendered.html, /&lt;1&gt;/);
+  assert.doesNotMatch(rendered.html, /sp-<1>/);
+  assert.match(rendered.html, /worker-&quot;alpha&quot;/);
+  assert.match(rendered.html, /<span class="status status-neutral" role="status">ACTIVE<\/span>/);
+  assert.match(rendered.html, /<span class="status status-danger" role="status">REVOKED<\/span>/);
+  assert.match(
+    rendered.html,
+    /This roster shows identity and lifecycle state only\. Capability, maturity, trust, and AI-worker routing authority are not shown here and remain NOT_ACTIVE — a service principal appearing here is not an admitted or routable AI worker\./,
+  );
+  assert.doesNotMatch(rendered.html, /ADMITTED/);
+  assert.doesNotMatch(rendered.html, /ELEVATED/);
+  assert.match(rendered.html, /AI &amp; Capabilities/);
 });
 
 test("People renders only the current viewer's own membership fields", () => {

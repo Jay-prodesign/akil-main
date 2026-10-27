@@ -24,13 +24,16 @@ import {
   resolvePeopleView,
   resolveProductsView,
   resolveAdminView,
+  resolveWorkersRosterView,
   NAV_DESTINATIONS,
   type WorkProjectSource,
   type WorkJobSource,
   type OrganizationResourceBindingSource,
   type OperationalObservabilitySource,
   type CustomerOffboardingAdminSource,
+  type WorkersRosterSource,
 } from "../src/web/internal-os-view-state.js";
+import { createOrganizationServicePrincipal } from "../src/domain/organization-service-principal.js";
 import { composeOperationalObservabilityView } from "../src/domain/operational-observability-view.js";
 import { createConnectionRequirement, createConnectionBinding, transitionConnectionBinding } from "../src/domain/connection-authority.js";
 import { requestCustomerOffboarding, type CustomerOffboardingRequest } from "../src/domain/customer-offboarding.js";
@@ -232,6 +235,63 @@ test("resolvePeopleView shows only the current viewer's own membership - no dire
   const view = resolvePeopleView({ context });
   assert.equal(view.self.principalDisplayName, "Viewer");
   assert.equal(view.self.membershipState, "ACTIVE");
+});
+
+// --- resolveWorkersRosterView (gap scan N2) ---
+
+test("N2-V1: resolveWorkersRosterView with no source is NOT_ACTIVE", () => {
+  assert.deepEqual(resolveWorkersRosterView(organization, undefined), { kind: "NOT_ACTIVE" });
+});
+
+test("N2-V2: resolveWorkersRosterView with a source that returns no records is EMPTY, distinct from NOT_ACTIVE", () => {
+  const source: WorkersRosterSource = { listServicePrincipals: () => [] };
+  assert.deepEqual(resolveWorkersRosterView(organization, source), { kind: "EMPTY" });
+});
+
+test("N2-V3: resolveWorkersRosterView with a throwing source is ERROR - a read failure is never relabeled as EMPTY", () => {
+  const source: WorkersRosterSource = {
+    listServicePrincipals: () => {
+      throw new Error("boom");
+    },
+  };
+  assert.deepEqual(resolveWorkersRosterView(organization, source), { kind: "ERROR" });
+});
+
+test("N2-V4: resolveWorkersRosterView fails closed to ERROR (not a silently filtered list) when the source returns a foreign tenant's record", () => {
+  const own = createOrganizationServicePrincipal({ servicePrincipalId: "sp-own", tenantScope, workerRef: "worker-own" });
+  const foreign = createOrganizationServicePrincipal({
+    servicePrincipalId: "sp-foreign",
+    tenantScope: createTenantScope("tenant-n2-foreign-view"),
+    workerRef: "worker-foreign",
+  });
+  assert.deepEqual(resolveWorkersRosterView(organization, { listServicePrincipals: () => [own, foreign] }), { kind: "ERROR" });
+  assert.deepEqual(resolveWorkersRosterView(organization, { listServicePrincipals: () => [foreign] }), { kind: "ERROR" });
+});
+
+test("N2-V5: resolveWorkersRosterView READY carries only identity/lifecycle fields, sorted by workerRef then servicePrincipalId - no capability/trust field anywhere", () => {
+  const b = createOrganizationServicePrincipal({ servicePrincipalId: "sp-b", tenantScope, workerRef: "worker-zeta" });
+  const a = createOrganizationServicePrincipal({ servicePrincipalId: "sp-a", tenantScope, workerRef: "worker-alpha" });
+  const view = resolveWorkersRosterView(organization, { listServicePrincipals: () => [b, a] });
+  assert.deepEqual(view, {
+    kind: "READY",
+    servicePrincipals: [
+      { servicePrincipalId: "sp-a", workerRef: "worker-alpha", lifecycleState: "ACTIVE" },
+      { servicePrincipalId: "sp-b", workerRef: "worker-zeta", lifecycleState: "ACTIVE" },
+    ],
+  });
+});
+
+test("N2-V6: resolveWorkersRosterView sorts same-workerRef records by servicePrincipalId", () => {
+  const second = createOrganizationServicePrincipal({ servicePrincipalId: "sp-2", tenantScope, workerRef: "worker-shared" });
+  const first = createOrganizationServicePrincipal({ servicePrincipalId: "sp-1", tenantScope, workerRef: "worker-shared" });
+  const view = resolveWorkersRosterView(organization, { listServicePrincipals: () => [second, first] });
+  assert.deepEqual(view, {
+    kind: "READY",
+    servicePrincipals: [
+      { servicePrincipalId: "sp-1", workerRef: "worker-shared", lifecycleState: "ACTIVE" },
+      { servicePrincipalId: "sp-2", workerRef: "worker-shared", lifecycleState: "ACTIVE" },
+    ],
+  });
 });
 
 test("resolveProductsView declares only this shell as ACTIVE, everything else NOT_ACTIVE - no commercial/purchase implication", () => {

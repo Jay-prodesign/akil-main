@@ -109,6 +109,7 @@ test("OS-V0-08: each module exports exactly the expected surface", () => {
     "resolveResourceBindingView",
     "resolveWorkProjectDetailView",
     "resolveWorkView",
+    "resolveWorkersRosterView",
     "summarizeAccess",
     "summarizeOrganization",
   ]);
@@ -125,6 +126,7 @@ test("OS-V0-08: each module exports exactly the expected surface", () => {
     "renderInternalOsPage",
     "workPageContent",
     "workProjectDetailPageContent",
+    "workersRosterPageContent",
   ]);
   assert.deepEqual(Object.keys(InternalOsRequestHandler).sort(), [
     "BREAK_GLASS_CONSENT_REF_HEADER",

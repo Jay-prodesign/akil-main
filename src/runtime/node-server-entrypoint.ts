@@ -17,6 +17,7 @@ import { createDurableConnectionsSource } from "../web/connections-durable-sourc
 import { createDurableKnowledgeSource } from "../web/knowledge-durable-source.js";
 import { createDurableAttentionSource } from "../web/attention-durable-source.js";
 import { createDurablePeopleDirectorySource } from "../web/people-directory-durable-source.js";
+import { createDurableWorkersRosterSource } from "../web/workers-roster-durable-source.js";
 import { createDurableCustomerOffboardingAdminSource } from "../web/customer-offboarding-admin-source.js";
 import { createDurableCustomerLifecycleReadinessSource } from "../web/customer-lifecycle-readiness-durable-source.js";
 import { createDurableOrganizationResourceBindingSource } from "../web/organization-resource-binding-durable-source.js";
@@ -102,6 +103,16 @@ import type { StaffAccessGrant } from "../web/internal-os-access.js";
  *   `getProtectedDecisionRecord` reads the SAME store instance, so a
  *   decision just recorded is immediately reflected in that page's status
  *   column. See `internal-os-attention-decision-route.ts`.
+ * - **AI & Capabilities roster (gap scan N2, read-only, identity/lifecycle
+ *   only).** `/os/ai-capabilities` lists the configured tenant's
+ *   `OrganizationServicePrincipal` records from the same
+ *   `FileDurableOrganizationServicePrincipalStore` instance
+ *   `createDurableOrganizationResourceBindingSource` already reads
+ *   (`createDurableWorkersRosterSource`). Only `servicePrincipalId`,
+ *   `workerRef` and lifecycle state are shown - no capability, maturity,
+ *   trust, or AI-worker routing-authority data, since this store has none
+ *   and no relationship to `worker-routing-policy.ts`/`AdmittedWorker`. A
+ *   store read failure renders the OS ERROR page, not an empty roster.
  * - **Customer lifecycle readiness (gap scan N1, read-only).** `/portal`'s
  *   lifecycle-readiness section now reads the real
  *   `FileDurableCustomerRepository` and
@@ -256,6 +267,7 @@ export function createNodeRuntime(config: AppConfig, options: NodeRuntimeOptions
     customerOffboardingAdminSource: createDurableCustomerOffboardingAdminSource(stores.customerOffboardingRequestStore),
     connectionsSource: createDurableConnectionsSource(stores.connectorConnectionStore),
     peopleDirectorySource: createDurablePeopleDirectorySource(stores.organizationMembershipStore),
+    workersRosterSource: createDurableWorkersRosterSource(stores.organizationServicePrincipalStore),
     knowledgeSource: createDurableKnowledgeSource(stores.evidenceReferenceStore),
     attentionSource: createDurableAttentionSource(
       stores.connectorConnectionStore,
