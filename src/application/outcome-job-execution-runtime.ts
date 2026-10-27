@@ -35,6 +35,11 @@ import {
   recordExecutionEconomicsEvent,
   type ExecutionEconomicsEvent,
 } from "../domain/execution-economics-attribution.js";
+import {
+  resolveRetryContainmentDisposition,
+  type RetryContainmentPolicy,
+  type RetryContainmentDisposition,
+} from "../domain/outcome-job-retry-containment.js";
 
 export class InvalidOutcomeJobExecutionRuntimeError extends Error {
   constructor(reason: string) {
@@ -671,6 +676,17 @@ export interface DispatchOutcomeJobExecutionResult {
   readonly state: OutcomeJobExecutionRunState;
   readonly invoked: boolean;
   readonly invocationOutcome?: InvokeOutcome;
+  /**
+   * OS-V1-07 follow-on: the retry-containment disposition that stopped this
+   * call. Populated ONLY by `retryOutcomeJobExecutionAttempt`, and only when
+   * the caller supplied a `retryContainmentPolicy` AND
+   * `resolveRetryContainmentDisposition` returned `BLOCKED` - never set on a
+   * successful admit (the key is then absent entirely, never `undefined`),
+   * and never set by `dispatchOutcomeJobExecutionRun` at all (which never
+   * computes a disposition: its only attempt is attempt 1, which the gate's
+   * own rule always admits).
+   */
+  readonly containment?: RetryContainmentDisposition;
 }
 
 /**
@@ -989,6 +1005,18 @@ const RETRYABLE_ATTEMPT_STATUSES: ReadonlySet<string> = new Set([
  * in-memory copy is safe (the reducer's own attempt-number check makes a
  * second `ATTEMPT_STARTED` for an already-superseded attempt a no-op), but
  * never authorizes anything the store's real current state disagrees with.
+ *
+ * OS-V1-07 follow-on: `resolveRetryContainmentDisposition` (the pure
+ * RETRY_STORM/CRASH_LOOP gate in `outcome-job-retry-containment.ts`) is
+ * consulted here when - and only when - the caller supplies
+ * `retryContainmentPolicy`. A `BLOCKED` disposition returns
+ * `{ state: freshState, invoked: false, containment }` before quota is ever
+ * admitted and before any `ATTEMPT_STARTED` is ever constructed, leaving the
+ * run's durable state untouched; the caller's own runtime decides what to do
+ * with that recommendation. Omitting the policy leaves behavior exactly
+ * unchanged. `dispatchOutcomeJobExecutionRun` is deliberately not wired: it
+ * only ever starts attempt 1 of a run whose `currentAttempt` is 0, which the
+ * gate always admits, so a call there would be a permanent no-op.
  */
 export async function retryOutcomeJobExecutionAttempt(
   input: ScopeInput &
@@ -1009,6 +1037,15 @@ export async function retryOutcomeJobExecutionAttempt(
       readonly taskId: string;
       readonly branch: string;
       readonly checkpointSha: string;
+      /**
+       * OS-V1-07 follow-on: optional, purely additive, backward-compatible.
+       * When omitted, behavior is EXACTLY unchanged (no containment gate is
+       * applied at all) - mirroring this repository's established pattern
+       * of adding new behavior behind an optional parameter that defaults to
+       * "unchanged". When supplied, a retry the policy contains is refused
+       * before any durable effect (see the call site below).
+       */
+      readonly retryContainmentPolicy?: RetryContainmentPolicy;
     },
 ): Promise<DispatchOutcomeJobExecutionResult> {
   requireSameTenant(input.authority, input.tenantScope.tenantId);
@@ -1046,6 +1083,29 @@ export async function retryOutcomeJobExecutionAttempt(
     currentActivationPlanId: input.currentActivationPlanId,
     currentActivationPlanVersion: input.currentActivationPlanVersion,
   });
+
+  // OS-V1-07 follow-on: retry containment (RETRY_STORM / CRASH_LOOP). A pure,
+  // synchronous, non-effecting check, so it sits with the other cheap
+  // structural gates above (`assertCurrentActivation` /
+  // `assertCurrentQuotaEnvelope` / `assertQuotaScopeMatchesActivationLineage`)
+  // and strictly BEFORE `admitQuotaForAttempt` - a retry about to be
+  // contained must never wastefully reserve quota for an attempt that will
+  // never be constructed (the same reason the quota-REJECTED check below sits
+  // before ATTEMPT_STARTED: never create even a momentarily-RUNNING attempt
+  // for an effect that will not happen). BLOCKED returns the same shape as
+  // that quota-REJECTED early return, plus the disposition: no event is
+  // appended and the run's durable state is untouched. `freshState` (not the
+  // caller's possibly-stale `currentState`) is what the gate evaluates.
+  if (input.retryContainmentPolicy !== undefined) {
+    const containmentDisposition = resolveRetryContainmentDisposition({
+      runState: freshState,
+      policy: input.retryContainmentPolicy,
+      now: input.now,
+    });
+    if (containmentDisposition.outcome === "BLOCKED") {
+      return { state: freshState, invoked: false, containment: containmentDisposition };
+    }
+  }
 
   const nextAttempt = freshState.currentAttempt + 1;
 
