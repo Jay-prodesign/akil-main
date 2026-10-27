@@ -1,5 +1,6 @@
 import type { Organization } from "../domain/organization.js";
 import type { OrganizationMembership, AssignmentReference } from "../domain/organization-membership.js";
+import type { OrganizationServicePrincipal } from "../domain/organization-service-principal.js";
 import type { Project } from "../domain/project.js";
 import type { OutcomeJob } from "../domain/outcome-job.js";
 import type { Permission } from "../domain/authority.js";
@@ -363,7 +364,15 @@ export function resolveHomeView(input: {
  * Knowledge (`KnowledgeSource` / `resolveKnowledgeView`, C3 Knowledge
  * slice), and so does Attention (`AttentionSource` / `resolveAttentionView`,
  * C3 Attention slice). Each still renders this same `NOT_ACTIVE` state when
- * no source is wired. AI & Capabilities is unchanged.
+ * no source is wired.
+ *
+ * Gap scan N2 update: AI & Capabilities now also has a real source port
+ * (`WorkersRosterSource` / `resolveWorkersRosterView` below), narrower than
+ * the other three - it surfaces only `OrganizationServicePrincipal` identity
+ * and lifecycle state, never capability, maturity, trust or AI-worker
+ * routing authority (OS-V0-06/07/13's own unresolved, separate, much larger
+ * D-class question - see `WorkersRosterSource`'s own doc comment). It too
+ * still renders this same `NOT_ACTIVE` state when no source is wired.
  */
 export type NotActiveViewState = { readonly kind: "NOT_ACTIVE" };
 
@@ -503,6 +512,112 @@ export function canMutateConnectorConnectionState(context: InternalOsAccessConte
     context.access.permissions.has("EXECUTE") &&
     context.access.canPerformProtectedActions
   );
+}
+
+/**
+ * Gap scan N2: caller-injected read source for the Organization's
+ * `OrganizationServicePrincipal` roster, for the `/os/ai-capabilities`
+ * destination - the same optional-source pattern as `ConnectionsSource`: an
+ * absent source renders `NOT_ACTIVE`, never fabricated content. The
+ * deployable runtime wires `createDurableWorkersRosterSource` (over the
+ * runtime's single `FileDurableOrganizationServicePrincipalStore`) here.
+ *
+ * Contract: returns every stored service principal for the Organization's
+ * tenant, `ACTIVE` and `REVOKED` alike. A read or replay failure THROWS. It
+ * must never be reported as an empty list (a storage error is never
+ * relabeled as absence) - the same rule every other port in this module
+ * follows.
+ *
+ * The port returns the raw `OrganizationServicePrincipal`, not a pre-masked
+ * shape. Field selection happens in `resolveWorkersRosterView`, so every
+ * source, including a faulty one, goes through the same allow-list - and,
+ * by construction, that allow-list (`WorkersRosterEntry`) has no field this
+ * module could even populate with a capability/trust/routing concept, since
+ * `OrganizationServicePrincipal` itself carries none.
+ */
+export interface WorkersRosterSource {
+  listServicePrincipals(organization: Organization): ReadonlyArray<OrganizationServicePrincipal>;
+}
+
+/**
+ * One roster row: identity and lifecycle state only. Deliberately excludes
+ * anything about capability, maturity, trust, or routing authority -
+ * `OrganizationServicePrincipal` has no such fields and no relationship to
+ * `AdmittedWorker`/`worker-routing-policy.ts` (not imported here, by
+ * design - see that module's own doc comment). `revokedAt`/`revokedReason`
+ * are left out for the same reason `PeopleDirectoryEntry` leaves out its
+ * own revocation detail fields: `lifecycleState` already says REVOKED, and
+ * the free-text reason has no operational need to be shown on a roster.
+ */
+export interface WorkersRosterEntry {
+  readonly servicePrincipalId: OrganizationServicePrincipal["servicePrincipalId"];
+  readonly workerRef: string;
+  readonly lifecycleState: OrganizationServicePrincipal["state"];
+}
+
+/**
+ * Same four states as `ConnectionsViewState`, for the same reasons:
+ * - `NOT_ACTIVE`: no source is wired (the pre-N2 default - what
+ *   `notActiveDestinationPageContent("ai-capabilities")` alone produced).
+ * - `ERROR`: the source threw, or returned a record that belongs to a
+ *   different tenant. Rendered as the OS ERROR page (500), never as EMPTY.
+ * - `EMPTY`: the source was read successfully and this tenant has no
+ *   service principals.
+ * - `READY`: at least one service principal, allow-listed to identity and
+ *   lifecycle state only.
+ */
+export type WorkersRosterViewState =
+  | { readonly kind: "NOT_ACTIVE" }
+  | { readonly kind: "ERROR" }
+  | { readonly kind: "EMPTY" }
+  | { readonly kind: "READY"; readonly servicePrincipals: ReadonlyArray<WorkersRosterEntry> };
+
+function compareWorkersRosterOrder(a: OrganizationServicePrincipal, b: OrganizationServicePrincipal): number {
+  if (a.workerRef !== b.workerRef) {
+    return a.workerRef < b.workerRef ? -1 : 1;
+  }
+  if (a.servicePrincipalId !== b.servicePrincipalId) {
+    return a.servicePrincipalId < b.servicePrincipalId ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Tenant isolation follows `resolvePeopleDirectoryView`/`resolveConnectionsView`:
+ * each returned service principal's own `tenantId` is re-checked against
+ * the Organization's. A mismatch makes the whole roster `ERROR` instead of
+ * being silently dropped, because dropping it could turn a contaminated
+ * read into a shorter (or empty) roster that looks correct.
+ * `FileDurableOrganizationServicePrincipalStore` already throws on this case
+ * during replay; this check covers any other implementation of the port.
+ */
+export function resolveWorkersRosterView(
+  organization: Organization,
+  source: WorkersRosterSource | undefined,
+): WorkersRosterViewState {
+  if (source === undefined) {
+    return { kind: "NOT_ACTIVE" };
+  }
+  let servicePrincipals: ReadonlyArray<OrganizationServicePrincipal>;
+  try {
+    servicePrincipals = source.listServicePrincipals(organization);
+  } catch {
+    // A read/replay failure (e.g. CorruptedOrganizationServicePrincipalFileError,
+    // or a lock timeout) is this roster's own ERROR, never an empty list.
+    return { kind: "ERROR" };
+  }
+  if (servicePrincipals.some((sp) => sp.tenantId !== organization.tenantId)) {
+    return { kind: "ERROR" };
+  }
+  if (servicePrincipals.length === 0) {
+    return { kind: "EMPTY" };
+  }
+  const sorted = [...servicePrincipals].sort(compareWorkersRosterOrder).map((sp) => ({
+    servicePrincipalId: sp.servicePrincipalId,
+    workerRef: sp.workerRef,
+    lifecycleState: sp.state,
+  }));
+  return { kind: "READY", servicePrincipals: sorted };
 }
 
 /**

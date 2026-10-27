@@ -1,4 +1,4 @@
-import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, AdminResourceBindingViewState, OperationalObservabilityViewState, BreakGlassObservabilityViewState, PendingOffboardingRequestsViewState, ConnectionsViewState, KnowledgeViewState, KnowledgeEvidenceEntry, AttentionViewState, AttentionCredentialAccessItem, AttentionCustomerApprovalItem, PeopleDirectoryEntry, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary } from "./internal-os-view-state.js";
+import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, AdminResourceBindingViewState, OperationalObservabilityViewState, BreakGlassObservabilityViewState, PendingOffboardingRequestsViewState, ConnectionsViewState, KnowledgeViewState, KnowledgeEvidenceEntry, AttentionViewState, AttentionCredentialAccessItem, AttentionCustomerApprovalItem, PeopleDirectoryEntry, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary, WorkersRosterViewState, WorkersRosterEntry } from "./internal-os-view-state.js";
 import type { ConnectionState } from "../domain/connection-authority.js";
 import type { IntegrationConnectionSummary } from "../domain/integration-admin-view.js";
 import type { ProtectedDecisionOutcome } from "../domain/protected-decision-record.js";
@@ -748,6 +748,81 @@ export function connectionsPageContent(
         organizationName,
         title: "Connections",
         bodyHtml: renderConnectionsBody(view),
+      });
+  }
+}
+
+function renderWorkersRosterRow(entry: WorkersRosterEntry): string {
+  return `<tr><td>${escapeHtml(entry.servicePrincipalId)}</td><td>${escapeHtml(entry.workerRef)}</td><td><span class="status status-${entry.lifecycleState === "ACTIVE" ? "success" : "neutral"}" role="status">${escapeHtml(entry.lifecycleState)}</span></td></tr>`;
+}
+
+/**
+ * Gap scan N2: read-only AI & Capabilities destination. Every field comes
+ * from `WorkersRosterEntry`, the allow-list `resolveWorkersRosterView`
+ * builds, so an `OrganizationServicePrincipal`'s `revokedAt`/`revokedReason`
+ * never reach this function - and, structurally, neither could a
+ * capability/trust/routing field, since that allow-list has none.
+ *
+ * The disclosure paragraph below is mandatory on every READY render, not
+ * incidental copy: this table could otherwise be mistaken for a roster of
+ * admitted/routable AI workers. `worker-routing-policy.ts`'s own `ADMITTED`
+ * and `ELEVATED` trust-tier concepts are a genuinely separate, unresolved
+ * OS-V0-06/07/13 question (see that module's doc comment) that this
+ * read-only identity/lifecycle roster must never be read as answering -
+ * hence the plain-language disclosure, kept deliberately non-technical so
+ * it is legible to any staff reader, not just one who already knows that
+ * module's vocabulary.
+ */
+function renderWorkersRosterBody(view: Exclude<WorkersRosterViewState, { kind: "NOT_ACTIVE" } | { kind: "ERROR" }>): string {
+  if (view.kind === "EMPTY") {
+    return `
+  <section aria-labelledby="ai-capabilities-heading" class="card">
+    <h2 id="ai-capabilities-heading">AI &amp; Capabilities</h2>
+    <p>No AI/automation service principals are registered for this organization yet.</p>
+  </section>`;
+  }
+  const rows = view.servicePrincipals.map(renderWorkersRosterRow).join("\n      ");
+  return `
+  <section aria-labelledby="ai-capabilities-heading" class="card">
+    <h2 id="ai-capabilities-heading">AI &amp; Capabilities</h2>
+    <p>Read-only. Identity and lifecycle state only.</p>
+    <table>
+      <thead><tr><th>Service principal</th><th>Worker reference</th><th>Lifecycle state</th></tr></thead>
+      <tbody>
+      ${rows}
+      </tbody>
+    </table>
+  </section>
+  <section aria-labelledby="ai-capabilities-disclosure-heading" class="card">
+    <h2 id="ai-capabilities-disclosure-heading">What this roster does not show</h2>
+    <p>This roster shows identity and lifecycle state only. Capability, maturity, trust, and AI-worker routing authority are not shown here and remain NOT_ACTIVE — a service principal appearing here is not an admitted or routable AI worker.</p>
+  </section>`;
+}
+
+/**
+ * Gap scan N2: `NOT_ACTIVE` returns exactly what
+ * `notActiveDestinationPageContent` returned for `ai-capabilities` before
+ * this slice, so an unwired caller's page is unchanged. `ERROR` becomes the
+ * OS ERROR page (500, no data and no detail shown), never an EMPTY list.
+ */
+export function workersRosterPageContent(
+  nav: ReadonlyArray<NavDestination>,
+  organizationName: string,
+  view: WorkersRosterViewState,
+): InternalOsPageContent {
+  switch (view.kind) {
+    case "NOT_ACTIVE":
+      return notActiveDestinationPageContent(nav, organizationName, "ai-capabilities");
+    case "ERROR":
+      return { kind: "ERROR", reason: "AI & Capabilities roster could not be read" };
+    case "EMPTY":
+    case "READY":
+      return destinationContent({
+        nav,
+        activeKey: "ai-capabilities",
+        organizationName,
+        title: "AI & Capabilities",
+        bodyHtml: renderWorkersRosterBody(view),
       });
   }
 }

@@ -28,6 +28,7 @@ import {
   canMutateConnectorConnectionState,
   resolveKnowledgeView,
   resolveAttentionView,
+  resolveWorkersRosterView,
   canDecideProtectedDecision,
   resolveBreakGlassObservabilityView,
   BREAK_GLASS_SUPPORT_VIEW_KINDS,
@@ -35,6 +36,7 @@ import {
   type AttentionSource,
   type ConnectionsSource,
   type KnowledgeSource,
+  type WorkersRosterSource,
   type PeopleDirectorySource,
   type WorkProjectSource,
   type WorkJobSource,
@@ -47,10 +49,10 @@ import {
   homePageContent,
   workPageContent,
   workProjectDetailPageContent,
-  notActiveDestinationPageContent,
   connectionsPageContent,
   knowledgePageContent,
   attentionPageContent,
+  workersRosterPageContent,
   peoplePageContent,
   productsPageContent,
   adminPageContent,
@@ -156,6 +158,17 @@ export interface InternalOsRequestHandlerDeps {
    * `createDurableConnectionsSource` here.
    */
   readonly connectionsSource?: ConnectionsSource;
+  /**
+   * Gap scan N2: caller-injected read source for the dedicated
+   * `/os/ai-capabilities` destination. Same optional-source pattern as
+   * `connectionsSource`. Absent renders the same `NOT_ACTIVE` page as
+   * before this slice, never fabricated content. A source that throws
+   * renders the OS ERROR page. This roster is identity/lifecycle only - it
+   * carries no capability, maturity, trust, or AI-worker routing-authority
+   * data, and never will, by `WorkersRosterSource`'s own construction. The
+   * deployable runtime wires `createDurableWorkersRosterSource` here.
+   */
+  readonly workersRosterSource?: WorkersRosterSource;
   /**
    * C3 People slice (gap scan 2026-10-23): caller-injected read source for
    * the `/os/people` membership roster. Same optional-source pattern as
@@ -596,7 +609,11 @@ export function createInternalOsRequestHandler(deps: InternalOsRequestHandlerDep
         );
         break;
       case "ai-capabilities":
-        content = notActiveDestinationPageContent(nav, organizationName, parsed.kind);
+        content = workersRosterPageContent(
+          nav,
+          organizationName,
+          resolveWorkersRosterView(deps.organization, deps.workersRosterSource),
+        );
         break;
       case "knowledge":
         content = knowledgePageContent(
