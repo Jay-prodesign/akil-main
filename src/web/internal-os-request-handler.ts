@@ -1,5 +1,13 @@
+import { randomUUID } from "node:crypto";
 import type { StaffSessionProvider } from "./staff-session-provider.js";
-import { StaffUnauthenticatedError } from "./staff-route-guard.js";
+import { StaffUnauthenticatedError, requireStaffSession } from "./staff-route-guard.js";
+import { createTenantScope } from "../domain/tenant-scope.js";
+import type { BreakGlassSupportViewKind } from "../domain/break-glass-support-access.js";
+import {
+  authorizeBreakGlassSupportAccessAsAuthenticatedStaff,
+  type BreakGlassAccessGrantLookup,
+  type BreakGlassSupportAccessAuditSink,
+} from "./authenticated-break-glass-support-access.js";
 import { NoStaffMembershipError, AmbiguousStaffMembershipError } from "./staff-membership-guard.js";
 import type { Organization } from "../domain/organization.js";
 import {
@@ -21,6 +29,8 @@ import {
   resolveKnowledgeView,
   resolveAttentionView,
   canDecideProtectedDecision,
+  resolveBreakGlassObservabilityView,
+  BREAK_GLASS_SUPPORT_VIEW_KINDS,
   type DestinationKey,
   type AttentionSource,
   type ConnectionsSource,
@@ -44,6 +54,7 @@ import {
   peoplePageContent,
   productsPageContent,
   adminPageContent,
+  breakGlassObservabilityPageContent,
   type InternalOsPageContent,
   type RenderedInternalOsPage,
 } from "./internal-os-render.js";
@@ -71,6 +82,34 @@ import {
  * token belongs to even before either provider is consulted.
  */
 export const STAFF_SESSION_TOKEN_HEADER = "x-akilta-staff-session-token";
+
+/**
+ * C7: the break-glass branch of `GET /os/admin` is reached ONLY when this
+ * header carries a non-empty grant id (and `deps.breakGlass` is wired).
+ * Without it, every request takes the unchanged ordinary path. Same
+ * `x-akilta-...` prefix as `STAFF_SESSION_TOKEN_HEADER`; the caller still
+ * authenticates through that same staff-session header.
+ */
+export const BREAK_GLASS_GRANT_ID_HEADER = "x-akilta-break-glass-grant-id";
+
+/**
+ * C7: the fresh, per-session consent reference a grant with
+ * `consentRequired: true` needs (`authorizeBreakGlassSupportAccess`'s own
+ * `consentRef`). Ignored for a grant that does not require consent.
+ */
+export const BREAK_GLASS_CONSENT_REF_HEADER = "x-akilta-break-glass-consent-ref";
+
+/**
+ * C7: the break-glass dependencies, typed as minimal ports (the same
+ * convention as every other optional source here) - this web module never
+ * imports the concrete durable store classes.
+ */
+export interface BreakGlassSupportAccessDeps {
+  readonly grantStore: BreakGlassAccessGrantLookup;
+  readonly auditStore: BreakGlassSupportAccessAuditSink;
+  /** Server clock for the grant-expiry check and `decidedAt`. Defaults to `new Date().toISOString()`. Never read from the request. */
+  readonly clock?: () => string;
+}
 
 export interface InternalOsRequestHandlerDeps {
   readonly provider: StaffSessionProvider;
@@ -190,6 +229,16 @@ export interface InternalOsRequestHandlerDeps {
    * reads.
    */
   readonly attentionDecision?: AttentionDecisionDeps;
+  /**
+   * C7 (gap scan 2026-10-23): the durable break-glass grant lookup and
+   * audit append behind the read-only break-glass branch of `GET /os/admin`
+   * (see `handleBreakGlassAdminGet`). Absent, or present but the request
+   * carries no `BREAK_GLASS_GRANT_ID_HEADER`: `/os/admin` behaves exactly
+   * as before C7. The deployable runtime wires a
+   * `FileDurableBreakGlassAccessGrantStore` and a
+   * `FileDurableBreakGlassSupportAccessAuditStore`.
+   */
+  readonly breakGlass?: BreakGlassSupportAccessDeps;
 }
 
 function toResponse(rendered: RenderedInternalOsPage): OutgoingResponseLike {
@@ -256,6 +305,101 @@ function parseInternalOsPath(path: string): ParsedInternalOsPath {
 }
 
 export type InternalOsRequestHandler = (request: IncomingRequestLike) => OutgoingResponseLike;
+
+/**
+ * C7 (gap scan 2026-10-23; OS-V1-09.md's own named route-wiring
+ * follow-on): the read-only break-glass branch of `GET /os/admin`. A
+ * non-member support principal views THIS deployment's own organization's
+ * operational observability under a scoped, time-bounded, audited
+ * `BreakGlassAccessGrant` - never a different organization's data, and
+ * never anything beyond the observability kinds the grant names.
+ *
+ * Order (every failure fails closed, and none renders an error message,
+ * a grant id or any other request value):
+ * 1. Authenticate the staff session (`requireStaffSession`) -> 401 on
+ *    failure. Done BEFORE the grant lookup on purpose: if the lookup ran
+ *    first, an unauthenticated caller would get 403 for an unknown grant
+ *    id but 401 for a real one - an existence oracle for grant ids. The
+ *    wrapper below re-authenticates the same token itself; this first call
+ *    only fixes the response order, it never supplies identity to anything.
+ * 2. Look the grant up ONCE, under this organization's own tenant. No grant
+ *    -> 403, and the domain gate is never called (there is nothing to
+ *    authorize against) and nothing is audited.
+ * 3. Call the domain gate once PER view kind (`BREAK_GLASS_SUPPORT_VIEW_KINDS`),
+ *    through `authorizeBreakGlassSupportAccessAsAuthenticatedStaff`, with the
+ *    same grant, session token, consent header and `now` each time and a
+ *    fresh `auditRef` per call. Each `GRANTED` call durably appends its own
+ *    audit record before it returns; a kind outside the grant's scope comes
+ *    back `DENIED` and is simply not shown.
+ * 4. Every kind `DENIED` (expired, revoked, foreign tenant, wrong
+ *    principal, missing consent) -> the same 403 as step 2.
+ * 5. Otherwise resolve the observability source ONCE and render only the
+ *    granted kinds' fields (`resolveBreakGlassObservabilityView`). An
+ *    unwired source renders the page's `NOT_ACTIVE` state.
+ *
+ * A `StaffUnauthenticatedError` from either authentication call -> 401,
+ * exactly like the ordinary path. Any other error propagates (the HTTP
+ * server answers its generic 500), exactly like the ordinary path - for
+ * example a corrupted grant file, or an audit append failure, which by
+ * construction means no page is served for an access whose evidence was
+ * not recorded.
+ */
+function handleBreakGlassAdminGet(input: {
+  readonly request: IncomingRequestLike;
+  readonly grantId: string;
+  readonly deps: InternalOsRequestHandlerDeps;
+  readonly breakGlass: BreakGlassSupportAccessDeps;
+}): OutgoingResponseLike {
+  const { request, grantId, deps, breakGlass } = input;
+  const sessionToken = request.headers[STAFF_SESSION_TOKEN_HEADER];
+  const consentRef = request.headers[BREAK_GLASS_CONSENT_REF_HEADER];
+  const now = breakGlass.clock !== undefined ? breakGlass.clock() : new Date().toISOString();
+  try {
+    requireStaffSession(deps.provider, sessionToken, now);
+    const targetTenantScope = createTenantScope(deps.organization.tenantId);
+    const grant = breakGlass.grantStore.getGrant(targetTenantScope, grantId);
+    if (grant === undefined) {
+      return toResponse(renderInternalOsPage({ kind: "FORBIDDEN" }));
+    }
+    const grantedKinds: BreakGlassSupportViewKind[] = [];
+    for (const requestedView of BREAK_GLASS_SUPPORT_VIEW_KINDS) {
+      const decision = authorizeBreakGlassSupportAccessAsAuthenticatedStaff({
+        grant,
+        targetTenantScope,
+        provider: deps.provider,
+        sessionToken,
+        requestedView,
+        consentRef,
+        auditRef: `break-glass-audit-${randomUUID()}`,
+        now,
+        auditStore: breakGlass.auditStore,
+      });
+      if (decision.outcome === "GRANTED") {
+        grantedKinds.push(requestedView);
+      }
+    }
+    if (grantedKinds.length === 0) {
+      return toResponse(renderInternalOsPage({ kind: "FORBIDDEN" }));
+    }
+    return toResponse(
+      renderInternalOsPage(
+        breakGlassObservabilityPageContent(
+          deps.organization.displayName,
+          resolveBreakGlassObservabilityView({
+            organization: deps.organization,
+            grantedKinds,
+            source: deps.operationalObservabilitySource,
+          }),
+        ),
+      ),
+    );
+  } catch (error) {
+    if (error instanceof StaffUnauthenticatedError) {
+      return toResponse(renderInternalOsPage({ kind: "UNAUTHENTICATED" }));
+    }
+    throw error;
+  }
+}
 
 /**
  * Rev168 mandatory tests, all enforced here before any destination content
@@ -333,6 +477,20 @@ export function createInternalOsRequestHandler(deps: InternalOsRequestHandlerDep
     const parsed = parseInternalOsPath(request.path);
     if (parsed.kind === "not-found") {
       return toResponse(renderInternalOsPage({ kind: "NOT_FOUND" }));
+    }
+
+    /**
+     * C7: the break-glass branch, taken ONLY for `/os/admin` with
+     * `deps.breakGlass` wired AND a non-empty `BREAK_GLASS_GRANT_ID_HEADER`.
+     * It always returns - it never falls through to the ordinary path below.
+     * For every other request (no header, which is every pre-C7 caller) this
+     * condition is false and the code below runs exactly as before C7.
+     */
+    if (parsed.kind === "admin" && deps.breakGlass !== undefined) {
+      const breakGlassGrantId = request.headers[BREAK_GLASS_GRANT_ID_HEADER];
+      if (typeof breakGlassGrantId === "string" && breakGlassGrantId.length > 0) {
+        return handleBreakGlassAdminGet({ request, grantId: breakGlassGrantId, deps, breakGlass: deps.breakGlass });
+      }
     }
 
     let context;

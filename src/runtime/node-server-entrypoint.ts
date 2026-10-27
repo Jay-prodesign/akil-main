@@ -101,6 +101,14 @@ import type { StaffAccessGrant } from "../web/internal-os-access.js";
  *   `getProtectedDecisionRecord` reads the SAME store instance, so a
  *   decision just recorded is immediately reflected in that page's status
  *   column. See `internal-os-attention-decision-route.ts`.
+ * - **Break-glass support access (C7, read-only).** `GET /os/admin` with
+ *   an `x-akilta-break-glass-grant-id` header reads a newly composed
+ *   `FileDurableBreakGlassAccessGrantStore` and appends one record per
+ *   granted view kind to a newly composed
+ *   `FileDurableBreakGlassSupportAccessAuditStore` (each with its own
+ *   `/health` probe). Without that header `/os/admin` is unchanged. No
+ *   runtime path mints grants yet, so every such request answers 403.
+ *   See `handleBreakGlassAdminGet` in `internal-os-request-handler.ts`.
  * - **Routing.** One Node server dispatches `GET /health`, then `/os/*`
  *   (the staff surface), then everything else (the customer `/portal`
  *   surface) - see `createHttpServer`. Only an `/os` POST reads a request
@@ -253,6 +261,10 @@ export function createNodeRuntime(config: AppConfig, options: NodeRuntimeOptions
     },
     connectorConnectionStateDecision: { store: stores.connectorConnectionStore },
     attentionDecision: { store: stores.protectedDecisionRecordStore },
+    breakGlass: {
+      grantStore: stores.breakGlassAccessGrantStore,
+      auditStore: stores.breakGlassSupportAccessAuditStore,
+    },
   });
 
   const server = createHttpServer({

@@ -1,4 +1,4 @@
-import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, AdminResourceBindingViewState, OperationalObservabilityViewState, PendingOffboardingRequestsViewState, ConnectionsViewState, KnowledgeViewState, KnowledgeEvidenceEntry, AttentionViewState, AttentionCredentialAccessItem, AttentionCustomerApprovalItem, PeopleDirectoryEntry, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary } from "./internal-os-view-state.js";
+import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, WorkProjectDetailViewState, PeopleViewState, ProductsViewState, AdminViewState, AdminResourceBindingViewState, OperationalObservabilityViewState, BreakGlassObservabilityViewState, PendingOffboardingRequestsViewState, ConnectionsViewState, KnowledgeViewState, KnowledgeEvidenceEntry, AttentionViewState, AttentionCredentialAccessItem, AttentionCustomerApprovalItem, PeopleDirectoryEntry, ProjectSummary, JobsViewState, AccessSummary, OrganizationSummary } from "./internal-os-view-state.js";
 import type { ConnectionState } from "../domain/connection-authority.js";
 import type { IntegrationConnectionSummary } from "../domain/integration-admin-view.js";
 import type { ProtectedDecisionOutcome } from "../domain/protected-decision-record.js";
@@ -475,6 +475,93 @@ function renderAdminBody(view: AdminViewState): string {
   </section>`;
 }
 
+/**
+ * C7: the break-glass support page body. Renders ONLY the sections whose
+ * kind is in `view.grantedKinds` - a kind the grant did not admit gets no
+ * heading and no "none tracked" line, so the page never even reveals
+ * whether that dimension holds data. The per-section markup mirrors
+ * `renderOperationalObservabilityCard`'s, written separately here so the
+ * existing `/os/admin` card stays byte-for-byte unchanged. Escaped text
+ * only: this page is READ-ONLY and renders no form, button or other
+ * control of any kind.
+ */
+function renderBreakGlassObservabilityBody(view: BreakGlassObservabilityViewState): string {
+  const intro = `
+  <section aria-labelledby="break-glass-notice-heading" class="card">
+    <h2 id="break-glass-notice-heading">Break-glass support access</h2>
+    <p>Read-only support view under a scoped, time-bounded break-glass grant. Each section below was individually authorized and audited for this request. Sections outside the grant's scope are not shown.</p>
+  </section>`;
+  if (view.kind === "NOT_ACTIVE") {
+    return `${intro}
+  <section aria-labelledby="break-glass-observability-heading" class="card">
+    <h2 id="break-glass-observability-heading">Observability</h2>
+    <p class="status status-neutral" role="status">NOT ACTIVE</p>
+    <p>This area is not yet connected to a live data source in this build.</p>
+  </section>`;
+  }
+  const v = view.view;
+  const sections = view.grantedKinds.map((kind): string => {
+    switch (kind) {
+      case "TASK":
+        return `<h3>Task / worker health</h3>
+    ${
+      v.task !== undefined
+        ? `<p>Task status: <span class="status status-neutral" role="status">${escapeHtml(v.task.runStatus)}</span> — attempt ${v.task.currentAttempt}${v.task.currentAttemptStatus !== undefined ? ` (${escapeHtml(v.task.currentAttemptStatus)})` : ""}</p>
+    <p>Worker health: <span class="status status-neutral" role="status">${escapeHtml(v.task.workerHealth)}</span></p>`
+        : `<p>No task currently tracked.</p>`
+    }`;
+      case "CONNECTION":
+        return `<h3>Connections</h3>
+    ${
+      v.connections.length > 0
+        ? `<ul>\n      ${v.connections
+            .map(
+              (connection) =>
+                `<li>${escapeHtml(connection.connectionBindingId)}: <span class="status status-${connection.killSwitchEngaged ? "danger" : connection.degraded ? "warning" : "neutral"}" role="status">${escapeHtml(connection.connectionState)}</span>${connection.killSwitchEngaged ? " — kill switch engaged" : ""}</li>`,
+            )
+            .join("\n      ")}\n    </ul>`
+        : `<p>No connections tracked.</p>`
+    }`;
+      case "QUOTA":
+        return `<h3>Cost / quota</h3>
+    ${
+      v.quota !== undefined
+        ? `<p>Quota: ${v.quota.unitReserved}/${v.quota.unitLimit} reserved, ${v.quota.unitCommitted} committed, ${v.quota.unitRemaining} remaining</p>`
+        : `<p>No quota data tracked.</p>`
+    }`;
+      case "APPROVALS":
+        return `<h3>Pending approvals</h3>
+    ${
+      v.pendingApprovals.length > 0
+        ? `<ul>\n      ${v.pendingApprovals
+            .map(
+              (approval) =>
+                `<li>${escapeHtml(approval.waitRequestId)}: <span class="status status-${approval.resolved ? "neutral" : "warning"}" role="status">${approval.resolved ? "RESOLVED" : "PENDING"}</span></li>`,
+            )
+            .join("\n      ")}\n    </ul>`
+        : `<p>No pending approvals tracked.</p>`
+    }`;
+      case "AUDIT_EVIDENCE":
+        return `<h3>Audit / evidence</h3>
+    ${
+      v.auditEvidence.length > 0
+        ? `<ul>\n      ${v.auditEvidence
+            .map(
+              (evidence) =>
+                `<li>${escapeHtml(evidence.evidenceId)} (${escapeHtml(evidence.evidenceType)}): <span class="status status-neutral" role="status">${evidence.verificationStatus !== undefined ? escapeHtml(evidence.verificationStatus) : "UNVERIFIED"}</span></li>`,
+            )
+            .join("\n      ")}\n    </ul>`
+        : `<p>No audit/evidence tracked.</p>`
+    }`;
+    }
+  });
+  return `${intro}
+  <section aria-labelledby="break-glass-observability-heading" class="card">
+    <h2 id="break-glass-observability-heading">Observability</h2>
+    ${sections.join("\n    ")}
+  </section>`;
+}
+
 function renderWorkProjectDetailBody(view: WorkProjectDetailViewState): string {
   switch (view.kind) {
     case "NOT_ACTIVE":
@@ -502,6 +589,16 @@ export type InternalOsPageContent =
    */
   | { readonly kind: "BAD_REQUEST" }
   | { readonly kind: "CONFLICT" }
+  /**
+   * C7: the read-only break-glass support page for `/os/admin`. Never
+   * carries `nav`: a break-glass caller is not a member browsing the OS,
+   * so it is shown no destination list (like `UNAUTHENTICATED`/`NOT_FOUND`).
+   */
+  | {
+      readonly kind: "BREAK_GLASS_OBSERVABILITY";
+      readonly organizationName: string;
+      readonly view: BreakGlassObservabilityViewState;
+    }
   | {
       readonly kind: "DESTINATION";
       readonly nav: ReadonlyArray<NavDestination>;
@@ -872,12 +969,18 @@ export function adminPageContent(nav: ReadonlyArray<NavDestination>, organizatio
   return destinationContent({ nav, activeKey: "admin", organizationName, title: "Admin", bodyHtml: renderAdminBody(view) });
 }
 
+/** C7: the break-glass support page - see the `BREAK_GLASS_OBSERVABILITY` variant. */
+export function breakGlassObservabilityPageContent(organizationName: string, view: BreakGlassObservabilityViewState): InternalOsPageContent {
+  return { kind: "BREAK_GLASS_OBSERVABILITY", organizationName, view };
+}
+
 /**
  * Rev168 A12-equivalent discipline (reused from `shell-render.ts`): every
  * branch here is a distinct, deterministic rendering, `statusLabel` is
- * always visible text (never color alone), and only `DESTINATION` ever
- * renders application content - none of the error/denial branches can be
- * mistaken for a successful render.
+ * always visible text (never color alone), and only `DESTINATION` (and,
+ * since C7, the read-only `BREAK_GLASS_OBSERVABILITY`) ever renders
+ * application content - none of the error/denial branches can be mistaken
+ * for a successful render.
  */
 export function renderInternalOsPage(content: InternalOsPageContent): RenderedInternalOsPage {
   switch (content.kind) {
@@ -964,6 +1067,18 @@ export function renderInternalOsPage(content: InternalOsPageContent): RenderedIn
           statusTone: "warning",
           bodyHtml:
             "<p>This decision could not be applied. The request may already have been decided or changed since the page was loaded. Nothing was changed. Reload the admin page and try again.</p>",
+        }),
+      };
+    case "BREAK_GLASS_OBSERVABILITY":
+      return {
+        status: 200,
+        contentType: "text/html; charset=utf-8",
+        html: renderPage({
+          chrome: { nav: [], activeKey: undefined, organizationName: content.organizationName },
+          title: "Support access",
+          statusLabel: "Break-glass support access (read-only, audited)",
+          statusTone: "warning",
+          bodyHtml: renderBreakGlassObservabilityBody(content.view),
         }),
       };
     case "DESTINATION":

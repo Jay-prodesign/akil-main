@@ -89,12 +89,14 @@ test("OS-V0-08: each module exports exactly the expected surface", () => {
     "requireInternalOsProjectAccess",
   ]);
   assert.deepEqual(Object.keys(InternalOsViewState).sort(), [
+    "BREAK_GLASS_SUPPORT_VIEW_KINDS",
     "NAV_DESTINATIONS",
     "canDecideProtectedDecision",
     "canMutateConnectorConnectionState",
     "isDestinationVisible",
     "resolveAdminView",
     "resolveAttentionView",
+    "resolveBreakGlassObservabilityView",
     "resolveConnectionsView",
     "resolveHomeView",
     "resolveKnowledgeView",
@@ -113,6 +115,7 @@ test("OS-V0-08: each module exports exactly the expected surface", () => {
   assert.deepEqual(Object.keys(InternalOsRender).sort(), [
     "adminPageContent",
     "attentionPageContent",
+    "breakGlassObservabilityPageContent",
     "connectionsPageContent",
     "homePageContent",
     "knowledgePageContent",
@@ -124,6 +127,8 @@ test("OS-V0-08: each module exports exactly the expected surface", () => {
     "workProjectDetailPageContent",
   ]);
   assert.deepEqual(Object.keys(InternalOsRequestHandler).sort(), [
+    "BREAK_GLASS_CONSENT_REF_HEADER",
+    "BREAK_GLASS_GRANT_ID_HEADER",
     "STAFF_SESSION_TOKEN_HEADER",
     "createInternalOsRequestHandler",
   ]);
