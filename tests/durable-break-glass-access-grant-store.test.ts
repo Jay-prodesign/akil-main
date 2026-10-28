@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync, mkdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTenantScope } from "../src/domain/tenant-scope.js";
@@ -287,4 +287,24 @@ test("C7 grant store adversarial (corrupted file): one corrupted line poisons th
     assert.throws(() => store.getGrant(TENANT_A, "bg-grant-1"), CorruptedBreakGlassAccessGrantLineError);
     assert.equal(store.getGrant(TENANT_B, "bg-grant-1")?.targetTenantId, TENANT_B.tenantId);
   });
+});
+
+test("stale lock reclaim: a lock file abandoned by a crashed process is reclaimed, so a later caller succeeds quickly rather than stalling for the full lock timeout", () => {
+  const dir = freshDir();
+  try {
+    const store = new FileDurableBreakGlassAccessGrantStore(dir);
+    const safeKey = Buffer.from("tenant-bg-store-stale", "utf8").toString("base64url");
+    const lockPath = join(dir, ".grant-file-locks", `${safeKey}.lock`);
+    mkdirSync(join(dir, ".grant-file-locks"), { recursive: true });
+    writeFileSync(lockPath, "99999999", "utf8");
+    const past = new Date(Date.now() - 31_000);
+    utimesSync(lockPath, past, past);
+    const startedAt = Date.now();
+    const result = store.getGrant(createTenantScope("tenant-bg-store-stale"), "bg-grant-does-not-exist");
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(result, undefined);
+    assert.ok(elapsedMs < 2000, `expected the stale lock to be reclaimed quickly, took ${elapsedMs}ms`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

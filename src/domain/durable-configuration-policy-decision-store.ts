@@ -212,6 +212,16 @@ export class FileDurableConfigurationPolicyDecisionStore implements DurableConfi
   }
 
   /** Rev94 F1's exact `linkSync` atomic-creation primitive, cloned verbatim. */
+  /**
+   * Deliberately NOT given the stale-lock staleness-reclaim fix applied to
+   * other `FileDurable*Store` siblings (a lock abandoned by a crashed
+   * process still costs every future waiter the full `MAX_LOCK_ATTEMPTS`
+   * wait here): OS-V0-11's own boundary scan (`tests/os-v0-11-boundary-
+   * scan.test.ts`) asserts this file never reads the wall clock - every
+   * timestamp is caller-supplied - and a staleness check needs exactly
+   * that read to measure a lock's age. Revisit together with that
+   * invariant, not by quietly violating it here.
+   */
   private withDecisionLogFileLock<T>(tenantId: TenantScope["tenantId"], decisionKey: string, criticalSection: () => T): T {
     const lockPath = this.fileLockPathFor(tenantId, decisionKey);
     const tmpPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;

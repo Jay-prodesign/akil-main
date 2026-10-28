@@ -478,3 +478,38 @@ test("C1-R14: selectInternalOsStaffSessionProvider (shared by the runtime and cr
   const development = selectInternalOsStaffSessionProvider({ isProduction: false, devStaffFixtures: fixtures });
   assert.equal(development.resolveStaffSession(STAFF_TOKEN)?.principal.principalId, OS_PRINCIPAL);
 });
+
+test("C1-R15: boot warns on stderr when INTERNAL_OS_TENANT_ID/INTERNAL_OS_ORGANIZATION_ID are both unset, since the entire /os surface will silently 404 with no other signal", () => {
+  const dataDir = freshDataDir();
+  const originalWarn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
+  try {
+    createNodeRuntime(resolveAppConfig({ DATA_DIR: dataDir }));
+    assert.ok(
+      warnings.some((message) => message.includes("INTERNAL_OS_TENANT_ID") && message.includes("/os")),
+      `expected a boot warning naming INTERNAL_OS_TENANT_ID and /os, got: ${JSON.stringify(warnings)}`,
+    );
+  } finally {
+    console.warn = originalWarn;
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("C1-R16: boot stays silent on this warning when INTERNAL_OS_TENANT_ID/INTERNAL_OS_ORGANIZATION_ID are both set", () => {
+  const dataDir = freshDataDir();
+  const originalWarn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
+  try {
+    createNodeRuntime(resolveAppConfig({ DATA_DIR: dataDir, INTERNAL_OS_TENANT_ID: OS_TENANT, INTERNAL_OS_ORGANIZATION_ID: OS_ORG }));
+    assert.deepEqual(warnings, []);
+  } finally {
+    console.warn = originalWarn;
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});

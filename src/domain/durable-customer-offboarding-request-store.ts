@@ -5,6 +5,7 @@ import {
   existsSync,
   linkSync,
   unlinkSync,
+  statSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -293,6 +294,7 @@ export class FileDurableCustomerOffboardingRequestStore implements DurableCustom
   private readonly baseDir: string;
   private static readonly LOCK_TIMEOUT_MS = 5000;
   private static readonly LOCK_RETRY_BACKOFF_MS = 5;
+  private static readonly STALE_LOCK_THRESHOLD_MS = 30_000;
 
   constructor(baseDir: string) {
     this.baseDir = baseDir;
@@ -340,6 +342,15 @@ export class FileDurableCustomerOffboardingRequestStore implements DurableCustom
             // best-effort cleanup only
           }
           throw cause;
+        }
+        try {
+          if (Date.now() - statSync(lockPath).mtimeMs > FileDurableCustomerOffboardingRequestStore.STALE_LOCK_THRESHOLD_MS) {
+            unlinkSync(lockPath);
+          }
+        } catch {
+          // the lock may have just been released, or reclaimed by another
+          // waiter, between the EEXIST above and this check - either way,
+          // just fall through and retry
         }
         if (Date.now() > deadline) {
           try {

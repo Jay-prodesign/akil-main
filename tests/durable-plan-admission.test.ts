@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1397,6 +1397,37 @@ test("AUD-GAP-V2 positive control: a well-formed ADMITTED result (real evaluated
     );
     assert.equal(state?.latestResult?.status, "ADMITTED");
     assert.equal(state?.latestResult?.evaluatedApprovalId, "approval-aud-gap-v2-admitted");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("stale lock reclaim: a lock file abandoned by a crashed process is reclaimed, so a later caller succeeds quickly rather than stalling for the full lock timeout", () => {
+  const dir = freshStoreDir();
+  try {
+    const fixture = buildWebsiteBuildV1Fixture();
+    const plan = compilePlan({
+      tenantScope: fixture.tenantScope,
+      project: fixture.project,
+      planId: "plan-lock-reclaim-stale",
+      blueprint: fixture.blueprint,
+      soldScope: fixture.soldScope,
+      evidence: fixture.evidence,
+      now: "2026-09-25T00:00:00.000Z",
+    });
+    const store = new FileDurablePlanAdmissionStore(dir);
+    const key = JSON.stringify([fixture.tenantScope.tenantId, fixture.customer.customerId, fixture.project.projectId, plan.planId]);
+    const safeKey = Buffer.from(key, "utf8").toString("base64url");
+    const lockPath = join(dir, ".locks", `${safeKey}.lock`);
+    mkdirSync(join(dir, ".locks"), { recursive: true });
+    writeFileSync(lockPath, "99999999", "utf8");
+    const past = new Date(Date.now() - 31_000);
+    utimesSync(lockPath, past, past);
+    const startedAt = Date.now();
+    const result = store.getState(fixture.tenantScope.tenantId, fixture.customer.customerId, fixture.project.projectId, plan.planId);
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(result, undefined);
+    assert.ok(elapsedMs < 2000, `expected the stale lock to be reclaimed quickly, took ${elapsedMs}ms`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
