@@ -99,13 +99,13 @@ test("Work READY renders each project as a linked card with its job table", () =
   assert.match(rendered.html, /EXECUTING/);
 });
 
-test("workProjectDetailPageContent NOT_FOUND/FORBIDDEN/NOT_ACTIVE each render distinct, truthful text and status", () => {
+test("workProjectDetailPageContent NOT_FOUND/FORBIDDEN render the shared, generic top-level copy with the correct status, never project-specific text", () => {
   const notFound = renderInternalOsPage(workProjectDetailPageContent(NAV_DESTINATIONS, "Org", { kind: "NOT_FOUND" }));
   assert.equal(notFound.status, 404);
-  assert.match(notFound.html, /could not find this project/);
+  assert.match(notFound.html, /We could not find this page/);
   const forbidden = renderInternalOsPage(workProjectDetailPageContent(NAV_DESTINATIONS, "Org", { kind: "FORBIDDEN" }));
   assert.equal(forbidden.status, 403);
-  assert.match(forbidden.html, /do not have access/);
+  assert.match(forbidden.html, /You do not have access to this area/);
   const notActive = renderInternalOsPage(workProjectDetailPageContent(NAV_DESTINATIONS, "Org", { kind: "NOT_ACTIVE" }));
   assert.equal(notActive.status, 200);
   assert.match(notActive.html, /NOT ACTIVE/);
