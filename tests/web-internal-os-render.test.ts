@@ -99,13 +99,24 @@ test("Work READY renders each project as a linked card with its job table", () =
   assert.match(rendered.html, /EXECUTING/);
 });
 
-test("workProjectDetailPageContent NOT_FOUND/FORBIDDEN/NOT_ACTIVE each render distinct, truthful text", () => {
+test("workProjectDetailPageContent NOT_FOUND/FORBIDDEN/NOT_ACTIVE each render distinct, truthful text and status", () => {
   const notFound = renderInternalOsPage(workProjectDetailPageContent(NAV_DESTINATIONS, "Org", { kind: "NOT_FOUND" }));
+  assert.equal(notFound.status, 404);
   assert.match(notFound.html, /could not find this project/);
   const forbidden = renderInternalOsPage(workProjectDetailPageContent(NAV_DESTINATIONS, "Org", { kind: "FORBIDDEN" }));
+  assert.equal(forbidden.status, 403);
   assert.match(forbidden.html, /do not have access/);
   const notActive = renderInternalOsPage(workProjectDetailPageContent(NAV_DESTINATIONS, "Org", { kind: "NOT_ACTIVE" }));
+  assert.equal(notActive.status, 200);
   assert.match(notActive.html, /NOT ACTIVE/);
+});
+
+test("workProjectDetailPageContent FORBIDDEN carries nav so the 403 page still shows the destination list", () => {
+  const forbidden = renderInternalOsPage(workProjectDetailPageContent(NAV_DESTINATIONS, "Org", { kind: "FORBIDDEN" }));
+  assert.equal(forbidden.status, 403);
+  for (const destination of NAV_DESTINATIONS) {
+    assert.match(forbidden.html, new RegExp(`href="${destination.path}"`));
+  }
 });
 
 test("attention/ai-capabilities/connections/knowledge all render a truthful NOT ACTIVE state with their own label", () => {

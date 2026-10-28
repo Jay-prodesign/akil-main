@@ -562,14 +562,10 @@ function renderBreakGlassObservabilityBody(view: BreakGlassObservabilityViewStat
   </section>`;
 }
 
-function renderWorkProjectDetailBody(view: WorkProjectDetailViewState): string {
+function renderWorkProjectDetailBody(view: Exclude<WorkProjectDetailViewState, { kind: "NOT_FOUND" } | { kind: "FORBIDDEN" }>): string {
   switch (view.kind) {
     case "NOT_ACTIVE":
       return renderNotActiveCard("Project detail");
-    case "NOT_FOUND":
-      return `<p>We could not find this project.</p>`;
-    case "FORBIDDEN":
-      return `<p>You do not have access to this project.</p>`;
     case "READY":
       return renderProjectCard(view.project);
   }
@@ -631,6 +627,12 @@ export function workProjectDetailPageContent(
   organizationName: string,
   view: WorkProjectDetailViewState,
 ): InternalOsPageContent {
+  if (view.kind === "FORBIDDEN") {
+    return { kind: "FORBIDDEN", nav };
+  }
+  if (view.kind === "NOT_FOUND") {
+    return { kind: "NOT_FOUND" };
+  }
   return destinationContent({
     nav,
     activeKey: "work",
