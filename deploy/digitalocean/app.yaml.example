@@ -14,12 +14,18 @@
 # behind it would misrepresent what this deploys. Add them here once their
 # own entry points exist, not before.
 #
-# This single WEB service deploys exactly what RUNTIME-001 built: the
-# fixture-backed demo shell (src/fixtures/web-shell.ts), not a real
-# persistence-backed or Shopify-connected backend. PERSISTENCE_DRIVER stays
-# FILE deliberately — flipping it to POSTGRES here would claim a database
-# wiring that createNodeRuntime() does not actually consume (it always
-# serves the fixtures regardless of config.persistenceDriver).
+# This single WEB service deploys the real runtime composition root (C1,
+# src/runtime/node-server-entrypoint.ts): /health, /portal, and /os are
+# served from real FILE-backed FileDurable*Store persistence rooted at
+# DATA_DIR, not from the fixture-backed demo shell this comment used to
+# describe (that was accurate before C1 landed; it no longer is). FILE
+# persistence on this platform's container filesystem is still ephemeral
+# across redeploys/restarts unless a persistent volume is separately
+# provisioned. PERSISTENCE_DRIVER stays FILE deliberately — setting it to
+# POSTGRES makes createNodeRuntime() fail closed at boot
+# (UnsupportedRuntimePersistenceDriverError), since no SQL driver/managed
+# Postgres decision has been made yet (see D2 in
+# docs/exec-plans/active/WHOLE-PRODUCT-GAP-SCAN-2026-10-23.md).
 
 name: akilta-backend
 
