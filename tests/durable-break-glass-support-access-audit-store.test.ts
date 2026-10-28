@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -309,3 +309,22 @@ test(
     }
   },
 );
+
+test("stale lock reclaim: a lock file abandoned by a crashed process is reclaimed, so a later caller succeeds quickly rather than stalling for the full lock timeout", () => {
+  const dir = freshDir();
+  try {
+    const store = new FileDurableBreakGlassSupportAccessAuditStore(dir);
+    const lockPath = join(dir, ".locks", "__global__.lock");
+    mkdirSync(join(dir, ".locks"), { recursive: true });
+    writeFileSync(lockPath, "99999999", "utf8");
+    const past = new Date(Date.now() - 31_000);
+    utimesSync(lockPath, past, past);
+    const startedAt = Date.now();
+    const result = store.findByTargetTenant(createTenantScope("tenant-bg-audit-stale"));
+    const elapsedMs = Date.now() - startedAt;
+    assert.deepEqual(result, []);
+    assert.ok(elapsedMs < 2000, `expected the stale lock to be reclaimed quickly, took ${elapsedMs}ms`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

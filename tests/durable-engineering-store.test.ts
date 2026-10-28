@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -354,6 +354,26 @@ test("positive control: a well-formed persisted event still passes replay revali
     const events = store.getEvents("AKILTA", TASK_ID, RUN_1);
     assert.equal(events.length, 1);
     assert.equal(events[0]?.eventId, "evt-good");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("stale lock reclaim: a lock file abandoned by a crashed process is reclaimed, so a later caller succeeds quickly rather than stalling for the full lock timeout", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableEngineeringStore(dir);
+    const safeKey = Buffer.from(JSON.stringify(["proj-stale", "task-stale", "run-stale"]), "utf8").toString("base64url");
+    const lockPath = join(dir, ".locks", `${safeKey}.lock`);
+    mkdirSync(join(dir, ".locks"), { recursive: true });
+    writeFileSync(lockPath, "99999999", "utf8");
+    const past = new Date(Date.now() - 31_000);
+    utimesSync(lockPath, past, past);
+    const startedAt = Date.now();
+    const result = store.getState("proj-stale", "task-stale" as TaskId, "run-stale" as RunId);
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(result, undefined);
+    assert.ok(elapsedMs < 2000, `expected the stale lock to be reclaimed quickly, took ${elapsedMs}ms`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

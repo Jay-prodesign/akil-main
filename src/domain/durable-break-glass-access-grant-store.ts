@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync, appendFileSync, linkSync, unlinkSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, appendFileSync, linkSync, unlinkSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { createTenantScope, type TenantScope } from "./tenant-scope.js";
@@ -247,6 +247,7 @@ export class FileDurableBreakGlassAccessGrantStore implements DurableBreakGlassA
   private readonly baseDir: string;
   private static readonly LOCK_RETRY_BACKOFF_MS = 5;
   private static readonly MAX_LOCK_ATTEMPTS = 1000;
+  private static readonly STALE_LOCK_THRESHOLD_MS = 30_000;
 
   constructor(baseDir: string) {
     this.baseDir = baseDir;
@@ -308,6 +309,15 @@ export class FileDurableBreakGlassAccessGrantStore implements DurableBreakGlassA
             // best-effort cleanup only
           }
           throw cause;
+        }
+        try {
+          if (Date.now() - statSync(lockPath).mtimeMs > FileDurableBreakGlassAccessGrantStore.STALE_LOCK_THRESHOLD_MS) {
+            unlinkSync(lockPath);
+          }
+        } catch {
+          // the lock may have just been released, or reclaimed by another
+          // waiter, between the EEXIST above and this check - either way,
+          // just fall through and retry
         }
         attempts += 1;
         if (attempts >= FileDurableBreakGlassAccessGrantStore.MAX_LOCK_ATTEMPTS) {

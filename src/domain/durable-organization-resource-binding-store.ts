@@ -333,6 +333,16 @@ export class FileDurableOrganizationResourceBindingStore implements DurableOrgan
    * here - the lock is kept rather than removed on an unproven atomicity
    * assumption.
    */
+  /**
+   * Deliberately NOT given the stale-lock staleness-reclaim fix applied to
+   * other `FileDurable*Store` siblings (a lock abandoned by a crashed
+   * process still costs every future waiter the full `MAX_LOCK_ATTEMPTS`
+   * wait here): OS-V0-09's own boundary scan (`tests/os-v0-09-boundary-
+   * scan.test.ts`) asserts this file never reads the wall clock - every
+   * timestamp is caller-supplied - and a staleness check needs exactly
+   * that read to measure a lock's age. Revisit together with that
+   * invariant, not by quietly violating it here.
+   */
   private withTenantFileLock<T>(tenantId: TenantScope["tenantId"], criticalSection: () => T): T {
     const lockPath = this.fileLockPathFor(tenantId);
     const tmpPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
