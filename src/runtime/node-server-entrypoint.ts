@@ -216,6 +216,11 @@ export function createNodeRuntime(config: AppConfig, options: NodeRuntimeOptions
     throw new UnsupportedRuntimePersistenceDriverError(config.persistenceDriver);
   }
   const isProduction = config.deploymentEnv === "production";
+  if (config.internalOsOrganization === undefined) {
+    console.warn(
+      "AKILTA runtime: INTERNAL_OS_TENANT_ID/INTERNAL_OS_ORGANIZATION_ID are not set - the entire /os staff surface will answer 404 on every route. This boots and reports healthy regardless, so set both env vars if a real staff surface is expected.",
+    );
+  }
   const dataDir = resolvePath(config.dataDir);
   const stores = createFileDurableRuntimeStores(dataDir);
 

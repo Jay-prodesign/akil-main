@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync, linkSync, unlinkSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, linkSync, unlinkSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { TenantScope } from "./tenant-scope.js";
 import type { OutcomeJob, OutcomeJobState } from "./outcome-job.js";
@@ -150,6 +150,7 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
   private readonly baseDir: string;
   private static readonly LOCK_TIMEOUT_MS = 5000;
   private static readonly LOCK_RETRY_BACKOFF_MS = 5;
+  private static readonly STALE_LOCK_THRESHOLD_MS = 30_000;
 
   constructor(baseDir: string) {
     this.baseDir = baseDir;
@@ -199,6 +200,15 @@ export class FileDurableOutcomeJobStore implements DurableOutcomeJobStore {
             // best-effort cleanup only
           }
           throw cause;
+        }
+        try {
+          if (Date.now() - statSync(lockPath).mtimeMs > FileDurableOutcomeJobStore.STALE_LOCK_THRESHOLD_MS) {
+            unlinkSync(lockPath);
+          }
+        } catch {
+          // the lock may have just been released, or reclaimed by another
+          // waiter, between the EEXIST above and this check - either way,
+          // just fall through and retry
         }
         if (Date.now() > deadline) {
           try {

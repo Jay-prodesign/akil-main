@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createProjectOwnershipRef, type ProjectOwnershipRef } from "../src/domain/project-ownership.js";
+import { createTenantScope } from "../src/domain/tenant-scope.js";
 import { createConnectionRequirement, createSecretRef, type ConnectionRequirement, type ConnectionBinding } from "../src/domain/connection-authority.js";
 import {
   createConnectorDescriptor,
@@ -15,8 +16,22 @@ import {
   FileDurableConnectorConnectionStore,
   ConnectorConnectionVersionConflictError,
   ConnectorConnectionOwnershipMismatchError,
+  ConnectorConnectionLockTimeoutError,
   CorruptedConnectorConnectionFileError,
 } from "../src/domain/durable-connector-connection-store.js";
+
+function lockFilePath(dir: string, tenantId: string): string {
+  const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
+  return join(dir, ".locks", `${safeKey}.lock`);
+}
+
+function plantLock(dir: string, tenantId: string, ageMs: number): void {
+  const lockPath = lockFilePath(dir, tenantId);
+  mkdirSync(join(dir, ".locks"), { recursive: true });
+  writeFileSync(lockPath, "99999999", "utf8");
+  const past = new Date(Date.now() - ageMs);
+  utimesSync(lockPath, past, past);
+}
 
 function tenantFilePath(dir: string, tenantId: string): string {
   const safeKey = Buffer.from(tenantId, "utf8").toString("base64url");
@@ -730,6 +745,32 @@ test("M15 (positive replay): legitimate persisted state with every field populat
     const storeB = new FileDurableConnectorConnectionStore(dir);
     const reloaded = storeB.get(requirement.ownership.tenantId, instance.binding.connectionBindingId);
     assert.deepEqual(reloaded?.instance, instance);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("stale lock reclaim: a lock file abandoned by a crashed process (mtime past the staleness threshold) is reclaimed, so a later caller succeeds quickly rather than stalling for the full lock timeout", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableConnectorConnectionStore(dir);
+    plantLock(dir, "akilta-tenant-stale", 31_000);
+    const startedAt = Date.now();
+    const result = store.list(createTenantScope("akilta-tenant-stale").tenantId);
+    const elapsedMs = Date.now() - startedAt;
+    assert.deepEqual(result, []);
+    assert.ok(elapsedMs < 2000, `expected the stale lock to be reclaimed quickly, took ${elapsedMs}ms`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("stale lock reclaim: a lock file that is still within the staleness threshold is left alone, and a caller waiting on it times out with ConnectorConnectionLockTimeoutError rather than silently reclaiming it", { timeout: 10_000 }, () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableConnectorConnectionStore(dir);
+    plantLock(dir, "akilta-tenant-fresh", 1_000);
+    assert.throws(() => store.list(createTenantScope("akilta-tenant-fresh").tenantId), ConnectorConnectionLockTimeoutError);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

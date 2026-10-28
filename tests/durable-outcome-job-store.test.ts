@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, mkdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -482,5 +482,27 @@ test("OS-V0-03 B13: boundary - durable-outcome-job-store.ts introduces no new im
   }
   for (const forbidden of ["postgres-outcome-job-store.js", "durable-plan-admission-store.js", "durable-engineering-store.js"]) {
     assert.equal(content.includes(forbidden), false, `must not import "${forbidden}"`);
+  }
+});
+
+test("stale lock reclaim: a lock file abandoned by a crashed process is reclaimed, so a later caller succeeds quickly rather than stalling for the full lock timeout", () => {
+  const dir = freshStoreDir();
+  try {
+    const store = new FileDurableOutcomeJobStore(dir);
+    const { jobs } = admittedWiredJobs();
+    const job = jobs[0]!;
+    const safeKey = Buffer.from(job.tenantId, "utf8").toString("base64url");
+    const lockPath = join(dir, ".locks", `${safeKey}.lock`);
+    mkdirSync(join(dir, ".locks"), { recursive: true });
+    writeFileSync(lockPath, "99999999", "utf8");
+    const past = new Date(Date.now() - 31_000);
+    utimesSync(lockPath, past, past);
+    const startedAt = Date.now();
+    const result = store.get(job.tenantId, job.jobId);
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(result, undefined);
+    assert.ok(elapsedMs < 2000, `expected the stale lock to be reclaimed quickly, took ${elapsedMs}ms`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
