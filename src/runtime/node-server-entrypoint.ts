@@ -289,6 +289,7 @@ export function createNodeRuntime(config: AppConfig, options: NodeRuntimeOptions
       grantStore: stores.breakGlassAccessGrantStore,
       auditStore: stores.breakGlassSupportAccessAuditStore,
     },
+    delegatedAccess: { store: stores.delegatedAccessGrantStore },
   });
 
   const server = createHttpServer({

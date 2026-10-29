@@ -308,7 +308,7 @@ test("C4: the dev-only standalone internal OS server also reads a bounded POST b
 
 // --- containment of the one write affordance ---
 
-test("C4: the offboarding controls module is one of exactly three src/web modules whose source contains a <form> or <button> (the others are the C4 slice 2 connection-state controls module and the C4 slice 3 attention decision controls module), and its only forms POST to the two decision paths", () => {
+test("C4: the offboarding controls module is one of exactly four src/web modules whose source contains a <form> or <button> (the others are the C4 slice 2 connection-state controls module, the C4 slice 3 attention decision controls module, and the D12 delegated-access controls module), and its only forms POST to the two decision paths", () => {
   const webDir = join(REPO_ROOT, "src", "web");
   const withAffordance = readdirSync(webDir)
     .filter((name) => name.endsWith(".ts"))
@@ -317,6 +317,7 @@ test("C4: the offboarding controls module is one of exactly three src/web module
   assert.deepEqual(withAffordance, [
     "internal-os-attention-decision-controls.ts",
     "internal-os-connection-state-controls.ts",
+    "internal-os-delegated-access-controls.ts",
     "internal-os-offboarding-decision-controls.ts",
   ]);
 

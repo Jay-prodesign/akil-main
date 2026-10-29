@@ -57,6 +57,8 @@ import {
   productsPageContent,
   adminPageContent,
   breakGlassObservabilityPageContent,
+  delegationCreatedPageContent,
+  delegatedAccessViewPageContent,
   type InternalOsPageContent,
   type RenderedInternalOsPage,
 } from "./internal-os-render.js";
@@ -76,6 +78,13 @@ import {
   parseAttentionDecisionPath,
   type AttentionDecisionDeps,
 } from "./internal-os-attention-decision-route.js";
+import {
+  handleDelegatedAccessMintPost,
+  handleDelegatedAccessRevokePost,
+  type DelegatedAccessDeps,
+} from "./internal-os-delegated-access-route.js";
+import { DELEGATED_ACCESS_MINT_PATH, DELEGATED_ACCESS_REVOKE_PATH } from "./internal-os-delegated-access-controls.js";
+import { resolveEffectiveDelegatedAccessAsAuthenticatedStaff } from "./authenticated-delegated-access.js";
 
 /**
  * Rev168: distinct from the Client Portal's `x-akilta-session-token`
@@ -100,6 +109,15 @@ export const BREAK_GLASS_GRANT_ID_HEADER = "x-akilta-break-glass-grant-id";
  * `consentRef`). Ignored for a grant that does not require consent.
  */
 export const BREAK_GLASS_CONSENT_REF_HEADER = "x-akilta-break-glass-consent-ref";
+
+/**
+ * D12 (delegated-access half): the read-only branch of `GET /os/admin` is
+ * reached ONLY when this header carries a non-empty delegationId (and
+ * `deps.delegatedAccess` is wired). Mirrors `BREAK_GLASS_GRANT_ID_HEADER`'s
+ * own convention exactly - same `x-akilta-...` prefix, same "caller still
+ * authenticates through the ordinary staff-session header" discipline.
+ */
+export const DELEGATION_ID_HEADER = "x-akilta-delegation-id";
 
 /**
  * C7: the break-glass dependencies, typed as minimal ports (the same
@@ -252,6 +270,15 @@ export interface InternalOsRequestHandlerDeps {
    * `FileDurableBreakGlassSupportAccessAuditStore`.
    */
   readonly breakGlass?: BreakGlassSupportAccessDeps;
+  /**
+   * D12 (delegated-access half, unblocked once C7 landed): the durable
+   * delegated-access grant store behind both the mint/revoke POST routes
+   * and the read-only delegated-access branch of `GET /os/admin`. Absent:
+   * `/os/admin` behaves exactly as before this slice (no delegated-access
+   * section, mint/revoke POST routes answer 501 UNSUPPORTED, and the
+   * `DELEGATION_ID_HEADER` branch is never taken).
+   */
+  readonly delegatedAccess?: DelegatedAccessDeps;
 }
 
 function toResponse(rendered: RenderedInternalOsPage): OutgoingResponseLike {
@@ -415,6 +442,77 @@ function handleBreakGlassAdminGet(input: {
 }
 
 /**
+ * D12 (delegated-access half; unblocked once C7 landed - see
+ * `durable-delegated-access-grant-store.ts`'s own doc comment): the
+ * read-only delegated-access branch of `GET /os/admin`. A delegate views
+ * their OWN currently-effective access under a named `DelegatedAccessGrant`
+ * - never anyone else's, and never more than the grant's intersection with
+ * the delegator's own current authority.
+ *
+ * Order (every failure fails closed, and none renders an error message, a
+ * delegationId, or any other request value):
+ * 1. Authenticate the staff session (`requireStaffSession`) -> 401,
+ *    BEFORE the grant lookup, for the same "no existence oracle for grant
+ *    ids" reason `handleBreakGlassAdminGet` orders its own two steps.
+ * 2. Look the grant up ONCE under this organization's own tenant. No grant
+ *    -> 403 (`resolveEffectiveDelegatedAccessAsAuthenticatedStaff`'s own
+ *    "no grant" path already answers `DENIED`, but the lookup happens here
+ *    so the FORBIDDEN branch below can also cover "no delegator evidence
+ *    found" without a second domain call).
+ * 3. Find the delegator's own `StaffAccessGrant` in `deps.grants` by
+ *    `grant.delegatorMembershipId` - the exact evidence
+ *    `resolveEffectiveDelegatedAccessAsAuthenticatedStaff` re-resolves the
+ *    delegator's CURRENT standing from, never a snapshot taken at mint
+ *    time. Not found (the delegator's own membership has since been fully
+ *    removed, not merely revoked) -> 403; the domain function is never
+ *    called without it.
+ * 4. Call `resolveEffectiveDelegatedAccessAsAuthenticatedStaff` once. A
+ *    `DENIED` decision renders the same read-only view (never thrown,
+ *    never 403) - unlike break-glass, which hides a denied kind entirely,
+ *    a delegate asking "what do I currently have" is told DENIED directly,
+ *    since there is nothing else on this branch to leak by comparison.
+ */
+function handleDelegatedAccessAdminGet(input: {
+  readonly request: IncomingRequestLike;
+  readonly delegationId: string;
+  readonly deps: InternalOsRequestHandlerDeps;
+  readonly delegatedAccess: DelegatedAccessDeps;
+}): OutgoingResponseLike {
+  const { request, delegationId, deps, delegatedAccess } = input;
+  const sessionToken = request.headers[STAFF_SESSION_TOKEN_HEADER];
+  const now = delegatedAccess.clock !== undefined ? delegatedAccess.clock() : new Date().toISOString();
+  try {
+    requireStaffSession(deps.provider, sessionToken, now);
+    const tenantScope = createTenantScope(deps.organization.tenantId);
+    const grant = delegatedAccess.store.getGrant(tenantScope, delegationId);
+    if (grant === undefined) {
+      return toResponse(renderInternalOsPage({ kind: "FORBIDDEN" }));
+    }
+    const delegatorGrant = deps.grants.find((candidate) => candidate.membership.membershipId === grant.delegatorMembershipId);
+    if (delegatorGrant === undefined) {
+      return toResponse(renderInternalOsPage({ kind: "FORBIDDEN" }));
+    }
+    const resolution = resolveEffectiveDelegatedAccessAsAuthenticatedStaff({
+      organization: deps.organization,
+      grant,
+      now,
+      provider: deps.provider,
+      sessionToken,
+      delegatorMembership: delegatorGrant.membership,
+      delegatorAuthority: delegatorGrant.authority,
+      delegatorAssignments: delegatorGrant.assignments,
+      ...(delegatorGrant.roleContext !== undefined ? { delegatorRoleContext: delegatorGrant.roleContext } : {}),
+    });
+    return toResponse(renderInternalOsPage(delegatedAccessViewPageContent(deps.organization.displayName, resolution)));
+  } catch (error) {
+    if (error instanceof StaffUnauthenticatedError) {
+      return toResponse(renderInternalOsPage({ kind: "UNAUTHENTICATED" }));
+    }
+    throw error;
+  }
+}
+
+/**
  * Rev168 mandatory tests, all enforced here before any destination content
  * is ever resolved: unauthenticated fails closed (`StaffUnauthenticatedError`
  * -> 401), a session with no matching/ambiguous membership fails closed
@@ -481,6 +579,32 @@ export function createInternalOsRequestHandler(deps: InternalOsRequestHandlerDep
           decision: deps.attentionDecision,
         });
       }
+      /**
+       * D12 (delegated-access half): the fourth and fifth `/os` mutation
+       * routes, dispatched the same way as the three above - a path match
+       * with no wired dependency still falls through to the generic 501
+       * below, unchanged from before this slice.
+       */
+      if (request.path === DELEGATED_ACCESS_MINT_PATH && deps.delegatedAccess !== undefined) {
+        return handleDelegatedAccessMintPost({
+          request,
+          sessionToken: request.headers[STAFF_SESSION_TOKEN_HEADER],
+          provider: deps.provider,
+          organization: deps.organization,
+          grants: deps.grants,
+          decision: deps.delegatedAccess,
+        });
+      }
+      if (request.path === DELEGATED_ACCESS_REVOKE_PATH && deps.delegatedAccess !== undefined) {
+        return handleDelegatedAccessRevokePost({
+          request,
+          sessionToken: request.headers[STAFF_SESSION_TOKEN_HEADER],
+          provider: deps.provider,
+          organization: deps.organization,
+          grants: deps.grants,
+          decision: deps.delegatedAccess,
+        });
+      }
     }
 
     if (request.method !== "GET") {
@@ -503,6 +627,20 @@ export function createInternalOsRequestHandler(deps: InternalOsRequestHandlerDep
       const breakGlassGrantId = request.headers[BREAK_GLASS_GRANT_ID_HEADER];
       if (typeof breakGlassGrantId === "string" && breakGlassGrantId.length > 0) {
         return handleBreakGlassAdminGet({ request, grantId: breakGlassGrantId, deps, breakGlass: deps.breakGlass });
+      }
+    }
+
+    /**
+     * D12 (delegated-access half): the delegated-access branch, taken ONLY
+     * for `/os/admin` with `deps.delegatedAccess` wired AND a non-empty
+     * `DELEGATION_ID_HEADER` - mirrors the break-glass branch immediately
+     * above exactly, including that it always returns and never falls
+     * through to the ordinary path below.
+     */
+    if (parsed.kind === "admin" && deps.delegatedAccess !== undefined) {
+      const delegationId = request.headers[DELEGATION_ID_HEADER];
+      if (typeof delegationId === "string" && delegationId.length > 0) {
+        return handleDelegatedAccessAdminGet({ request, delegationId, deps, delegatedAccess: deps.delegatedAccess });
       }
     }
 
@@ -663,6 +801,7 @@ export function createInternalOsRequestHandler(deps: InternalOsRequestHandlerDep
               ? { customerOffboardingAdminSource: deps.customerOffboardingAdminSource }
               : {}),
             ...(deps.customerOffboardingDecision !== undefined ? { offboardingDecisionEnabled: true } : {}),
+            ...(deps.delegatedAccess !== undefined ? { delegatedAccessEnabled: true } : {}),
           }),
         );
         break;

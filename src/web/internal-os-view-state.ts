@@ -1587,6 +1587,16 @@ export interface AdminViewState {
   readonly operationalObservability: OperationalObservabilityViewState;
   readonly pendingOffboardingRequests: PendingOffboardingRequestsViewState;
   readonly notActiveConcepts: ReadonlyArray<string>;
+  /**
+   * D12 (delegated-access half): true only when the request handler has
+   * the mint/revoke routes wired. Unlike `offboardingDecisionEnabled`,
+   * this gates no per-viewer authority check here - minting is the
+   * authenticated caller delegating a subset of their OWN current
+   * authority, which `createDelegatedAccessGrant` itself fails closed on,
+   * so any authenticated staff member may attempt it. Absent or false
+   * keeps `/os/admin` exactly as it rendered before this slice.
+   */
+  readonly delegatedAccessEnabled?: boolean;
 }
 
 const ADMIN_NOT_ACTIVE_CONCEPTS: ReadonlyArray<string> = [
@@ -1631,6 +1641,8 @@ export function resolveAdminView(input: {
    * list read-only, exactly as before C4.
    */
   offboardingDecisionEnabled?: boolean;
+  /** D12 (delegated-access half): true only when the request handler has the mint/revoke routes wired. */
+  delegatedAccessEnabled?: boolean;
 }): AdminViewState {
   const access = input.context.access;
   const decisionControls: OffboardingDecisionControls | undefined =
@@ -1652,6 +1664,7 @@ export function resolveAdminView(input: {
       decisionControls,
     ),
     notActiveConcepts: ADMIN_NOT_ACTIVE_CONCEPTS,
+    ...(input.delegatedAccessEnabled === true ? { delegatedAccessEnabled: true } : {}),
   };
 }
 

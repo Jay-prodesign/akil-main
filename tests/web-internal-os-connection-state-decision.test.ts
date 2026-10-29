@@ -448,7 +448,7 @@ test("C4 slice 2: the dev-only standalone internal OS server also wires and serv
 
 // --- containment ---
 
-test("C4 slice 2: internal-os-connection-state-controls.ts is one of exactly three src/web modules that render a <form> or <button> (the others are the offboarding controls module and the C4 slice 3 attention decision controls module)", () => {
+test("C4 slice 2: internal-os-connection-state-controls.ts is one of exactly four src/web modules that render a <form> or <button> (the others are the offboarding controls module, the C4 slice 3 attention decision controls module, and the D12 delegated-access controls module)", () => {
   const webDir = join(REPO_ROOT, "src", "web");
   const withAffordance = readdirSync(webDir)
     .filter((name) => name.endsWith(".ts"))
@@ -457,6 +457,7 @@ test("C4 slice 2: internal-os-connection-state-controls.ts is one of exactly thr
   assert.deepEqual(withAffordance, [
     "internal-os-attention-decision-controls.ts",
     "internal-os-connection-state-controls.ts",
+    "internal-os-delegated-access-controls.ts",
     "internal-os-offboarding-decision-controls.ts",
   ]);
 });

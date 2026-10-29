@@ -2,9 +2,15 @@ import type { NavDestination, DestinationKey, HomeViewState, WorkViewState, Work
 import type { ConnectionState } from "../domain/connection-authority.js";
 import type { IntegrationConnectionSummary } from "../domain/integration-admin-view.js";
 import type { ProtectedDecisionOutcome } from "../domain/protected-decision-record.js";
+import type { EffectiveDelegatedAccessResolution } from "../domain/delegated-access-grant.js";
 import { renderOffboardingDecisionControls } from "./internal-os-offboarding-decision-controls.js";
 import { renderConnectorConnectionStateControls } from "./internal-os-connection-state-controls.js";
 import { renderAttentionDecisionControls } from "./internal-os-attention-decision-controls.js";
+import {
+  renderDelegatedAccessMintForm,
+  renderDelegatedAccessRevokeForm,
+  renderDelegatedAccessMintConfirmation,
+} from "./internal-os-delegated-access-controls.js";
 
 export interface RenderedInternalOsPage {
   readonly status: number;
@@ -457,6 +463,26 @@ function renderPendingOffboardingRequestsCard(view: PendingOffboardingRequestsVi
   </section>`;
 }
 
+/**
+ * D12 (delegated-access half): rendered only when the route is wired
+ * (`view.delegatedAccessEnabled`). Unlike every other `/os` mutation
+ * control, mint has no per-row `can...` gate - see
+ * `internal-os-delegated-access-controls.ts`'s own doc comment for why
+ * none is needed (the domain constructor is the gate).
+ */
+function renderDelegatedAccessCard(enabled: boolean): string {
+  if (!enabled) {
+    return "";
+  }
+  return `
+  <section aria-labelledby="admin-delegated-access-heading" class="card">
+    <h2 id="admin-delegated-access-heading">Delegated access</h2>
+    <p>Delegate a bounded subset of your own current authority to another principal, temporarily.</p>
+    ${renderDelegatedAccessMintForm()}
+    ${renderDelegatedAccessRevokeForm()}
+  </section>`;
+}
+
 function renderAdminBody(view: AdminViewState): string {
   const notActiveItems = view.notActiveConcepts
     .map((concept) => `<li>${escapeHtml(concept)}: <span class="status status-neutral" role="status">NOT ACTIVE</span></li>`)
@@ -467,6 +493,7 @@ function renderAdminBody(view: AdminViewState): string {
   ${renderResourceBindingCard(view.resourceBinding)}
   ${renderOperationalObservabilityCard(view.operationalObservability)}
   ${renderPendingOffboardingRequestsCard(view.pendingOffboardingRequests)}
+  ${renderDelegatedAccessCard(view.delegatedAccessEnabled === true)}
   <section aria-labelledby="admin-not-active-heading" class="card">
     <h2 id="admin-not-active-heading">Not yet active in this build</h2>
     <ul>
@@ -562,6 +589,28 @@ function renderBreakGlassObservabilityBody(view: BreakGlassObservabilityViewStat
   </section>`;
 }
 
+/**
+ * D12 (delegated-access half): the read-only effective-delegated-access
+ * view - what the resolution the caller's delegation currently grants is,
+ * never any other data. Escaped text only; this page renders no form,
+ * button or other control.
+ */
+function renderDelegatedAccessViewBody(resolution: EffectiveDelegatedAccessResolution): string {
+  const permissionsHtml =
+    resolution.permissions.size > 0
+      ? `<ul>\n      ${[...resolution.permissions]
+          .sort()
+          .map((permission) => `<li>${escapeHtml(permission)}</li>`)
+          .join("\n      ")}\n    </ul>`
+      : `<p>No permissions currently granted.</p>`;
+  return `
+  <section aria-labelledby="delegated-access-heading" class="card">
+    <h2 id="delegated-access-heading">Effective delegated access</h2>
+    <p>Decision: <span class="status status-${resolution.decision === "GRANTED" ? "neutral" : "warning"}" role="status">${escapeHtml(resolution.decision)}</span></p>
+    ${resolution.decision === "GRANTED" ? `<h3>Permissions</h3>\n    ${permissionsHtml}\n    <p>Protected-action authority: <span class="status status-neutral" role="status">${resolution.canPerformProtectedActions ? "YES" : "NO"}</span></p>` : ""}
+  </section>`;
+}
+
 function renderWorkProjectDetailBody(view: Exclude<WorkProjectDetailViewState, { kind: "NOT_FOUND" } | { kind: "FORBIDDEN" }>): string {
   switch (view.kind) {
     case "NOT_ACTIVE":
@@ -595,6 +644,19 @@ export type InternalOsPageContent =
       readonly organizationName: string;
       readonly view: BreakGlassObservabilityViewState;
     }
+  /**
+   * D12 (delegated-access half): the one-time mint confirmation - the only
+   * place a freshly-created `delegationId` is ever shown (there is no
+   * durable list page to recover it from later).
+   */
+  | { readonly kind: "DELEGATION_CREATED"; readonly delegationId: string }
+  /**
+   * D12 (delegated-access half): the read-only effective-delegated-access
+   * view for `/os/admin`, reached the same way the break-glass branch is -
+   * a header-triggered GET, never carrying `nav` (a delegate viewing their
+   * own effective access is not browsing the OS as a member).
+   */
+  | { readonly kind: "DELEGATED_ACCESS_VIEW"; readonly organizationName: string; readonly resolution: EffectiveDelegatedAccessResolution }
   | {
       readonly kind: "DESTINATION";
       readonly nav: ReadonlyArray<NavDestination>;
@@ -1063,6 +1125,19 @@ export function breakGlassObservabilityPageContent(organizationName: string, vie
   return { kind: "BREAK_GLASS_OBSERVABILITY", organizationName, view };
 }
 
+/** D12 (delegated-access half): the one-time mint confirmation - see the `DELEGATION_CREATED` variant. */
+export function delegationCreatedPageContent(delegationId: string): InternalOsPageContent {
+  return { kind: "DELEGATION_CREATED", delegationId };
+}
+
+/** D12 (delegated-access half): the effective-delegated-access view - see the `DELEGATED_ACCESS_VIEW` variant. */
+export function delegatedAccessViewPageContent(
+  organizationName: string,
+  resolution: EffectiveDelegatedAccessResolution,
+): InternalOsPageContent {
+  return { kind: "DELEGATED_ACCESS_VIEW", organizationName, resolution };
+}
+
 /**
  * Rev168 A12-equivalent discipline (reused from `shell-render.ts`): every
  * branch here is a distinct, deterministic rendering, `statusLabel` is
@@ -1168,6 +1243,30 @@ export function renderInternalOsPage(content: InternalOsPageContent): RenderedIn
           statusLabel: "Break-glass support access (read-only, audited)",
           statusTone: "warning",
           bodyHtml: renderBreakGlassObservabilityBody(content.view),
+        }),
+      };
+    case "DELEGATION_CREATED":
+      return {
+        status: 200,
+        contentType: "text/html; charset=utf-8",
+        html: renderPage({
+          chrome: { nav: [], activeKey: undefined },
+          title: "Delegation created",
+          statusLabel: "Delegation created",
+          statusTone: "neutral",
+          bodyHtml: renderDelegatedAccessMintConfirmation(content.delegationId),
+        }),
+      };
+    case "DELEGATED_ACCESS_VIEW":
+      return {
+        status: 200,
+        contentType: "text/html; charset=utf-8",
+        html: renderPage({
+          chrome: { nav: [], activeKey: undefined, organizationName: content.organizationName },
+          title: "Delegated access",
+          statusLabel: "Effective delegated access (read-only)",
+          statusTone: "warning",
+          bodyHtml: renderDelegatedAccessViewBody(content.resolution),
         }),
       };
     case "DESTINATION":
