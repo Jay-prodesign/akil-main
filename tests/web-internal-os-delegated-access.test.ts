@@ -181,27 +181,44 @@ test("D12: mint succeeds when the caller delegates a subset of their OWN current
   });
 });
 
-test("D12: mint fails closed (FORBIDDEN) when the caller asks to delegate more than their OWN current authority holds - over-broad permissions and protected-action authority are both rejected, nothing is stored", () => {
+test("D12: mint fails closed (FORBIDDEN) when the caller asks to delegate more than their OWN current authority holds - over-broad permissions and protected-action authority are both rejected by createDelegatedAccessGrant's own subset check, not the unrelated admin nav gate, and nothing is stored", () => {
   withStore((store) => {
-    const handler = createInternalOsRequestHandler({ ...baseDeps(), delegatedAccess: { store } });
-    // MEMBER_REVIEW_FIXTURE holds READ only, canPerformProtectedActions: false.
+    // writeOnly holds READ+WRITE only, canPerformProtectedActions: false -
+    // enough to clear /os/admin's own WRITE-only destination gate, so a
+    // rejection below can only come from createDelegatedAccessGrant itself.
+    const writeOnly = writeOnlyStaffFixture("staff-write-only-mint", "membership-write-only-mint", "dev-staff-write-only-mint");
+    const handler = createInternalOsRequestHandler({ ...depsWithExtraGrants([writeOnly]), delegatedAccess: { store } });
+
     const overBroadPermission = handler(
       post(
         DELEGATED_ACCESS_MINT_PATH,
-        "delegatePrincipalRef=staff-delegate-x&permissions=WRITE&expiresAt=2026-12-01T00:00:00.000Z",
-        MEMBER_REVIEW_FIXTURE.sessionToken,
+        "delegatePrincipalRef=staff-delegate-x&permissions=EXECUTE&expiresAt=2026-12-01T00:00:00.000Z",
+        writeOnly.token,
       ),
     );
     assert.equal(overBroadPermission.status, 403);
     const overBroadProtected = handler(
       post(
         DELEGATED_ACCESS_MINT_PATH,
-        "delegatePrincipalRef=staff-delegate-x&permissions=READ&canPerformProtectedActions=true&expiresAt=2026-12-01T00:00:00.000Z",
-        MEMBER_REVIEW_FIXTURE.sessionToken,
+        "delegatePrincipalRef=staff-delegate-x&permissions=WRITE&canPerformProtectedActions=true&expiresAt=2026-12-01T00:00:00.000Z",
+        writeOnly.token,
       ),
     );
     assert.equal(overBroadProtected.status, 403);
     assert.equal(store.getGrant(createTenantScope(REVIEW_ORGANIZATION.tenantId), "dag-1"), undefined);
+
+    // Positive control: the SAME caller minting WITHIN their own authority
+    // succeeds - proves the two 403s above are genuinely about over-breadth,
+    // not some other property of writeOnly (e.g. blocked at the nav gate,
+    // which would make this whole test vacuous).
+    const withinAuthority = handler(
+      post(
+        DELEGATED_ACCESS_MINT_PATH,
+        "delegatePrincipalRef=staff-delegate-y&permissions=WRITE&expiresAt=2026-12-01T00:00:00.000Z",
+        writeOnly.token,
+      ),
+    );
+    assert.equal(withinAuthority.status, 200, withinAuthority.body);
   });
 });
 
@@ -244,19 +261,35 @@ test("D12: revoke succeeds for the ORIGINAL delegator, redirects to /os/admin, a
   });
 });
 
-test("D12: revoke fails closed (FORBIDDEN) when the caller is NOT the original delegator, and the grant is left untouched", () => {
+test("D12: revoke fails closed (FORBIDDEN) when the caller is NOT the original delegator - rejected by the route's own delegatorMembershipId comparison, not the unrelated admin nav gate - and the grant is left untouched", () => {
   withStore((store) => {
-    const handler = createInternalOsRequestHandler({ ...baseDeps(), delegatedAccess: { store } });
+    // Both fixtures hold READ+WRITE (clearing /os/admin's own WRITE-only
+    // destination gate) with distinct membershipIds, so a rejection below
+    // can only come from the route's own delegator-identity comparison.
+    const delegator = writeOnlyStaffFixture("staff-write-only-delegator", "membership-write-only-delegator", "dev-staff-write-only-delegator");
+    const other = writeOnlyStaffFixture("staff-write-only-other", "membership-write-only-other", "dev-staff-write-only-other");
+    const handler = createInternalOsRequestHandler({ ...depsWithExtraGrants([delegator, other]), delegatedAccess: { store } });
+
     const mint = handler(
-      post(DELEGATED_ACCESS_MINT_PATH, "delegatePrincipalRef=staff-delegate-x&permissions=READ&expiresAt=2026-12-01T00:00:00.000Z"),
+      post(DELEGATED_ACCESS_MINT_PATH, "delegatePrincipalRef=staff-delegate-x&permissions=READ&expiresAt=2026-12-01T00:00:00.000Z", delegator.token),
     );
+    assert.equal(mint.status, 200, mint.body);
     const delegationId = mint.body.match(/<code>(delegation-[0-9a-f-]+)<\/code>/)![1]!;
 
     const wrongDelegator = handler(
-      post(DELEGATED_ACCESS_REVOKE_PATH, `delegationId=${delegationId}&reason=not+mine`, MEMBER_REVIEW_FIXTURE.sessionToken),
+      post(DELEGATED_ACCESS_REVOKE_PATH, `delegationId=${delegationId}&reason=not+mine`, other.token),
     );
     assert.equal(wrongDelegator.status, 403);
     assert.equal(store.getGrant(createTenantScope(REVIEW_ORGANIZATION.tenantId), delegationId)?.state, "ACTIVE");
+
+    // Positive control: the ORIGINAL delegator can revoke the same grant -
+    // proves the 403 above is genuinely about delegator identity, not some
+    // other property of `other` (e.g. blocked at the nav gate, which would
+    // make this whole test vacuous).
+    const correctDelegator = handler(
+      post(DELEGATED_ACCESS_REVOKE_PATH, `delegationId=${delegationId}&reason=cleanup`, delegator.token),
+    );
+    assert.equal(correctDelegator.status, 303);
   });
 });
 
@@ -267,6 +300,46 @@ test("D12: revoke of a delegationId that does not exist -> FORBIDDEN (no existen
     assert.equal(response.status, 403);
   });
 });
+
+/**
+ * A fixture with WRITE+READ (so it clears `/os/admin`'s own WRITE-only
+ * destination gate) but no EXECUTE and no protected-action authority -
+ * isolates `createDelegatedAccessGrant`'s subset-of-own-authority check,
+ * and the revoke route's own delegator-identity check, from that unrelated
+ * nav gate. `buildReviewStaffAccessGrants()`'s own three fixtures cannot
+ * expose either check end to end: FOUNDER_REVIEW_FIXTURE already holds
+ * everything (nothing is "over-broad" for it), and MEMBER/RESTRICTED lack
+ * WRITE entirely, so they are rejected by `isDestinationVisible("admin")`
+ * before either guard is ever reached - mirrors
+ * `web-internal-os-connection-state-decision.test.ts`'s own
+ * `writeOnlyAdminFixture()` precedent for isolating this exact floor.
+ */
+function writeOnlyStaffFixture(principalId: string, membershipId: string, token: string): { token: string; session: StaffSessionContext; grant: StaffAccessGrant } {
+  const tenantScope = createTenantScope(REVIEW_ORGANIZATION.tenantId);
+  const principal = createAuthenticatedStaffPrincipal({ principalId, displayName: "Write-only Staff Review" });
+  const membership = createOrganizationMembership({ membershipId, tenantScope, principalRef: principal.principalId, role: "STAFF" });
+  return {
+    token,
+    session: { principal, issuedAt: "2026-01-01T00:00:00.000Z" },
+    grant: {
+      membership,
+      authority: createAuthorityContext({ tenantScope, permissions: ["READ", "WRITE"], canPerformProtectedActions: false }),
+      assignments: [],
+    },
+  };
+}
+
+function depsWithExtraGrants(extras: ReadonlyArray<{ token: string; session: StaffSessionContext; grant: StaffAccessGrant }>): Omit<InternalOsRequestHandlerDeps, "delegatedAccess"> {
+  const fixtures = new Map(buildReviewStaffSessionFixtureMap());
+  for (const extra of extras) {
+    fixtures.set(extra.token, extra.session);
+  }
+  return {
+    provider: createDevFixtureStaffSessionProvider({ fixtures, isProduction: false }),
+    organization: REVIEW_ORGANIZATION,
+    grants: [...buildReviewStaffAccessGrants(), ...extras.map((extra) => extra.grant)],
+  };
+}
 
 /** Mints a delegation from FOUNDER_REVIEW_FIXTURE to `delegatePrincipalRef`, returns the new delegationId. */
 function mintTo(
