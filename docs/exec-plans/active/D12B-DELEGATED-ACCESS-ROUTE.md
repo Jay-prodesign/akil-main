@@ -1,0 +1,37 @@
+# D12b — Delegated-access grant mint/revoke/resolve wired into `/os`
+
+## Provenance
+
+- Governing authority: standing engineering mandate (Founder delegation 2026-10-23, reaffirmed repeatedly through 2026-10-29's "AKILTA FULL PRODUCT COMPLETION" directive: "mevcut yetkiyle yapılabilecek tüm dependency-safe mühendislik işlerini tamamla... D1–D15 maddelerinin tamamını mevcut canonical kararlarla değerlendir... zaten belirlenmiş veya mevcut yetkiyle çözülebilecek işleri gereksiz Founder gate'e dönüştürme").
+- **D12's original finding** (`WHOLE-PRODUCT-GAP-SCAN-2026-10-23.md`) grouped two unrelated gaps under one id: (a) the controlled-organization-switch route (no multi-org registry — genuine architecture decision, still gated, **not touched here**) and (b) the delegated-access-grant route, deliberately NOT built at the time specifically because "building a delegated-access-grant store now, under C4's banner, would risk pre-empting or duplicating [C7's] explicitly separate decision" (C7 — the break-glass grant/audit store — was still unbuilt at that time).
+- **Why this is dependency-safe now**: C7 (`FileDurableBreakGlassAccessGrantStore`/`FileDurableBreakGlassSupportAccessAuditStore`, PR #191) is merged. The sequencing concern that blocked the delegated-access half of D12 no longer applies. Minting itself requires no new policy decision: `createDelegatedAccessGrant` (OS-V1-02, already merged, already tested) structurally forbids a caller from delegating more authority than their own current, freshly-proven `AuthorityContext` holds — "you may delegate a bounded subset of what you already, provably have" is the module's own existing approved design, not invented here. Revocation is deliberately narrowed to the original delegator only ("you can always take back what you gave"), avoiding the separate, undecided "who else may revoke someone else's delegation" policy question.
+
+## Scope (this checkpoint)
+
+- `src/domain/durable-delegated-access-grant-store.ts` (new): `FileDurableDelegatedAccessGrantStore`, a structural clone of `FileDurableBreakGlassAccessGrantStore`'s technique (per-tenant append-only `.delegation.jsonl`, `linkSync` single-winner creation/revision claims, per-tenant file lock, latest-wins reads, full revalidation on read), keyed by `(tenantId, delegationId)`. One deliberate, documented difference: creation revalidation cannot replay `createDelegatedAccessGrant` itself (it needs ephemeral mint-time delegator evidence this store never persists), so it is a structural-only floor instead — safe because `resolveEffectiveDelegatedAccess` always re-intersects a stored grant's `permissions` with the delegator's freshly re-resolved CURRENT authority at resolution time, never trusting the stored value in isolation. Revision replay (`revokeDelegatedAccessGrant`) has no such limitation and goes through the real domain constructor like every other store here.
+- `src/web/internal-os-delegated-access-controls.ts` (new): mint/revoke HTML forms, the one-time mint confirmation renderer. The fourth `src/web/` module (after offboarding/connection-state/attention) permitted to render a `<form>`/`<button>` — boundary-scan tests updated accordingly.
+- `src/web/internal-os-delegated-access-route.ts` (new): `handleDelegatedAccessMintPost`/`handleDelegatedAccessRevokePost`, mirroring `internal-os-attention-decision-route.ts`'s shape exactly (same-origin check → `requireInternalOsAccess` → destination gate → form parse → domain call → store write → response).
+- `src/web/internal-os-request-handler.ts`: `delegatedAccess?: DelegatedAccessDeps` optional dependency; `DELEGATION_ID_HEADER` (mirrors `BREAK_GLASS_GRANT_ID_HEADER`); `handleDelegatedAccessAdminGet` — the read-only resolve branch of `GET /os/admin`, looking the grant up, finding the delegator's own `StaffAccessGrant` in `deps.grants` by `delegatorMembershipId`, then calling `resolveEffectiveDelegatedAccessAsAuthenticatedStaff` (an already-existing, already-reviewed OS-V1-02 web boundary that was itself never wired to any route before this checkpoint); POST dispatch for both mutation routes.
+- `src/web/internal-os-render.ts` / `internal-os-view-state.ts`: `DELEGATION_CREATED` / `DELEGATED_ACCESS_VIEW` page-content kinds; `AdminViewState.delegatedAccessEnabled` gates the new Admin-page section (mint+revoke forms), rendered unconditionally once wired — unlike every other `/os` mutation control, mint needs no per-viewer `can...` gate, because the domain constructor itself is the gate.
+- `src/runtime/file-durable-runtime-stores.ts` / `node-server-entrypoint.ts`: `FileDurableDelegatedAccessGrantStore` composed and wired, one new `file-store:delegated-access-grants` health probe.
+
+## Explicitly NOT touched
+
+The org-switch half of D12 (`resolveControlledOrganizationSwitchAsAuthenticatedStaff`) — still genuinely blocked on a multi-org registry / session-scoped "current organization" concept that does not exist anywhere in this repository; building one would be inventing product/architecture scope, not wiring. D12's gap-scan entry is updated to reflect this split, not closed outright.
+
+## Test coverage
+
+- `tests/durable-delegated-access-grant-store.test.ts` (13 tests): round-trip/idempotent replay, duplicate rejection, invalid-grant rejection (including the now-legitimate empty-permissions case), revise/revoke lifecycle, terminal-REVOKED rejection, illegal-revision rejection, restart-safety, cross-tenant isolation, corrupted-line adversarial sweep (19 cases), poisoned-file isolation, stale-lock reclaim.
+- `tests/web-internal-os-delegated-access.test.ts` (15 tests): form parsing (mint/revoke), same-origin reuse, unwired-boundary 501/no-section, mint success + authority-provenance proof, mint over-broad-permission/protected-action rejection (both dimensions), mint same-origin/bad-form/unauthenticated rejection, revoke success + redirect, revoke by a non-delegator rejection, revoke of an unknown id rejection, GET resolve GRANTED (correct delegate), GET resolve DENIED (wrong caller, not thrown), GET resolve FORBIDDEN (unknown grant) / UNAUTHENTICATED (no session), empty-header-is-absent, Admin-page form gating + no-token-leak.
+- Existing boundary-scan tests updated for the new export surface and the new (fourth) form-rendering module (`tests/os-v0-08-boundary-scan.test.ts`, `tests/web-internal-os-connection-state-decision.test.ts`, `tests/web-internal-os-offboarding-decision.test.ts`); `tests/runtime-break-glass-observability-route.test.ts`'s C7-R1 byte-for-byte replica handler updated to wire `delegatedAccess` (the real runtime always does now), keeping that test's own actual purpose (break-glass changes nothing else) intact.
+
+## Evidence
+
+- `rm -rf dist && npx tsc -p tsconfig.json`: exit 0, strict mode, zero errors, clean rebuild.
+- `node --test dist/tests/*.test.js`: **3570/3570 pass** (3542 pre-existing + 28 new: 13 store + 15 route), 0 fail/cancelled/skipped/todo.
+- `package.json`: zero new runtime or dev dependency.
+- Files touched: see Scope above, plus the four updated test files.
+
+## Status
+
+**IMPLEMENTED / SELF-VALIDATED** — pending independent fresh-context review (isolated worktree) per REV216/REV218 before merge; this is real code, not docs-only. `MERGE_DISPOSITION`: self-merge on independent PASS, per the standing mandate's established C-class pattern (C1-C8, N1-N3, D11) — no further owner-gate action required, since no security/authority/commercial/spend/provider/live-activation decision was made unilaterally (see "Why this is dependency-safe now" above).

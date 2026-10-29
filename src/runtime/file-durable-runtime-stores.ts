@@ -17,6 +17,7 @@ import { FileDurableProtectedDecisionRecordStore } from "../domain/durable-prote
 import { FileDurableCustomerRepository } from "../application/durable-customer-repository.js";
 import { FileDurableBreakGlassAccessGrantStore } from "../domain/durable-break-glass-access-grant-store.js";
 import { FileDurableBreakGlassSupportAccessAuditStore } from "../domain/durable-break-glass-support-access-audit-store.js";
+import { FileDurableDelegatedAccessGrantStore } from "../domain/durable-delegated-access-grant-store.js";
 import type { HealthProbeResult } from "./health-check.js";
 
 /**
@@ -63,6 +64,12 @@ import type { HealthProbeResult } from "./health-check.js";
  * grants yet (minting/revoking a grant needs its own task contract), so
  * until one does, every break-glass request answers 403 - the honest,
  * fail-closed default.
+ *
+ * D12 (delegated-access half, unblocked once C7 landed): the delegated-access
+ * GRANT store (`FileDurableDelegatedAccessGrantStore`) is now composed,
+ * because both the mint/revoke POST routes and the read-only
+ * delegated-access branch of `GET /os/admin` read/write it. It adds one
+ * `file-store:delegated-access-grants` health probe.
  */
 export const FILE_DURABLE_RUNTIME_STORE_LAYOUT = {
   projects: "projects",
@@ -82,6 +89,7 @@ export const FILE_DURABLE_RUNTIME_STORE_LAYOUT = {
   protectedDecisionRecords: "protected-decision-records",
   breakGlassAccessGrants: "break-glass-access-grants",
   breakGlassSupportAccessAudits: "break-glass-support-access-audits",
+  delegatedAccessGrants: "delegated-access-grants",
 } as const;
 
 export type FileDurableRuntimeStoreKey = keyof typeof FILE_DURABLE_RUNTIME_STORE_LAYOUT;
@@ -111,6 +119,8 @@ export interface FileDurableRuntimeStores {
   readonly breakGlassAccessGrantStore: FileDurableBreakGlassAccessGrantStore;
   /** C7: break-glass support-access audits, one appended per GRANTED view kind on that branch. */
   readonly breakGlassSupportAccessAuditStore: FileDurableBreakGlassSupportAccessAuditStore;
+  /** D12 (delegated-access half): delegated-access grants, read/written by the mint/revoke routes and the resolve branch of `GET /os/admin`. */
+  readonly delegatedAccessGrantStore: FileDurableDelegatedAccessGrantStore;
 }
 
 /** Absolute (or caller-relative) directory of one store under `dataDir`. */
@@ -148,6 +158,7 @@ export function createFileDurableRuntimeStores(dataDir: string): FileDurableRunt
     protectedDecisionRecordStore: new FileDurableProtectedDecisionRecordStore(dir("protectedDecisionRecords")),
     breakGlassAccessGrantStore: new FileDurableBreakGlassAccessGrantStore(dir("breakGlassAccessGrants")),
     breakGlassSupportAccessAuditStore: new FileDurableBreakGlassSupportAccessAuditStore(dir("breakGlassSupportAccessAudits")),
+    delegatedAccessGrantStore: new FileDurableDelegatedAccessGrantStore(dir("delegatedAccessGrants")),
   };
 }
 

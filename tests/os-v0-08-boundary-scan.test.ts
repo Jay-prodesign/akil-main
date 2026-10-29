@@ -118,6 +118,8 @@ test("OS-V0-08: each module exports exactly the expected surface", () => {
     "attentionPageContent",
     "breakGlassObservabilityPageContent",
     "connectionsPageContent",
+    "delegatedAccessViewPageContent",
+    "delegationCreatedPageContent",
     "homePageContent",
     "knowledgePageContent",
     "notActiveDestinationPageContent",
@@ -131,6 +133,7 @@ test("OS-V0-08: each module exports exactly the expected surface", () => {
   assert.deepEqual(Object.keys(InternalOsRequestHandler).sort(), [
     "BREAK_GLASS_CONSENT_REF_HEADER",
     "BREAK_GLASS_GRANT_ID_HEADER",
+    "DELEGATION_ID_HEADER",
     "STAFF_SESSION_TOKEN_HEADER",
     "createInternalOsRequestHandler",
   ]);

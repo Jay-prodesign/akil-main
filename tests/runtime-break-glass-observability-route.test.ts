@@ -377,6 +377,13 @@ function replicaAdminHandler(dataDir: string, breakGlass?: BreakGlassSupportAcce
     operationalObservabilitySource: createDurableOperationalObservabilitySource(stores.connectorConnectionStore),
     customerOffboardingAdminSource: createDurableCustomerOffboardingAdminSource(stores.customerOffboardingRequestStore),
     customerOffboardingDecision: { requestStore: stores.customerOffboardingRequestStore, customerRepository: stores.customerRepository },
+    /**
+     * D12 (delegated-access half): the real runtime (`node-server-
+     * entrypoint.ts`) always wires this now, unconditionally - included
+     * here too so this replica stays a faithful "everything the runtime
+     * wires, minus break-glass" baseline rather than a stale pre-D12 one.
+     */
+    delegatedAccess: { store: stores.delegatedAccessGrantStore },
     ...(breakGlass !== undefined ? { breakGlass } : {}),
   });
 }
