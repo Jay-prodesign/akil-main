@@ -17,6 +17,17 @@ import {
   buildInternalCommandCenterProjection,
   InvalidInternalCommandProjectionError,
 } from "../src/domain/internal-command-projection.js";
+import { createAuthorityContext } from "../src/domain/authority.js";
+
+// Rev62/PR #33 "full-system authority ingress" hardening: admit/revoke now
+// require a real, tenant-matched, protected-action-authorized AuthorityContext.
+// Every claim in this file's fixtures is scoped to partnerOrg's default
+// tenant ("akilta-tenant-a"), so one shared authority covers all call sites.
+const partnerClaimAuthority = createAuthorityContext({
+  tenantScope: createTenantScope("akilta-tenant-a"),
+  permissions: ["WRITE"],
+  canPerformProtectedActions: true,
+});
 
 function buildAttentionItem(input: {
   tenantSuffix: string;
@@ -149,6 +160,7 @@ test("J4: partner status tally reflects stored UNVERIFIED/ADMITTED/REVOKED statu
   const unverified = unverifiedClaim("claim-1", "org-1");
   const admitted = admitPartnerCapabilityClaim({
     claim: unverifiedClaim("claim-2", "org-2"),
+    authority: partnerClaimAuthority,
     admittingAuthorityId: "authority-1",
     evidenceRef: "evidence:portfolio-review",
     admittedAt: "2026-01-01T00:00:00.000Z",
@@ -157,11 +169,13 @@ test("J4: partner status tally reflects stored UNVERIFIED/ADMITTED/REVOKED statu
   const revoked = revokePartnerCapabilityClaim({
     claim: admitPartnerCapabilityClaim({
       claim: unverifiedClaim("claim-3", "org-3"),
+      authority: partnerClaimAuthority,
       admittingAuthorityId: "authority-1",
       evidenceRef: "evidence:portfolio-review-2",
       admittedAt: "2026-01-01T00:00:00.000Z",
       reviewByAt: "2026-12-01T00:00:00.000Z",
     }),
+    authority: partnerClaimAuthority,
     revokedAt: "2026-06-01T00:00:00.000Z",
   });
 
@@ -182,6 +196,7 @@ test("J4: partner status tally reflects stored UNVERIFIED/ADMITTED/REVOKED statu
 test("J5: partner status tally reflects computed EXPIRED (never a stored status) as of the caller-supplied asOf, reusing resolvePartnerCapabilityClaimStatus", () => {
   const admitted = admitPartnerCapabilityClaim({
     claim: unverifiedClaim("claim-4", "org-4"),
+    authority: partnerClaimAuthority,
     admittingAuthorityId: "authority-1",
     evidenceRef: "evidence:portfolio-review-3",
     admittedAt: "2026-01-01T00:00:00.000Z",
@@ -226,6 +241,7 @@ test("J6: this function adds no independent judgment - the returned attention it
 test("J7 (Rev90 F1): a claim stored ADMITTED but past its reviewByAt is exposed with its raw status untouched AND a distinct, current effectiveStatus - a downstream reader is never left to mistake the stale raw status for current", () => {
   const admitted = admitPartnerCapabilityClaim({
     claim: unverifiedClaim("claim-6", "org-6"),
+    authority: partnerClaimAuthority,
     admittingAuthorityId: "authority-1",
     evidenceRef: "evidence:portfolio-review-4",
     admittedAt: "2026-01-01T00:00:00.000Z",
@@ -252,6 +268,7 @@ test("J8 (Rev90 F1): partners.items and partners.statusTally always agree - ever
   const unverified = unverifiedClaim("claim-7", "org-7");
   const admittedCurrent = admitPartnerCapabilityClaim({
     claim: unverifiedClaim("claim-8", "org-8"),
+    authority: partnerClaimAuthority,
     admittingAuthorityId: "authority-1",
     evidenceRef: "evidence:portfolio-review-5",
     admittedAt: "2026-01-01T00:00:00.000Z",
@@ -259,6 +276,7 @@ test("J8 (Rev90 F1): partners.items and partners.statusTally always agree - ever
   });
   const admittedExpired = admitPartnerCapabilityClaim({
     claim: unverifiedClaim("claim-9", "org-9"),
+    authority: partnerClaimAuthority,
     admittingAuthorityId: "authority-1",
     evidenceRef: "evidence:portfolio-review-6",
     admittedAt: "2026-01-01T00:00:00.000Z",
