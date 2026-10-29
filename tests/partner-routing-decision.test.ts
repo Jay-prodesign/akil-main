@@ -18,8 +18,17 @@ import {
 } from "../src/domain/partner-capability-admission.js";
 import { createTenantScope } from "../src/domain/tenant-scope.js";
 import { createProjectOwnershipRef } from "../src/domain/project-ownership.js";
+import { createAuthorityContext } from "../src/domain/authority.js";
 
 const tenantScope = createTenantScope("tenant-1");
+
+// Rev62/PR #33 "full-system authority ingress" hardening: admit/revoke now
+// require a real, tenant-matched, protected-action-authorized AuthorityContext.
+const authority = createAuthorityContext({
+  tenantScope,
+  permissions: ["WRITE"],
+  canPerformProtectedActions: true,
+});
 const targetOwnership = createProjectOwnershipRef({
   tenantId: "tenant-1",
   customerId: "customer-1",
@@ -49,6 +58,7 @@ function makeAdmittedClaim(input: {
   });
   return admitPartnerCapabilityClaim({
     claim,
+    authority,
     admittingAuthorityId: input.admittingAuthorityId ?? "authority-ops-1",
     evidenceRef: "evidence:x",
     admittedAt: input.admittedAt ?? "2026-01-01T00:00:00.000Z",
@@ -179,7 +189,7 @@ test("P5: rejects a candidate whose claim is REVOKED", () => {
   const partner = makePartner("partner-5");
   const membership = makeMembership("membership-5", partner);
   const admitted = makeAdmittedClaim({ claimId: "claim-5", partnerOrganization: partner, capabilityRef: "cap:seo-audit" });
-  const revoked = revokePartnerCapabilityClaim({ claim: admitted, revokedAt: "2026-03-01T00:00:00.000Z" });
+  const revoked = revokePartnerCapabilityClaim({ claim: admitted, authority, revokedAt: "2026-03-01T00:00:00.000Z" });
   const decision = resolvePartnerRoute({
     requiredCapabilityRef: "cap:seo-audit",
     targetOwnership,

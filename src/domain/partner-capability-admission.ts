@@ -1,4 +1,5 @@
 import type { PartnerOrganization } from "./partner-organization.js";
+import { requireSameTenant, requirePermission, requireProtectedActionAuthorization, type AuthorityContext } from "./authority.js";
 
 export class InvalidPartnerCapabilityClaimError extends Error {
   constructor(reason: string) {
@@ -52,6 +53,7 @@ export type PartnerCapabilityClaimStatus = "UNVERIFIED" | "ADMITTED" | "EXPIRED"
 export interface PartnerCapabilityClaim {
   readonly partnerCapabilityClaimId: PartnerCapabilityClaimId;
   readonly partnerOrganizationId: PartnerOrganization["partnerOrganizationId"];
+  readonly tenantId: PartnerOrganization["tenantId"];
   readonly capabilityRef: string;
   readonly status: PartnerCapabilityClaimStatus;
   readonly evidenceRef?: string;
@@ -96,6 +98,7 @@ export function createPartnerCapabilityClaim(input: {
   return {
     partnerCapabilityClaimId: partnerCapabilityClaimId as PartnerCapabilityClaimId,
     partnerOrganizationId: input.partnerOrganization.partnerOrganizationId,
+    tenantId: input.partnerOrganization.tenantId,
     capabilityRef,
     status: "UNVERIFIED",
   };
@@ -120,14 +123,48 @@ export function createPartnerCapabilityClaim(input: {
  * fail-closed rejection: an `admittingAuthorityId` equal to the claim's own
  * `partnerOrganizationId` is refused outright, independent of whatever
  * evidence/dates accompany it.
+ *
+ * Rev62 "full-system authority ingress" hardening, Rev74 F2 ordering
+ * correction: `admittingAuthorityId` alone remains a caller-asserted string
+ * - nothing previously required the *caller invoking this function* to hold
+ * any real authority at all, so an unauthenticated/unauthorized caller could
+ * still perform an admission by simply supplying a plausible-looking
+ * distinct string. `authority` (an `AuthorityContext`, `authority.ts`) is
+ * now required and checked fail-closed, in order, BEFORE any business-state
+ * check (including the claim-status check below): (1) `authority.tenantId`
+ * must match the claim's own `tenantId` (`requireSameTenant`, structural,
+ * checked first per that module's own discipline); (2)
+ * `authority.canPerformProtectedActions` must be true (admission is a
+ * protected action, same classification as any other irreversible-state
+ * transition in this corridor); (3) `authority` must hold `WRITE`
+ * permission. Rev74 moved this gate ahead of the claim-status check
+ * specifically so that an unauthorized/cross-tenant caller cannot learn the
+ * claim's current status (e.g. that it is already `ADMITTED`/`REVOKED`) by
+ * observing which error is thrown - business-state disclosure is now
+ * strictly gated behind proven caller authority.
+ *
+ * Rev74 F1 claim-boundary correction: this closes the "any caller can
+ * admit" gap - it does NOT prove `admittingAuthorityId` itself corresponds
+ * to an authenticated identity. `AuthorityContext`'s own documented
+ * boundary is that it "does not resolve who is calling." This module's
+ * authority-ingress hardening is therefore PARTIAL HARDENING only: binding
+ * a trusted, authenticated authority/ingress contract to the specific
+ * asserted `admittingAuthorityId` string remains an explicit, unclosed
+ * external/integration dependency (real session/identity infrastructure
+ * this repository does not have anywhere), not a claim of final V5
+ * non-self-certification closure.
  */
 export function admitPartnerCapabilityClaim(input: {
   claim: PartnerCapabilityClaim;
+  authority: AuthorityContext;
   admittingAuthorityId: unknown;
   evidenceRef: unknown;
   admittedAt: unknown;
   reviewByAt: unknown;
 }): PartnerCapabilityClaim {
+  requireSameTenant(input.authority, input.claim.tenantId);
+  requireProtectedActionAuthorization(input.authority, "admitPartnerCapabilityClaim");
+  requirePermission(input.authority, "WRITE");
   if (input.claim.status !== "UNVERIFIED") {
     throw new InvalidPartnerCapabilityClaimError(
       `only an UNVERIFIED claim can be admitted (current status: ${input.claim.status})`,
@@ -167,19 +204,34 @@ export function admitPartnerCapabilityClaim(input: {
  * claim is rejected, so a caller cannot manufacture a `REVOKED` record for
  * a claim that was never actually admitted.
  *
- * Rev62 non-blocking hardening observation: `revokedAt` previously validated
- * only as a non-empty string, with no timestamp/order check relative to
- * admission - a caller could pass a non-timestamp value, or a `revokedAt`
- * that predates the claim's own `admittedAt` (revoking a claim before it was
- * ever admitted). Both are now fail-closed: `revokedAt` must parse as a
- * valid timestamp, and it must not be strictly before `admittedAt` (a
- * claim's own admission timestamp - always present once `ADMITTED`, per
- * `admitPartnerCapabilityClaim`).
+ * Rev62 "full-system authority ingress" hardening, Rev74 F2 ordering
+ * correction: same reasoning and same three fail-closed checks as
+ * `admitPartnerCapabilityClaim` above, checked BEFORE the claim-status
+ * check below - revoking access is at least as sensitive as granting it,
+ * previously no caller authority was checked at all, and (per Rev74) an
+ * unauthorized/cross-tenant caller must not be able to learn the claim's
+ * current status by observing which error is thrown. See
+ * `admitPartnerCapabilityClaim`'s doc comment above for the full Rev74 F1/F2
+ * reasoning (PARTIAL HARDENING only; final trusted-authority-ingress
+ * closure remains an explicit external/integration dependency).
+ *
+ * Rev62 non-blocking hardening observation (PR #31): `revokedAt` previously
+ * validated only as a non-empty string, with no timestamp/order check
+ * relative to admission - a caller could pass a non-timestamp value, or a
+ * `revokedAt` that predates the claim's own `admittedAt` (revoking a claim
+ * before it was ever admitted). Both are now fail-closed: `revokedAt` must
+ * parse as a valid timestamp, and it must not be strictly before
+ * `admittedAt` (a claim's own admission timestamp - always present once
+ * `ADMITTED`, per `admitPartnerCapabilityClaim`).
  */
 export function revokePartnerCapabilityClaim(input: {
   claim: PartnerCapabilityClaim;
+  authority: AuthorityContext;
   revokedAt: unknown;
 }): PartnerCapabilityClaim {
+  requireSameTenant(input.authority, input.claim.tenantId);
+  requireProtectedActionAuthorization(input.authority, "revokePartnerCapabilityClaim");
+  requirePermission(input.authority, "WRITE");
   if (input.claim.status !== "ADMITTED") {
     throw new InvalidPartnerCapabilityClaimError(
       `only an ADMITTED claim can be revoked (current status: ${input.claim.status})`,
