@@ -58,3 +58,21 @@ Test coverage (`tests/website-build-dark-execution.test.ts`, 4 tests): the full 
 Evidence: clean rebuild, **3601/3601 passing** (3597 baseline + 4 new, one confirmed pre-existing flake re-run clean), zero new dependency.
 
 Still not done, next checkpoints: the dark/test HTTP route wrapper around this orchestration (so it is reachable at all) and an actual customer-facing "submit a brief" surface - this checkpoint proves the orchestration function itself, not yet its HTTP exposure.
+
+## Checkpoint 3 — the dark/test HTTP route, reachable at all
+
+`src/web/website-build-dark-route.ts` (`createWebsiteBuildDarkRequestHandler`) is the thin HTTP surface this initiative was still missing: a transport-agnostic handler (`IncomingRequestLike` -> `OutgoingResponseLike`, the same shapes `request-handler.ts` already established - this module never imports `node:http`) over two routes, `POST /dark/website-build/execute` and `POST /dark/website-build/approve`. It adds no new domain/application logic - every call still goes straight through checkpoint 2's `runWebsiteBuildDarkExecution`/`approveWebsiteBuildDarkDelivery`, unmodified.
+
+`requirementId` selects among the fixed, already-admitted `WEBSITE_BUILD_v1` reference jobs (`website-build-v1-recipe-binding.ts`); the customer-supplied `briefText` becomes the AI prompt's own input content - this still does not dynamically compile a blueprint/plan per request, matching checkpoint 2's own DEL-003 Reference Proof reasoning. A single fixed, full-access `darkAuthority()` stands in for session/customer authentication - there is none here, deliberately, matching `internal-os-review-fixtures.ts`'s own "review fixtures only reachable from the dev entrypoint" discipline.
+
+**DELIBERATELY DARK, NEVER PRODUCTION.** `tests/website-build-dark-route-boundary.test.ts` proves `src/web/http-server.ts` and `src/runtime/node-server-entrypoint.ts` never import this module, mirroring the existing `OS-V0-08` boundary-scan convention for `internal-os-review-fixtures.ts`.
+
+The one genuinely new piece of state: an in-process `Map<jobId, OutcomeJob>` holding a job once it reaches `VERIFIED`, awaiting the separate approval call. This is intentionally NOT durable - a real "pending customer review" durable primitive is its own, separately-scoped future checkpoint; losing it on restart is an accepted, disclosed limitation of a single-process test harness, not a silent gap.
+
+Test coverage:
+- `tests/website-build-dark-route.test.ts` (6 tests): the full execute -> approve round trip over HTTP-shaped requests reaching CLOSED; 400 for a malformed body / missing `requirementId` / missing or blank `briefText`; 404 for an unknown `requirementId`; 502 when the connector response carries no extractable text (and nothing is left stored for approval); 400 for a malformed approve body / missing `jobId` / missing `approverRef`, 404 for an unknown `jobId`; 404 for an unmatched path/method and for a second approve on an already-closed job.
+- `tests/website-build-dark-route-boundary.test.ts` (4 tests): `http-server.ts` and `node-server-entrypoint.ts` never import this module; the module itself never imports `node:http` and only imports the shared transport-agnostic types from `request-handler.ts`; its exported surface is exactly the three expected names.
+
+Evidence: clean rebuild (`rm -rf dist && npx tsc -p tsconfig.json`, exit 0), **3612/3612 passing** (3602 baseline + 10 new), zero new dependency.
+
+Still not done: an actual dev-main bootstrap script wiring a real `ANTHROPIC_API_KEY` end to end over a real socket (D3 - a real credential - remains the one genuinely Founder-gated decision for that). The full order -> admission -> real-shaped execution -> AI output -> review -> delivery loop is now provably complete and HTTP-reachable in the dark/test environment with a mock transport; swapping the mock for `HttpConnectorTransport` plus a real `EnvSecretResolver`-backed `ANTHROPIC_API_KEY` is the only remaining step to make it genuinely live, and that step is exactly D3.
