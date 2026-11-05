@@ -151,10 +151,19 @@ export class HttpConnectorTransport implements ConnectorTransport {
 /**
  * Anthropic Messages API's own documented response shape: the generated
  * text lives at `content[0].text` when `content[0].type === "text"`. This
- * extractor never assumes - it fails closed with `undefined` (never throws,
- * so a caller decides how to treat "no extractable text") on any shape
+ * extractor never assumes - it fails closed with `undefined` (so a caller
+ * decides how to treat "no extractable text") on any JSON-value shape
  * deviation, since the raw `data` is untrusted response material from an
  * external provider.
+ *
+ * Round-2 independent review's own adversarial check: this never throws for
+ * any value that is actually reachable through this module's own code path
+ * (`JSON.parse`'s output in `execute()` above), since a JSON-parsed value
+ * can never contain a throwing getter, a `Proxy`, a function, or a symbol.
+ * It can be made to throw only by handing it a hand-built adversarial JS
+ * object (a throwing property getter, a `Proxy` whose `get` trap throws)
+ * that no JSON-parsed response could ever produce - not a guarantee against
+ * arbitrary caller-constructed objects outside that real input domain.
  */
 export function extractAnthropicMessageText(data: unknown): string | undefined {
   if (typeof data !== "object" || data === null) {
