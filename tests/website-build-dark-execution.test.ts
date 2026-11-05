@@ -13,7 +13,13 @@ import {
 } from "../src/domain/integration-connector-catalog.js";
 import { createConnectionRequirement, createSecretRef } from "../src/domain/connection-authority.js";
 import { resolvePrebuiltConnectorDefinition, bindPrebuiltDefinition } from "../src/domain/prebuilt-connector-definitions.js";
-import type { ConnectorTransport, ConnectorTransportRequest, SecretResolver, CurrentConnectorConnectionReader } from "../src/domain/connector-execution.js";
+import {
+  ConnectorExecutionNotAuthorizedError,
+  type ConnectorTransport,
+  type ConnectorTransportRequest,
+  type SecretResolver,
+  type CurrentConnectorConnectionReader,
+} from "../src/domain/connector-execution.js";
 import { FileDurableWorkArtifactStore } from "../src/domain/durable-work-artifact-store.js";
 import {
   runWebsiteBuildDarkExecution,
@@ -52,7 +58,7 @@ function findJob(jobId: string): OutcomeJob {
   return job as OutcomeJob;
 }
 
-function anthropicInstance(secretRefId = "ANTHROPIC_API_KEY_TEST"): ConnectorConnectionInstance {
+function unverifiedAnthropicInstance(secretRefId: string): ConnectorConnectionInstance {
   const descriptor = createConnectorDescriptor({
     connectorKind: "ANTHROPIC",
     displayName: "Anthropic",
@@ -81,8 +87,11 @@ function anthropicInstance(secretRefId = "ANTHROPIC_API_KEY_TEST"): ConnectorCon
     authMode: "API_KEY",
     secretRef: createSecretRef({ secretRefId }),
   });
-  const unverified = transitionConnectorConnection(requested, "CONNECTED_UNVERIFIED");
-  return verifyConnectorConnection(unverified, "evidence:handshake");
+  return transitionConnectorConnection(requested, "CONNECTED_UNVERIFIED");
+}
+
+function anthropicInstance(secretRefId = "ANTHROPIC_API_KEY_TEST"): ConnectorConnectionInstance {
+  return verifyConnectorConnection(unverifiedAnthropicInstance(secretRefId), "evidence:handshake");
 }
 
 function currentStoreFor(instance: ConnectorConnectionInstance): CurrentConnectorConnectionReader {
@@ -244,6 +253,43 @@ test("runWebsiteBuildDarkExecution: an authority for a different tenant fails cl
       }),
     );
     assert.equal(transport.seenRequests.length, 0, "no connector call should be made when authority fails tenant check");
+  });
+});
+
+test("runWebsiteBuildDarkExecution: a connection that is not currently VERIFIED fails closed before any transport call is made", () => {
+  withArtifactStore((workArtifactStore) => {
+    const spec = findSpec("seo-runtime-qa");
+    const draftJob = findJob(spec.specId as string);
+
+    const unverifiedInstance = unverifiedAnthropicInstance("ANTHROPIC_API_KEY_TEST_UNVERIFIED");
+    const definition = resolvePrebuiltConnectorDefinition("ANTHROPIC");
+    bindPrebuiltDefinition({ instance: unverifiedInstance, definition });
+    const transport = new RecordingMockTransport({ outcome: "SUCCESS", data: { content: [{ type: "text", text: "x" }] } });
+
+    assert.throws(
+      () =>
+        runWebsiteBuildDarkExecution({
+          authority: authority(),
+          draftJob,
+          spec,
+          admission: WEBSITE_BUILD_V1_RECIPE_ADMISSION,
+          briefText: "brief",
+          connectorInstance: unverifiedInstance,
+          connectorDefinition: definition,
+          requestingOwnership: WEBSITE_BUILD_V1_RECIPE_BINDING_OWNERSHIP,
+          connectionStore: currentStoreFor(unverifiedInstance),
+          secretResolver: new FixedSecretResolver("sk-test"),
+          transport,
+          workArtifactStore,
+          artifactId: "artifact-dark-exec-6",
+          evidenceId: "evidence-dark-exec-6",
+          verificationId: "verification-dark-exec-6",
+          clock: () => "2026-11-05T00:00:00.000Z",
+        }),
+      ConnectorExecutionNotAuthorizedError,
+    );
+    assert.equal(transport.seenRequests.length, 0, "no transport call should be made when the connection is not VERIFIED");
+    assert.deepEqual(workArtifactStore.listByTenant(coldStart.tenantScope.tenantId), []);
   });
 });
 
